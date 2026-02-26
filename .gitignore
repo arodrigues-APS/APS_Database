@@ -1,5 +1,24 @@
-*.DS_Store
-*._
-*_
-*.DS_Store*
+# macOS
+.DS_Store
+._*
+
+# Lab data files
+*.csv
+*.xls
+*.xlsx
 data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+py3/
+
+# Secrets / environment files
+.env
+
+# Superset Docker runtime (not your config)
+superset/docker/

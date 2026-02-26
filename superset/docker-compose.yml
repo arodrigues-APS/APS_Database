@@ -1,0 +1,67 @@
+x-superset-image: &superset-image apachesuperset.docker.scarf.sh/apache/superset:latest
+x-superset-user: &superset-user root
+x-superset-depends-on: &superset-depends-on
+  - db
+  - redis
+x-superset-volumes: &superset-volumes
+  - ./docker:/app/docker
+  - ./superset_config.py:/app/pythonpath/superset_config.py
+  - superset_home:/app/superset_home
+
+services:
+  redis:
+    image: redis:7
+    container_name: superset_cache
+    restart: unless-stopped
+
+  db:
+    env_file: .env
+    image: postgres:15
+    container_name: superset_db
+    restart: unless-stopped
+    volumes:
+      - superset_db_home:/var/lib/postgresql/data 
+
+  superset:
+    env_file: .env
+    image: *superset-image
+    container_name: superset_app
+    command: ["bash", "/app/docker/docker-bootstrap.sh", "app"]
+    user: *superset-user
+    ports:
+      - "8088:8088"
+    volumes: *superset-volumes
+    depends_on: *superset-depends-on
+    restart: unless-stopped
+
+  superset-worker:
+    env_file: .env
+    image: *superset-image
+    container_name: superset_worker
+    command: ["bash", "/app/docker/docker-bootstrap.sh", "worker"]
+    user: *superset-user
+    restart: unless-stopped
+    depends_on: *superset-depends-on
+    volumes: *superset-volumes
+    healthcheck:
+      disable: true
+
+  superset-worker-beat:
+    env_file: .env
+    image: *superset-image
+    container_name: superset_worker_beat
+    command: ["bash", "/app/docker/docker-bootstrap.sh", "beat"]
+    user: *superset-user
+    restart: unless-stopped
+    depends_on: *superset-depends-on
+    volumes: *superset-volumes
+    healthcheck:
+      disable: true
+
+volumes:
+  superset_home:
+    external: true
+    name: superset_superset_home
+  superset_db_home:
+    external: true
+    name: superset_db_home
