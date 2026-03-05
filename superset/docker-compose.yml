@@ -58,6 +58,21 @@ services:
     healthcheck:
       disable: true
 
+  postgresqlv2:
+    image: postgres:15
+    container_name: postgresqlv2
+    restart: unless-stopped
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "APSLab"
+      POSTGRES_DB: mosfets
+    shm_size: 128G
+    volumes:
+      - postgresqlv2_data:/var/lib/postgresql/data
+      - ./docker/init-scripts:/docker-entrypoint-initdb.d
+
 volumes:
   superset_home:
     external: true
@@ -65,3 +80,6 @@ volumes:
   superset_db_home:
     external: true
     name: superset_db_home
+  postgresqlv2_data:
+    external: true
+    name: superset_postgresqlv2_data
