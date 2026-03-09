@@ -3,11 +3,11 @@ Description=uWSGI instance to serve the APS database
 After=network.target
 
 [Service]
-User=apsadmin
+User=arodrigues
 Group=www-data
-WorkingDirectory=/home/apsadmin/APS_Database
-Environment="PATH=/home/apsadmin/py3/bin/activate"
-ExecStart=/home/apsadmin/py3/bin/uwsgi --ini server.ini
+WorkingDirectory=/home/arodrigues/APS_Database/APS_Database
+Environment="PATH=/opt/aps_database/venv/bin"
+ExecStart=/opt/aps_database/venv/bin/uwsgi --ini server.ini
 
 [Install]
 WantedBy=multi-user.target
