@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>APS Database – Device Library</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-Zenh87qX5JnK2Jl0vWa8Ck2rdkQ2Bzep5IDxbcnCeuOxjzrPF/et3URy9Bv1WTRi" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-OERcA2EqjJCMA+/3y+gxIOqMEjwtxJY7qPCqsdltbNJuaOe923+mo//f6V8Qbsw3" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <nav class="navbar navbar-expand-lg bg-light">
+    <div class="container-fluid">
+      <nav class="navbar bg-light">
+        <div class="container-fluid">
+          <a class="navbar-brand" href="/">
+            <img src="/static/APS_Logo.svg" alt="APS Logo" height="50">
+          </a>
+        </div>
+      </nav>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <li class="nav-item"><a class="nav-link" href="/">Search</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/devices">Device Library</a></li>
+          <li class="nav-item"><a class="nav-link" href="/readme">Readme</a></li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container mt-4">
+
+    <h4>Device Library</h4>
+    <p class="text-muted">
+      Devices listed here are used by the
+      <a href="https://data.aps.ee.ethz.ch/superset/dashboard/baselines-device-library/" target="_blank">Baselines Device Library</a>
+      Superset dashboard. The <strong>Part Number</strong> is matched (case-insensitive) against
+      measurement file paths during data ingestion.
+    </p>
+
+    <!-- Flash messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat, msg in messages %}
+          <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
+            {{ msg }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% if error %}
+      <div class="alert alert-danger">{{ error }}</div>
+    {% endif %}
+
+    <!-- Add device form -->
+    <div class="card mb-4">
+      <div class="card-header">Add a New Device</div>
+      <div class="card-body">
+        <form method="POST" action="/devices">
+          {{ form.csrf_token }}
+          <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+              <label class="form-label">Part Number <span class="text-danger">*</span></label>
+              {{ form.part_number(class="form-control form-control-sm", placeholder="e.g. CPM2-1200-0080B") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Category</label>
+              {{ form.device_category(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Manufacturer</label>
+              {{ form.manufacturer(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Voltage</label>
+              {{ form.voltage_rating(class="form-control form-control-sm", placeholder="1200 V") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">RDS(on) mΩ</label>
+              {{ form.rdson_mohm(class="form-control form-control-sm", placeholder="80") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Current (A)</label>
+              {{ form.current_rating_a(class="form-control form-control-sm", placeholder="33") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Package</label>
+              {{ form.package_type(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Notes</label>
+              {{ form.notes(class="form-control form-control-sm", placeholder="optional") }}
+            </div>
+            <div class="col-md-1">
+              {{ form.submit(class="btn btn-primary btn-sm w-100") }}
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Device table -->
+    <table class="table table-sm table-striped table-hover">
+      <thead class="table-dark">
+        <tr>
+          <th>Part Number</th>
+          <th>Category</th>
+          <th>Manufacturer</th>
+          <th>Voltage</th>
+          <th>RDS(on) mΩ</th>
+          <th>Current (A)</th>
+          <th>Package</th>
+          <th>Notes</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in devices %}
+        <tr>
+          <td><strong>{{ d.part_number }}</strong></td>
+          <td>{{ d.device_category or '' }}</td>
+          <td>{{ d.manufacturer or '' }}</td>
+          <td>{{ d.voltage_rating or '' }}</td>
+          <td>{{ d.rdson_mohm or '' }}</td>
+          <td>{{ d.current_rating_a or '' }}</td>
+          <td>{{ d.package_type or '' }}</td>
+          <td>{{ d.notes or '' }}</td>
+          <td>
+            <form method="POST" action="/devices/delete/{{ d.id }}"
+                  onsubmit="return confirm('Remove {{ d.part_number }}?');"
+                  style="display:inline">
+              {{ form.csrf_token }}
+              <button type="submit" class="btn btn-outline-danger btn-sm">✕</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-muted text-center">No devices registered yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="text-muted"><small>{{ devices|length }} device(s) registered.</small></p>
+
+  </div>
+
+</body>
+</html>

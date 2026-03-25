@@ -51,7 +51,7 @@ from luaparser import astnodes
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
-PRISTINE_ROOT = "/home/apsadmin/APS_Database/Pristine measurements"
+PRISTINE_ROOT = "/home/arodrigues/APS_Database/Pristine measurements"
 DB_HOST = "localhost"
 DB_PORT = 5435
 DB_NAME = "mosfets"
@@ -60,6 +60,98 @@ DB_PASSWORD = "APSLab"
 
 # Set to True to drop existing baseline tables and rebuild from scratch
 REBUILD = False
+
+
+# ── Device Library (loaded from SQL at runtime) ─────────────────────────────
+# The device_library table is managed through Superset's SQL Lab interface.
+# Admins add/edit/remove rows there; the ingestion script reads the table
+# each time it runs.  Each row has a part_number (used as the search pattern
+# in filenames/paths) plus metadata columns.
+
+def load_device_library(cur):
+    """
+    Load the device library from the device_library SQL table.
+    Returns a list of dicts sorted by part_number length descending
+    (so longer/more-specific part numbers match first).
+    """
+    cur.execute("""
+        SELECT part_number, device_category, manufacturer,
+               voltage_rating, rdson_mohm, current_rating_a, package_type
+        FROM device_library
+        ORDER BY LENGTH(part_number) DESC
+    """)
+    cols = [desc[0] for desc in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def match_device_type(filepath, device_library):
+    """
+    Try to identify the commercial device type from the file path.
+
+    Three-pass matching strategy:
+      1. Substring match: search for each part_number (case-insensitive) in
+         the full file path.  Library is pre-sorted longest-first so more
+         specific part numbers win.
+      2. Prefix match: if the path contains a part_number base (e.g.
+         "C2M0080120" from "C2M0080120D") followed by an underscore, match
+         it.  Handles filenames like "C2M0080120_DUT01_IdVg.csv".
+      3. Experiment-name heuristic: when the experiment folder encodes the
+         manufacturer and Rds(on) (e.g. "Rohm_30mOhm_preIV_…"), look up the
+         unique device in the library that matches that manufacturer + Rds(on).
+         For the mixed Cree_80mOhm experiment, device_id prefixes "I" and
+         "ROHM"/"INFINEON" override the default Wolfspeed assignment.
+
+    Returns (part_number, manufacturer) on match, or (None, None).
+    """
+    import re
+    path_upper = filepath.upper()
+    filename_upper = os.path.basename(filepath).upper()
+
+    # Pass 1 – exact part-number substring
+    for entry in device_library:
+        if entry["part_number"].upper() in path_upper:
+            return entry["part_number"], entry["manufacturer"]
+
+    # Pass 2 – part-number prefix match (handles trailing D or other suffixes)
+    for entry in device_library:
+        pn = entry["part_number"].upper()
+        if len(pn) > 4 and pn[-1].isalpha():
+            prefix = pn[:-1]
+            if re.search(prefix + r'[_\b]', path_upper):
+                return entry["part_number"], entry["manufacturer"]
+
+    # Pass 3 – experiment-name heuristic.
+    # Maps experiment folder patterns directly to (part_number, manufacturer)
+    # to avoid ambiguity when multiple library entries share the same rdson.
+    # The mixed Cree_80mOhm experiment overrides the default for Infineon/Rohm
+    # files based on filename prefix.
+
+    def _lookup_part(part_number):
+        for entry in device_library:
+            if entry["part_number"] == part_number:
+                return entry["part_number"], entry["manufacturer"]
+        return None, None
+
+    _EXPERIMENT_RULES = [
+        ("ROHM_30MOHM",     "SCT3030AL"),
+        ("INFINEON_90MOHM", "IMW120R090M1H"),
+        ("CREE_25MOHM",     "C2M0025120D"),
+        ("CREE_80MOHM",     "C2M0080120D"),
+    ]
+
+    for pattern, default_part in _EXPERIMENT_RULES:
+        if pattern not in path_upper:
+            continue
+        # For mixed experiments (Cree_80mOhm has Wolfspeed + Infineon + Rohm),
+        # check device_id prefix in the filename to override the default.
+        if pattern == "CREE_80MOHM":
+            if re.match(r'I\d', filename_upper) or "INFINEON" in filename_upper:
+                return _lookup_part("IMW120R090M1H")
+            if "ROHM" in filename_upper:
+                return _lookup_part("SCT3030AL")
+        return _lookup_part(default_part)
+
+    return None, None
 
 
 # ── TSP Parser (using luaparser) ──────────────────────────────────────────────
@@ -234,6 +326,7 @@ def parse_tsp_file(filepath):
 
     # Measurement channels from Measseq
     measseq = assignments.get('Measseq', {})
+    drain_channels = set()
     if isinstance(measseq, list):
         channels = []
         for entry in measseq:
@@ -242,7 +335,28 @@ def parse_tsp_file(filepath):
                 for item in items:
                     if isinstance(item, str) and not item.isdigit():
                         channels.append(item)
+                # Identify drain channel numbers from Measseq entries
+                # that contain 'I_Drain' or 'V_Drain' measurement names
+                names = [x for x in items if isinstance(x, str)]
+                if any('drain' in n.lower() for n in names):
+                    ch = items[0] if items else None
+                    if isinstance(ch, (int, float)):
+                        drain_channels.add(int(ch))
         result['meas_channels'] = ','.join(channels)
+
+    # Drain-specific bias: scan ALL bias entries for one matching a drain
+    # channel.  This handles multi-bias TSPs (e.g. Hitachi combine mode)
+    # where the first bias entry may be for a non-drain channel.
+    bias = assignments.get('Bias', {})
+    if isinstance(bias, list) and drain_channels:
+        for b_entry in bias:
+            pos = _extract_positional(b_entry) if not isinstance(b_entry, list) else b_entry
+            if isinstance(pos, list) and len(pos) >= 2:
+                b_ch = pos[0]
+                b_val = pos[1]
+                if isinstance(b_ch, (int, float)) and int(b_ch) in drain_channels:
+                    result['drain_bias_value'] = b_val
+                    break
 
     return result
 
@@ -434,6 +548,115 @@ def categorize_measurement(measurement_type):
     return 'Other'
 
 
+# ── Irradiation Detection (post-ingestion, data-based) ──────────────────────
+
+FLAG_IRRADIATED_SQL = """
+-- Purely data-driven detection of likely irradiated measurements.
+-- Works in three passes:
+--   1. Extract approximate Vth per file from dedicated Vth sweeps only
+--      (NOT IdVg — those have high drain bias that causes false positives)
+--   2. Compare each file's Vth against its device_type population median
+--      (computed from BASE files only, excluding _append re-measurements);
+--      flag outliers whose Vth falls below (median - 3 × IQR) or below 0 V
+--   3. Smart sibling propagation:
+--      - If a BASE Vth file is flagged → the device was irradiated before
+--        any measurement → flag ALL files for that (device_id, experiment)
+--      - If only APPEND Vth files are flagged → only post-irradiation
+--        re-measurements are affected → flag only _append files
+
+-- Reset all flags first so re-runs are idempotent
+UPDATE baselines_metadata SET is_likely_irradiated = FALSE;
+
+WITH
+-- Step 1: per-file Vth extraction from dedicated Vth sweeps only
+-- Vth ≈ lowest Vg where |Id| first exceeds 1 mA
+-- IMPORTANT: restricted to measurement_category = 'Vth' because IdVg files
+-- at high drain bias (Vd=2-4V) show |Id| > 1mA at Vg=0 even on pristine
+-- devices, which would cause false positives.
+per_file_vth AS (
+    SELECT md.id AS metadata_id,
+           md.device_type,
+           md.device_id,
+           md.experiment,
+           md.measurement_type,
+           MIN(m.v_gate) AS vth_approx,
+           (md.measurement_type !~ '_append') AS is_base
+    FROM baselines_measurements m
+    JOIN baselines_metadata md ON m.metadata_id = md.id
+    WHERE md.measurement_category = 'Vth'
+      AND m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+      AND m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
+      AND ABS(m.i_drain) > 0.001   -- 1 mA threshold
+    GROUP BY md.id, md.device_type, md.device_id, md.experiment,
+             md.measurement_type
+),
+
+-- Step 2a: population statistics from BASE files only
+-- Using only base (pre-irradiation) files ensures the reference distribution
+-- is not contaminated by post-irradiation shifts.
+-- Percentiles are robust against outliers.
+pop_stats AS (
+    SELECT device_type,
+           PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY vth_approx) AS median_vth,
+           PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY vth_approx) AS q1_vth,
+           PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY vth_approx) AS q3_vth
+    FROM per_file_vth
+    WHERE device_type IS NOT NULL AND is_base
+    GROUP BY device_type
+),
+
+-- Step 2b: flag Vth files whose extracted Vth is anomalous
+-- Criteria (must satisfy ANY):
+--   a) Vth < 0 V  (device is normally-on → heavy irradiation damage)
+--   b) Vth < median - 3 × IQR  (statistical outlier on the low side)
+flagged_vth_files AS (
+    SELECT f.metadata_id, f.device_id, f.experiment, f.is_base
+    FROM per_file_vth f
+    LEFT JOIN pop_stats p ON f.device_type = p.device_type
+    WHERE f.vth_approx < 0
+       OR (p.device_type IS NOT NULL
+           AND f.vth_approx < p.median_vth - 3.0 * (p.q3_vth - p.q1_vth))
+),
+
+-- Step 3a: BASE Vth flagged → device was irradiated before any measurement
+-- → flag ALL files for this (device_id, experiment)
+device_fully_irradiated AS (
+    SELECT DISTINCT device_id, experiment
+    FROM flagged_vth_files WHERE is_base
+),
+
+-- Step 3b: only APPEND Vth flagged → only post-irradiation re-measurements
+-- → flag only _append files for this (device_id, experiment)
+device_append_irradiated AS (
+    SELECT DISTINCT device_id, experiment
+    FROM flagged_vth_files
+    WHERE NOT is_base
+      AND (device_id, experiment) NOT IN (
+          SELECT device_id, experiment FROM device_fully_irradiated)
+),
+
+-- Collect all file IDs that should be flagged
+all_flagged AS (
+    -- The directly-flagged Vth files themselves
+    SELECT metadata_id FROM flagged_vth_files
+    UNION
+    -- All files for fully-irradiated devices
+    SELECT md.id FROM baselines_metadata md
+    JOIN device_fully_irradiated d
+      ON md.device_id = d.device_id AND md.experiment = d.experiment
+    UNION
+    -- Only _append files for append-irradiated devices
+    SELECT md.id FROM baselines_metadata md
+    JOIN device_append_irradiated d
+      ON md.device_id = d.device_id AND md.experiment = d.experiment
+    WHERE md.measurement_type ~ '_append'
+)
+
+UPDATE baselines_metadata SET is_likely_irradiated = TRUE
+WHERE id IN (SELECT metadata_id FROM all_flagged);
+"""
+
+
 # ── TSP File Matching ────────────────────────────────────────────────────────
 
 def find_matching_tsp(csv_path):
@@ -601,6 +824,23 @@ def extract_experiment_name(csv_path):
 # ── Database Schema ──────────────────────────────────────────────────────────
 
 CREATE_SCHEMA_SQL = """
+-- ── Device Library table ────────────────────────────────────────────────
+-- Managed by admins via Superset SQL Lab.  Each row is a known commercial
+-- device.  The part_number is used as a case-insensitive substring match
+-- against file paths during ingestion.
+CREATE TABLE IF NOT EXISTS device_library (
+    id SERIAL PRIMARY KEY,
+    part_number  TEXT NOT NULL UNIQUE,
+    device_category TEXT,          -- MOSFET, Diode, etc.
+    manufacturer TEXT,             -- Wolfspeed, Infineon, Rohm, ...
+    voltage_rating TEXT,           -- e.g. '1200 V'
+    rdson_mohm   TEXT,             -- e.g. '80' (mOhm), NULL for diodes
+    current_rating_a TEXT,         -- e.g. '33' (A), NULL for MOSFETs
+    package_type TEXT,             -- bare_die, TO-247, home_made_TO, etc.
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Metadata table: one row per measurement file with TSP run parameters
 CREATE TABLE IF NOT EXISTS baselines_metadata (
     id SERIAL PRIMARY KEY,
@@ -618,6 +858,7 @@ CREATE TABLE IF NOT EXISTS baselines_metadata (
     sweep_points INTEGER,
     bias_value DOUBLE PRECISION,
     bias_channel INTEGER,
+    drain_bias_value DOUBLE PRECISION,
     compliance_ch1 DOUBLE PRECISION,
     compliance_ch2 DOUBLE PRECISION,
     meas_time DOUBLE PRECISION,
@@ -633,9 +874,30 @@ CREATE TABLE IF NOT EXISTS baselines_metadata (
     meas_channels TEXT,
     raw_tsp TEXT,
     file_hash TEXT,
+    device_type TEXT,
+    manufacturer TEXT,
+    is_likely_irradiated BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(file_hash)
 );
+
+-- Add device_type/manufacturer/drain_bias_value to existing tables (idempotent)
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN device_type TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN manufacturer TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN drain_bias_value DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN is_likely_irradiated BOOLEAN NOT NULL DEFAULT FALSE;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 -- Measurements table: all data points
 CREATE TABLE IF NOT EXISTS baselines_measurements (
@@ -664,7 +926,10 @@ CREATE INDEX IF NOT EXISTS idx_baselines_meta_category ON baselines_metadata(mea
 -- Denormalized view for easy Superset querying
 -- NOTE: CASE expressions replace Keithley 9.9E37 overflow sentinel values
 -- with NULL so that Superset range filters/sliders show sensible bounds.
-CREATE OR REPLACE VIEW baselines_view AS
+-- DROP before CREATE so adding new columns never hits the
+-- "cannot change name of view column" error from CREATE OR REPLACE.
+DROP VIEW IF EXISTS baselines_view CASCADE;
+CREATE VIEW baselines_view AS
 SELECT
     m.id AS measurement_id,
     md.experiment,
@@ -694,12 +959,195 @@ SELECT
          THEN m.v_drain ELSE NULL END    AS v_drain,
     CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
          THEN m.i_drain ELSE NULL END    AS i_drain,
+    -- _r columns: rounded to 2 d.p. for use as chart x-axes and range-filter targets.
+    -- They are NULL wherever the raw value was a Keithley overflow sentinel (9.91e+37).
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
     m.rds,
     m.bv,
     m.time_val,
-    m.step_index
+    m.step_index,
+    md.is_likely_irradiated
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id;
+
+-- Device-library view: includes device_type and manufacturer columns
+DROP VIEW IF EXISTS baselines_view_device_library;
+CREATE VIEW baselines_view_device_library AS
+SELECT
+    m.id AS measurement_id,
+    md.experiment,
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_type,
+    md.measurement_category,
+    md.filename,
+    md.sweep_start,
+    md.sweep_stop,
+    md.sweep_points,
+    md.bias_value,
+    md.compliance_ch1,
+    md.compliance_ch2,
+    md.meas_time,
+    md.hold_time,
+    md.plc,
+    md.sample_num,
+    md.step_num,
+    md.step_start,
+    md.step_stop,
+    m.point_index,
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN m.v_gate ELSE NULL END     AS v_gate,
+    CASE WHEN m.i_gate IS NOT NULL AND ABS(m.i_gate) < 1e30
+         THEN m.i_gate ELSE NULL END     AS i_gate,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN m.v_drain ELSE NULL END    AS v_drain,
+    CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
+         THEN m.i_drain ELSE NULL END    AS i_drain,
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN ROUND(m.v_gate::numeric, 1) ELSE NULL END  AS v_gate_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)
+        ELSE NULL
+    END AS v_drain_bin,
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN ROUND(ROUND(m.v_gate::numeric, 1)) ELSE NULL END  AS v_gate_bias,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric)
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(ROUND(m.v_drain::numeric, 1))
+        ELSE NULL
+    END AS v_drain_bias,
+    m.rds,
+    m.bv,
+    m.time_val,
+    m.step_index,
+    md.is_likely_irradiated
+FROM baselines_measurements m
+JOIN baselines_metadata md ON m.metadata_id = md.id;
+
+-- Per-run max |i_drain|, used to detect compliance-limited points.
+-- A point is considered compliance-limited when |i_drain| >= 99% of the
+-- run's overall max.  This catches the flat plateau that appears when the
+-- instrument clamps the current, without requiring TSP compliance metadata.
+CREATE MATERIALIZED VIEW IF NOT EXISTS baselines_run_max_current AS
+SELECT metadata_id,
+       MAX(ABS(i_drain)) AS max_abs_i_drain
+FROM baselines_measurements
+WHERE i_drain IS NOT NULL AND ABS(i_drain) < 1e30
+GROUP BY metadata_id;
+
+-- Per-device view: averaged per device_id at each voltage bin.
+-- A device measured in multiple files (e.g. Vth + Vth_append1) contributes
+-- exactly one value per bin.  Points at >=99% of a run's max |i_drain| are
+-- excluded so compliance-clamped data does not distort the mean.
+--
+-- Used by both baselines_device_averages (for dashboard curve charts) and
+-- CALCULATED_PARAMS_SQL (for per-device parameter extraction).
+CREATE VIEW baselines_per_device AS
+SELECT
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_category,
+    md.is_likely_irradiated,
+    ROUND(m.v_gate::numeric, 1) AS v_gate_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)
+        ELSE NULL
+    END AS v_drain_bin,
+    AVG(m.i_drain)               AS dev_avg_i_drain,
+    AVG(m.i_gate)                AS dev_avg_i_gate,
+    AVG(ABS(m.i_drain))          AS dev_avg_abs_i_drain,
+    AVG(ABS(m.i_gate))           AS dev_avg_abs_i_gate,
+    COUNT(*)                     AS dev_n_points,
+    COUNT(DISTINCT md.id)        AS dev_n_runs
+FROM baselines_measurements m
+JOIN baselines_metadata md ON m.metadata_id = md.id
+LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
+WHERE md.device_type IS NOT NULL
+  AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
+  AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
+  AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
+  AND (m.i_gate IS NULL OR ABS(m.i_gate) < 1e30)
+  AND (m.i_drain IS NULL
+       OR rmc.max_abs_i_drain IS NULL
+       OR ABS(m.i_drain) < 0.99 * rmc.max_abs_i_drain)
+GROUP BY
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_category,
+    md.is_likely_irradiated,
+    ROUND(m.v_gate::numeric, 1),
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)
+        ELSE NULL
+    END;
+
+-- Averaged device performance view: pre-aggregated per voltage bin.
+-- Used by the "Baselines Device Library" dashboard to show mean ± spread
+-- for each device_type / measurement_category, averaged across all runs.
+--
+-- Reads from baselines_per_device (Stage 1) and averages across devices
+-- (Stage 2).  Without this two-stage aggregation, multi-file devices are
+-- over-represented and distort the group mean.
+CREATE VIEW baselines_device_averages AS
+SELECT
+    sub.*,
+    ROUND(sub.v_gate_bin) AS v_gate_bias,
+    ROUND(sub.v_drain_bin) AS v_drain_bias
+FROM (
+    SELECT
+        device_type,
+        manufacturer,
+        measurement_category,
+        is_likely_irradiated,
+        v_gate_bin,
+        v_drain_bin,
+        AVG(dev_avg_i_drain)               AS avg_i_drain,
+        STDDEV(dev_avg_i_drain)            AS std_i_drain,
+        MIN(dev_avg_i_drain)               AS min_i_drain,
+        MAX(dev_avg_i_drain)               AS max_i_drain,
+        AVG(dev_avg_i_drain) + COALESCE(STDDEV(dev_avg_i_drain), 0) AS upper_i_drain,
+        AVG(dev_avg_i_drain) - COALESCE(STDDEV(dev_avg_i_drain), 0) AS lower_i_drain,
+        AVG(dev_avg_i_gate)                AS avg_i_gate,
+        STDDEV(dev_avg_i_gate)             AS std_i_gate,
+        AVG(dev_avg_abs_i_drain)           AS avg_abs_i_drain,
+        AVG(dev_avg_abs_i_gate)            AS avg_abs_i_gate,
+        SUM(dev_n_points)                  AS n_points,
+        COUNT(*)                           AS n_devices,
+        SUM(dev_n_runs)                    AS n_runs
+    FROM baselines_per_device
+    GROUP BY
+        device_type,
+        manufacturer,
+        measurement_category,
+        is_likely_irradiated,
+        v_gate_bin,
+        v_drain_bin
+) sub;
 """
 
 
@@ -726,17 +1174,36 @@ def main():
     # Drop existing baseline tables if rebuilding
     if REBUILD:
         print("Dropping existing baseline tables...")
+        cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
+        cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
+        cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")
         cur.execute("DROP TABLE IF EXISTS baselines_measurements CASCADE")
         cur.execute("DROP TABLE IF EXISTS baselines_metadata CASCADE")
         conn.commit()
         print("  Dropped.")
 
+    # Drop views before (re)creating – views are derived and safe to recreate
+    cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
+    cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
+    cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
+    cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")
+    conn.commit()
+
     # Create schema
     print("Creating schema...")
     cur.execute(CREATE_SCHEMA_SQL)
     conn.commit()
     print("  Schema ready.")
+
+    # Load device library from DB
+    print("\nLoading device library...")
+    device_library = load_device_library(cur)
+    print(f"  {len(device_library)} devices in library.")
+    if not device_library:
+        print("  WARNING: device_library table is empty.")
+        print("  Run  python3 seed_device_library.py  to populate it,")
+        print("  or add devices via Superset SQL Lab.")
 
     # Find all measurement files (CSV + XLS)
     measurement_files = []
@@ -747,6 +1214,19 @@ def main():
                 measurement_files.append(os.path.join(root, f))
 
     print(f"\nFound {len(measurement_files)} measurement files to process.")
+
+    # Sync deletions: remove DB records for files no longer on disk
+    print("\nSyncing deletions...")
+    on_disk_paths = set(measurement_files)
+    cur.execute("SELECT id, csv_path FROM baselines_metadata WHERE csv_path IS NOT NULL")
+    db_rows = cur.fetchall()
+    stale_ids = [row[0] for row in db_rows if row[1] not in on_disk_paths]
+    if stale_ids:
+        cur.execute("DELETE FROM baselines_metadata WHERE id = ANY(%s)", (stale_ids,))
+        conn.commit()
+        print(f"  Removed {len(stale_ids)} stale record(s) (ON DELETE CASCADE cleans measurements).")
+    else:
+        print("  No stale records found.")
 
     # Track statistics
     total_points = 0
@@ -760,6 +1240,7 @@ def main():
         experiment = extract_experiment_name(fpath)
         device_id, measurement_type = classify_measurement(filename)
         measurement_category = categorize_measurement(measurement_type)
+        device_type, manufacturer = match_device_type(fpath, device_library)
 
         # File hash for dedup
         file_hash = compute_file_hash(fpath)
@@ -800,23 +1281,23 @@ def main():
                     filename, csv_path, tsp_path,
                     columns, num_points,
                     sweep_start, sweep_stop, sweep_points,
-                    bias_value, bias_channel,
+                    bias_value, bias_channel, drain_bias_value,
                     compliance_ch1, compliance_ch2,
                     meas_time, hold_time, plc, sample_num,
                     sweep_mode, step_num, step_start, step_stop,
                     delay_time, dc_only, meas_channels, raw_tsp,
-                    file_hash
+                    file_hash, device_type, manufacturer
                 ) VALUES (
                     %s, %s, %s, %s,
                     %s, %s, %s,
                     %s, %s,
                     %s, %s, %s,
+                    %s, %s, %s,
                     %s, %s,
-                    %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s,
-                    %s
+                    %s, %s, %s
                 ) RETURNING id
             """, (
                 experiment, device_id, measurement_type, measurement_category,
@@ -825,6 +1306,7 @@ def main():
                 tsp_params.get('sweep_start'), tsp_params.get('sweep_stop'),
                 tsp_params.get('sweep_points'),
                 tsp_params.get('bias_value'), tsp_params.get('bias_channel'),
+                tsp_params.get('drain_bias_value'),
                 tsp_params.get('compliance_ch1'), tsp_params.get('compliance_ch2'),
                 tsp_params.get('meas_time'), tsp_params.get('hold_time'),
                 tsp_params.get('plc'), tsp_params.get('sample_num'),
@@ -832,7 +1314,7 @@ def main():
                 tsp_params.get('step_start'), tsp_params.get('step_stop'),
                 tsp_params.get('delay_time'), tsp_params.get('dc_only'),
                 tsp_params.get('meas_channels', ''), tsp_params.get('raw_tsp', ''),
-                file_hash
+                file_hash, device_type, manufacturer
             ))
             meta_id = cur.fetchone()[0]
         except Exception as e:
@@ -862,6 +1344,25 @@ def main():
                     VALUES %s
                 """, batch, page_size=5000)
 
+                # Fallback: for IdVg/Vth runs where TSP didn't provide a
+                # drain bias, compute the per-run mean V_drain from the data
+                # so that all points in the run share one v_drain_bin.
+                # Without this, dual-sweep Vth tests (V_drain swept in sync
+                # with V_gate) get fragmented across multiple bias bins.
+                if (measurement_category in ('IdVg', 'Vth')
+                        and tsp_params.get('drain_bias_value') is None):
+                    v_drain_vals = [
+                        r[4] for r in batch   # v_drain is index 4 in batch tuple
+                        if r[4] is not None and abs(r[4]) < 1e30
+                    ]
+                    if v_drain_vals:
+                        mean_vd = sum(v_drain_vals) / len(v_drain_vals)
+                        cur.execute(
+                            "UPDATE baselines_metadata "
+                            "SET drain_bias_value = %s WHERE id = %s",
+                            (mean_vd, meta_id)
+                        )
+
                 total_points += len(batch)
                 files_loaded += 1
 
@@ -889,6 +1390,25 @@ def main():
             conn.commit()
 
     conn.commit()
+
+    # Flag likely-irradiated measurements (data-driven Vth analysis)
+    print("\nFlagging likely-irradiated measurements (Vth analysis)...")
+    cur.execute(FLAG_IRRADIATED_SQL)
+    cur.execute("SELECT COUNT(*) FROM baselines_metadata WHERE is_likely_irradiated")
+    n_flagged = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM baselines_metadata")
+    n_total = cur.fetchone()[0]
+    conn.commit()
+    print(f"  Flagged {n_flagged} of {n_total} records as likely irradiated.")
+    if n_flagged:
+        cur.execute("""
+            SELECT experiment, COUNT(*), COUNT(DISTINCT device_id)
+            FROM baselines_metadata
+            WHERE is_likely_irradiated
+            GROUP BY experiment ORDER BY experiment
+        """)
+        for exp, cnt, ndev in cur.fetchall():
+            print(f"    {exp}: {cnt} files, {ndev} devices")
 
     # Print results
     elapsed = perf_counter() - start_time

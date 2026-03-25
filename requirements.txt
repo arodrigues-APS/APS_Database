@@ -28,3 +28,12 @@ traitlets==5.5.0
 wcwidth==0.2.5
 Werkzeug==2.2.2
 WTForms==3.0.1
+# Data processing & ingestion
+luaparser
+numpy
+openpyxl
+pandas
+psycopg2-binary
+requests
+sqlalchemy
+xlrd

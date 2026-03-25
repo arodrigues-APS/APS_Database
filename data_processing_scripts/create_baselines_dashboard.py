@@ -48,6 +48,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 import uuid
 import requests
@@ -60,23 +61,30 @@ PASSWORD = "admin"
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def get_session():
-    """Authenticate and return a requests session with auth + CSRF headers."""
+    """Authenticate via form-based login and return a requests session."""
     session = requests.Session()
+    # Get login page to extract WTF CSRF token
+    resp = session.get(f"{SUPERSET_URL}/login/")
+    resp.raise_for_status()
+    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', resp.text)
+    if not match:
+        raise RuntimeError("Could not find CSRF token on login page")
+    # Form-based login (establishes Flask-Login session cookie)
     resp = session.post(
-        f"{SUPERSET_URL}/api/v1/security/login",
-        json={"username": USERNAME, "password": PASSWORD, "provider": "db"},
+        f"{SUPERSET_URL}/login/",
+        data={"username": USERNAME, "password": PASSWORD,
+              "csrf_token": match.group(1)},
+        allow_redirects=True,
     )
     resp.raise_for_status()
-    session.headers.update({
-        "Authorization": f"Bearer {resp.json()['access_token']}",
-        "Content-Type": "application/json",
-    })
+    # Get API CSRF token for subsequent mutating requests
     resp = session.get(f"{SUPERSET_URL}/api/v1/security/csrf_token/")
     if resp.ok:
         csrf = resp.json().get("result", "")
         if csrf:
             session.headers["X-CSRFToken"] = csrf
             session.headers["Referer"] = SUPERSET_URL
+    session.headers["Content-Type"] = "application/json"
     return session
 
 

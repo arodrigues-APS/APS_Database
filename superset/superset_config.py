@@ -104,11 +104,12 @@ WEBDRIVER_BASEURL = "http://superset:8088/"
 # Public (anonymous) read-only access
 # ---------------------------------------------------------------------------
 # Allow unauthenticated users to access Superset with the "Public" role.
-# The Public role is given permissions equivalent to the built-in "Gamma" role,
-# which provides read-only access to dashboards and charts.
+# The Public role is given permissions equivalent to the built-in "Alpha" role,
+# which includes all_datasource_access so new datasets are automatically
+# accessible without manual permission grants.
 AUTH_TYPE = AUTH_DB
 AUTH_ROLE_PUBLIC = "Public"
-PUBLIC_ROLE_LIKE = "Gamma"
+PUBLIC_ROLE_LIKE = "Alpha"
 
 # Send unauthenticated visitors straight to the dashboard list
 # (they can still navigate to /login to get admin privileges)
@@ -117,6 +118,25 @@ TALISMAN_ENABLED = False
 WEBDRIVER_BASEURL_USER_FRIENDLY = WEBDRIVER_BASEURL
 
 SQLLAB_CTAS_NO_LIMIT = True
+
+# Force light/white background regardless of the user's system theme
+CUSTOM_CSS = """
+:root {
+  color-scheme: only light;
+}
+"""
+
+
+def FLASK_APP_MUTATOR(app):
+    """Ensure the Public role always has all_datasource_access."""
+    with app.app_context():
+        from superset.extensions import security_manager as sm
+        public_role = sm.find_role("Public")
+        pvm = sm.find_permission_view_menu(
+            "all_datasource_access", "all_datasource_access"
+        )
+        if public_role and pvm:
+            sm.add_permission_role(public_role, pvm)
 
 #
 # Optionally import superset_config_docker.py (which will have been included on

@@ -17,9 +17,25 @@
 ##
 
 # Apache Superset - data.aps.ee.ethz.ch
+# Redirect HTTP to HTTPS
 server {
     listen 80;
-    server_name data.aps.ee.ethz.ch www.data.aps.ee.ethz.ch;
+    server_name data.aps.ee.ethz.ch;
+
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS server block
+server {
+    listen 443 ssl;
+    server_name data.aps.ee.ethz.ch;
+
+    ssl_certificate /etc/ssl/letsencrypt/ecc/data.aps.ee.ethz.ch.crt;
+    ssl_certificate_key /etc/ssl/letsencrypt/ecc/data.aps.ee.ethz.ch.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
 
     location / {
         proxy_pass http://127.0.0.1:8088;
@@ -35,9 +51,25 @@ server {
 }
 
 # Flask raw data app - rawdata.aps.ee.ethz.ch
+# Redirect HTTP to HTTPS
 server {
     listen 80;
-    server_name rawdata.aps.ee.ethz.ch www.rawdata.aps.ee.ethz.ch;
+    server_name rawdata.aps.ee.ethz.ch;
+
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS server block
+server {
+    listen 443 ssl;
+    server_name rawdata.aps.ee.ethz.ch;
+
+    ssl_certificate /etc/ssl/letsencrypt/ecc/rawdata.aps.ee.ethz.ch.crt;
+    ssl_certificate_key /etc/ssl/letsencrypt/ecc/rawdata.aps.ee.ethz.ch.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
 
     auth_basic "APS Database Access - Ask Helton or Ulrike for the password.";
     auth_basic_user_file /etc/apache2/.htpasswd;
