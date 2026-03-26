@@ -44,7 +44,7 @@ class SearchForm(FlaskForm):
 
 
 #define the URLs routes for the Website
-@app.route("/",methods =['POST','GET'])
+@app.route("/search",methods =['POST','GET'])
 def index():
 	form = SearchForm()
 	if form.validate_on_submit():
@@ -106,6 +106,7 @@ class DeviceForm(FlaskForm):
 	submit = SubmitField("Add Device")
 
 
+@app.route("/", methods=["GET", "POST"])
 @app.route("/devices", methods=["GET", "POST"])
 def device_library():
 	form = DeviceForm()

@@ -31,10 +31,10 @@
       <div class="collapse navbar-collapse" id="navbarSupportedContent">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
           <li class="nav-item">
-            <a class="nav-link active" aria-current="page" href="/">Search</a>
+            <a class="nav-link" href="/">Device Library</a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="/devices">Device Library</a>
+            <a class="nav-link active" aria-current="page" href="/search">File Search</a>
           </li>
           <li class="nav-item">
             <a class="nav-link" href="/readme">Readme</a>
@@ -47,7 +47,7 @@
   <div class="container-fluid">
     <div class="row mt-4">
       <p>Chain multiple search strings with commas, the search is not case-sensitive:</p>
-      <form class="d-flex" role="search" action="/" method="POST">
+      <form class="d-flex" role="search" action="/search" method="POST">
           {{form.csrf_token}}
           {{form.search_terms}}
           {{form.submit}}
