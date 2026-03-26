@@ -27,6 +27,7 @@ conf = ConfigObj('config.ini')
 
 #get DataScraping class object
 ds = DataScraping(conf)
+ds.search_results(sterms=[])  # pre-warm the file listing cache at startup
 
 #simple class to hold all configuration parameters for the flask server
 class Config():
@@ -168,6 +169,42 @@ def delete_device(device_id):
 		cur.close()
 		conn.close()
 		flash("Device removed.", "success")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/devices")
+
+
+@app.route("/devices/edit/<int:device_id>", methods=["POST"])
+def edit_device(device_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute(
+			"""UPDATE device_library
+			   SET part_number = %s,
+			       device_category = %s,
+			       manufacturer = %s,
+			       voltage_rating = %s,
+			       rdson_mohm = %s,
+			       current_rating_a = %s,
+			       package_type = %s,
+			       notes = %s
+			   WHERE id = %s""",
+			(request.form["part_number"].strip(),
+			 request.form["device_category"],
+			 request.form["manufacturer"],
+			 request.form["voltage_rating"] or None,
+			 request.form["rdson_mohm"] or None,
+			 request.form["current_rating_a"] or None,
+			 request.form["package_type"],
+			 request.form["notes"] or None,
+			 device_id))
+		conn.commit()
+		cur.close()
+		conn.close()
+		flash("Device updated.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("A device with that part number already exists.", "danger")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
 	return redirect("/devices")

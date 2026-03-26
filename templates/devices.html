@@ -121,7 +121,8 @@
       </thead>
       <tbody>
         {% for d in devices %}
-        <tr>
+        {# ── View row (default) ── #}
+        <tr id="view-{{ d.id }}">
           <td><strong>{{ d.part_number }}</strong></td>
           <td>{{ d.device_category or '' }}</td>
           <td>{{ d.manufacturer or '' }}</td>
@@ -130,7 +131,9 @@
           <td>{{ d.current_rating_a or '' }}</td>
           <td>{{ d.package_type or '' }}</td>
           <td>{{ d.notes or '' }}</td>
-          <td>
+          <td class="text-nowrap">
+            <button class="btn btn-outline-secondary btn-sm"
+                    onclick="toggleEdit({{ d.id }})">✎</button>
             <form method="POST" action="/devices/delete/{{ d.id }}"
                   onsubmit="return confirm('Remove {{ d.part_number }}?');"
                   style="display:inline">
@@ -138,6 +141,44 @@
               <button type="submit" class="btn btn-outline-danger btn-sm">✕</button>
             </form>
           </td>
+        </tr>
+
+        {# ── Edit row (hidden until user clicks ✎) ── #}
+        <tr id="edit-{{ d.id }}" style="display:none">
+          <form method="POST" action="/devices/edit/{{ d.id }}">
+            {{ form.csrf_token }}
+            <td><input name="part_number" value="{{ d.part_number }}" class="form-control form-control-sm"></td>
+            <td>
+              <select name="device_category" class="form-select form-select-sm">
+                {% for cat in ["MOSFET","Diode","IGBT","Other"] %}
+                <option {{ 'selected' if d.device_category == cat }}>{{ cat }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              <select name="manufacturer" class="form-select form-select-sm">
+                {% for mfr in ["Wolfspeed","Infineon","Rohm","STMicroelectronics","onsemi","Hitachi","Mitsubishi","Other"] %}
+                <option {{ 'selected' if d.manufacturer == mfr }}>{{ mfr }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="voltage_rating" value="{{ d.voltage_rating or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="rdson_mohm" value="{{ d.rdson_mohm or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="current_rating_a" value="{{ d.current_rating_a or '' }}" class="form-control form-control-sm"></td>
+            <td>
+              <select name="package_type" class="form-select form-select-sm">
+                {% for pkg in ["bare_die","TO-247","TO-263","home_made_TO","QFN","Other"] %}
+                <option {{ 'selected' if d.package_type == pkg }}>{{ pkg }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="notes" value="{{ d.notes or '' }}" class="form-control form-control-sm"></td>
+            <td class="text-nowrap">
+              <button type="submit" class="btn btn-outline-success btn-sm">Save</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm"
+                      onclick="toggleEdit({{ d.id }})">Cancel</button>
+            </td>
+          </form>
         </tr>
         {% else %}
         <tr><td colspan="9" class="text-muted text-center">No devices registered yet.</td></tr>
@@ -147,6 +188,20 @@
     <p class="text-muted"><small>{{ devices|length }} device(s) registered.</small></p>
 
   </div>
+
+  <script>
+    function toggleEdit(id) {
+      var viewRow = document.getElementById('view-' + id);
+      var editRow = document.getElementById('edit-' + id);
+      if (editRow.style.display === 'none') {
+        viewRow.style.display = 'none';
+        editRow.style.display = '';
+      } else {
+        viewRow.style.display = '';
+        editRow.style.display = 'none';
+      }
+    }
+  </script>
 
 </body>
 </html>
