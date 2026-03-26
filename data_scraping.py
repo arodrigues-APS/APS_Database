@@ -8,6 +8,7 @@
 
 
 import os
+import time
 from pathlib import Path
 
 
@@ -27,6 +28,9 @@ class DataScraping():
 		self.conf = conf
 		self.ddir = self.conf['Data']['data_dir']
 		self.excluded_files = self.conf['Data']['excluded']
+		self._cache = None
+		self._cache_time = 0
+		self._cache_ttl = 180  # seconds (3 minutes)
 
 
 	def shouldbe_listed_path(self, path):
@@ -73,9 +77,12 @@ class DataScraping():
 		"""
 
 
-		dirs = self.scandir() #generator object
-		dirs = list(dirs)
-		dirs = [str(d) for d in dirs]
+		now = time.time()
+		if self._cache is None or (now - self._cache_time) > self._cache_ttl:
+			self._cache = [str(p) for p in self.scandir()]
+			self._cache_time = now
+
+		dirs = self._cache
 
 		if len(sterms) == 0: #no search term - return all data
 			return list(dirs)
