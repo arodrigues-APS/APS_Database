@@ -108,6 +108,22 @@ DEVICES = [
     # ── Rohm packaged ────────────────────────────────────────────────────
     ("SCT3030AL", "MOSFET", "Rohm",
      "1200 V", "30", None, "TO-247", None),
+    ("SCT2080KE", "MOSFET", "Rohm",
+     "1200 V", "80", None, "TO-247", "Trench SiC MOSFET"),
+    ("SCT3080AL", "MOSFET", "Rohm",
+     "1200 V", "80", None, "TO-247", "Planar SiC MOSFET"),
+
+    # ── Infineon packaged (additional) ──────────────────────────────────
+    ("IMW120R060M1H", "MOSFET", "Infineon",
+     "1200 V", "60", None, "TO-247", None),
+
+    # ── Littlefuse packaged ─────────────────────────────────────────────
+    ("LSIC1MO120E0080", "MOSFET", "Littlefuse",
+     "1200 V", "80", None, "TO-247", None),
+
+    # ── STMicroelectronics packaged ─────────────────────────────────────
+    ("SCTW35N65G2V", "MOSFET", "STMicroelectronics",
+     "650 V", "55", None, "TO-247", "Gen 1 SiC MOSFET"),
 ]
 
 

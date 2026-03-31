@@ -33,6 +33,11 @@ services:
     volumes: *superset-volumes
     depends_on: *superset-depends-on
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash /app/docker/docker-healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   superset-worker:
     env_file: .env
