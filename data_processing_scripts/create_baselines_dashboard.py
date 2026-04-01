@@ -374,7 +374,7 @@ def build_native_filters(chart_ids, overview_chart_id, meta_ds_id,
             "filterType": "filter_range",
             "targets": [{
                 "datasetId": view_ds_id,
-                "column": {"name": "v_gate_r"},
+                "column": {"name": "v_gate_bin"},
             }],
             "defaultDataMask": {
                 "extraFormData": {},
@@ -402,7 +402,7 @@ def build_native_filters(chart_ids, overview_chart_id, meta_ds_id,
             "filterType": "filter_range",
             "targets": [{
                 "datasetId": view_ds_id,
-                "column": {"name": "v_drain_r"},
+                "column": {"name": "v_drain_bin"},
             }],
             "defaultDataMask": {
                 "extraFormData": {},
@@ -562,7 +562,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_r",
+                "x_axis": "v_gate_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -588,6 +588,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -598,7 +599,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_r",
+                "x_axis": "v_drain_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -624,6 +625,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -634,7 +636,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_r",
+                "x_axis": "v_drain_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -660,6 +662,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -670,7 +673,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_r",
+                "x_axis": "v_drain_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -697,6 +700,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -707,7 +711,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_r",
+                "x_axis": "v_gate_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -734,6 +738,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -744,7 +749,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_r",
+                "x_axis": "v_gate_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -771,6 +776,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,
@@ -781,7 +787,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_r",
+                "x_axis": "v_gate_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -807,6 +813,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
             },
             12, 60,

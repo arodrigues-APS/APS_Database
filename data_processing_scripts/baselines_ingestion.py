@@ -564,8 +564,9 @@ FLAG_IRRADIATED_SQL = """
 --      - If only APPEND Vth files are flagged → only post-irradiation
 --        re-measurements are affected → flag only _append files
 
--- Reset all flags first so re-runs are idempotent
-UPDATE baselines_metadata SET is_likely_irradiated = FALSE;
+-- Reset flags for baselines records only (SC records managed by sc_ingestion.py)
+UPDATE baselines_metadata SET is_likely_irradiated = FALSE
+WHERE data_source IS NULL OR data_source = 'baselines';
 
 WITH
 -- Step 1: per-file Vth extraction from dedicated Vth sweeps only
@@ -584,6 +585,7 @@ per_file_vth AS (
     FROM baselines_measurements m
     JOIN baselines_metadata md ON m.metadata_id = md.id
     WHERE md.measurement_category = 'Vth'
+      AND (md.data_source IS NULL OR md.data_source = 'baselines')
       AND m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
       AND m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
       AND ABS(m.i_drain) > 0.001   -- 1 mA threshold
@@ -965,6 +967,12 @@ SELECT
          THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
          THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
+    -- _bin columns: rounded to 1 d.p. (0.1 V) for chart x-axes.
+    -- Matches the resolution used by baselines_view_device_library and sc_ruggedness_view.
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN ROUND(m.v_gate::numeric, 1) ELSE NULL END  AS v_gate_bin,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN ROUND(m.v_drain::numeric, 1) ELSE NULL END AS v_drain_bin,
     m.rds,
     m.bv,
     m.time_val,
@@ -1215,10 +1223,16 @@ def main():
 
     print(f"\nFound {len(measurement_files)} measurement files to process.")
 
-    # Sync deletions: remove DB records for files no longer on disk
+    # Sync deletions: remove baselines DB records for files no longer on disk.
+    # Only touch baselines records (data_source IS NULL or 'baselines') —
+    # SC ruggedness records are managed by sc_ingestion.py.
     print("\nSyncing deletions...")
     on_disk_paths = set(measurement_files)
-    cur.execute("SELECT id, csv_path FROM baselines_metadata WHERE csv_path IS NOT NULL")
+    cur.execute(
+        "SELECT id, csv_path FROM baselines_metadata "
+        "WHERE csv_path IS NOT NULL "
+        "  AND (data_source IS NULL OR data_source = 'baselines')"
+    )
     db_rows = cur.fetchall()
     stale_ids = [row[0] for row in db_rows if row[1] not in on_disk_paths]
     if stale_ids:
@@ -1394,9 +1408,15 @@ def main():
     # Flag likely-irradiated measurements (data-driven Vth analysis)
     print("\nFlagging likely-irradiated measurements (Vth analysis)...")
     cur.execute(FLAG_IRRADIATED_SQL)
-    cur.execute("SELECT COUNT(*) FROM baselines_metadata WHERE is_likely_irradiated")
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_metadata "
+        "WHERE is_likely_irradiated AND (data_source IS NULL OR data_source = 'baselines')"
+    )
     n_flagged = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM baselines_metadata")
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_metadata "
+        "WHERE data_source IS NULL OR data_source = 'baselines'"
+    )
     n_total = cur.fetchone()[0]
     conn.commit()
     print(f"  Flagged {n_flagged} of {n_total} records as likely irradiated.")
@@ -1405,6 +1425,7 @@ def main():
             SELECT experiment, COUNT(*), COUNT(DISTINCT device_id)
             FROM baselines_metadata
             WHERE is_likely_irradiated
+              AND (data_source IS NULL OR data_source = 'baselines')
             GROUP BY experiment ORDER BY experiment
         """)
         for exp, cnt, ndev in cur.fetchall():
@@ -1428,14 +1449,24 @@ def main():
         print(f"    Files: {s['files']}  |  Points: {s['points']}  |  With TSP: {s['tsp']}")
     print("=" * 70)
 
-    # Verify
-    cur.execute("SELECT COUNT(*) FROM baselines_metadata")
+    # Verify (baselines only)
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_metadata "
+        "WHERE data_source IS NULL OR data_source = 'baselines'"
+    )
     meta_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM baselines_measurements")
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_measurements m "
+        "JOIN baselines_metadata md ON m.metadata_id = md.id "
+        "WHERE md.data_source IS NULL OR md.data_source = 'baselines'"
+    )
     meas_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM baselines_metadata WHERE tsp_path IS NOT NULL")
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_metadata "
+        "WHERE tsp_path IS NOT NULL AND (data_source IS NULL OR data_source = 'baselines')"
+    )
     tsp_count = cur.fetchone()[0]
-    print(f"\nDatabase totals:")
+    print(f"\nBaselines totals:")
     print(f"  baselines_metadata:     {meta_count} rows ({tsp_count} with TSP)")
     print(f"  baselines_measurements: {meas_count} rows")
 

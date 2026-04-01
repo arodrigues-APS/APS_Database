@@ -1154,6 +1154,24 @@ def main():
 
     print(f"\nFound {len(measurement_files)} CSV files to process.")
 
+    # Sync deletions: remove SC DB records for files no longer on disk
+    if not args.subset:
+        print("\nSyncing deletions...")
+        on_disk_paths = set(fpath for fpath, _ in measurement_files)
+        cur.execute(
+            "SELECT id, csv_path FROM baselines_metadata "
+            "WHERE csv_path IS NOT NULL AND data_source = 'sc_ruggedness'"
+        )
+        db_rows = cur.fetchall()
+        stale_ids = [row[0] for row in db_rows if row[1] not in on_disk_paths]
+        if stale_ids:
+            cur.execute("DELETE FROM baselines_metadata WHERE id = ANY(%s)",
+                        (stale_ids,))
+            conn.commit()
+            print(f"  Removed {len(stale_ids)} stale SC record(s).")
+        else:
+            print("  No stale records found.")
+
     # Track statistics
     total_points = 0
     files_loaded = 0

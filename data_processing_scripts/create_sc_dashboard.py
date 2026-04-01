@@ -578,6 +578,7 @@ def sc_curve_params(x_axis, cat, x_title, y_title,
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
+        "connectNulls": True,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -594,7 +595,7 @@ def sc_curve_params(x_axis, cat, x_title, y_title,
     return params
 
 
-def waveform_params(y_col, y_label, y_title, log_y=False):
+def waveform_params(y_col, y_label, y_title):
     """Line-chart params for SC waveform time-domain plots."""
     return {
         "x_axis": "time_us",
@@ -622,6 +623,7 @@ def waveform_params(y_col, y_label, y_title, log_y=False):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
+        "connectNulls": True,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -911,6 +913,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -951,6 +954,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -991,6 +995,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
+                "connectNulls": True,
                 "zoomable": True,
                 "logAxis": "y",
                 "series_limit": 50,
@@ -1049,6 +1054,7 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
+                    "connectNulls": True,
                     "zoomable": True,
                     "logAxis": "y",
                     "series_limit": 50,
@@ -1092,6 +1098,7 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
+                    "connectNulls": True,
                     "zoomable": True,
                     "series_limit": 50,
                 },
@@ -1133,7 +1140,6 @@ def main():
     print("\n   Creating all charts...")
 
     all_chart_ids = []
-    all_charts_info = []  # flat list for dashboard association
 
     def create_tab_charts(chart_defs):
         """Create charts for a tab, return list of (id, uuid, name, w, h)."""
