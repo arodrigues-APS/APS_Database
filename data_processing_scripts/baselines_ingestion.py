@@ -967,12 +967,12 @@ SELECT
          THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
          THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
-    -- _bin columns: rounded to 1 d.p. (0.1 V) for chart x-axes.
+    -- _bin columns: rounded to 2 d.p. (0.01 V) for chart x-axes.
     -- Matches the resolution used by baselines_view_device_library and sc_ruggedness_view.
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 1) ELSE NULL END  AS v_gate_bin,
+         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_bin,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-         THEN ROUND(m.v_drain::numeric, 1) ELSE NULL END AS v_drain_bin,
+         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_bin,
     m.rds,
     m.bv,
     m.time_val,
@@ -1020,23 +1020,23 @@ SELECT
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
          THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 1) ELSE NULL END  AS v_gate_bin,
+         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 1)
+        THEN ROUND(md.drain_bias_value::numeric, 2)
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 1)
+        THEN ROUND(m.v_drain::numeric, 2)
         ELSE NULL
     END AS v_drain_bin,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(ROUND(m.v_gate::numeric, 1)) ELSE NULL END  AS v_gate_bias,
+         THEN ROUND(ROUND(m.v_gate::numeric, 2)) ELSE NULL END  AS v_gate_bias,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
         THEN ROUND(md.drain_bias_value::numeric)
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(ROUND(m.v_drain::numeric, 1))
+        THEN ROUND(ROUND(m.v_drain::numeric, 2))
         ELSE NULL
     END AS v_drain_bias,
     m.rds,
@@ -1072,13 +1072,13 @@ SELECT
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 1) AS v_gate_bin,
+    ROUND(m.v_gate::numeric, 2) AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 1)
+        THEN ROUND(md.drain_bias_value::numeric, 2)
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 1)
+        THEN ROUND(m.v_drain::numeric, 2)
         ELSE NULL
     END AS v_drain_bin,
     AVG(m.i_drain)               AS dev_avg_i_drain,
@@ -1104,13 +1104,13 @@ GROUP BY
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 1),
+    ROUND(m.v_gate::numeric, 2),
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 1)
+        THEN ROUND(md.drain_bias_value::numeric, 2)
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 1)
+        THEN ROUND(m.v_drain::numeric, 2)
         ELSE NULL
     END;
 
