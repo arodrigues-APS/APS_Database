@@ -21,7 +21,6 @@ import os
 import re
 import csv
 import sys
-import hashlib
 import argparse
 from pathlib import Path
 from time import perf_counter
@@ -46,17 +45,15 @@ except ImportError:
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
+from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from common import (load_device_library, compute_file_hash, find_matching_tsp,
+                    map_columns, expand_multistep_rows,
+                    categorize_measurement as categorize_sc_measurement)
 
 SC_ROOTS = [
     "/home/arodrigues/NAS/Common_Files/Short Circuit Measurements/ForDataAnalysis",
     "/home/arodrigues/NAS/Common_Files/Short Circuit Measurements/curvetracermeasurements",
 ]
-
-DB_HOST = "localhost"
-DB_PORT = 5435
-DB_NAME = "mosfets"
-DB_USER = "postgres"
-DB_PASSWORD = "APSLab"
 
 # File extensions to skip (non-data files found in SC directories)
 SKIP_EXTENSIONS = {
@@ -652,52 +649,7 @@ def _device_id_from_path(path_parts):
     return 'unknown'
 
 
-def categorize_sc_measurement(measurement_type, filename=''):
-    """
-    Categorize measurement into a dashboard-filterable category.
-    Extends baselines_ingestion.py's categorize_measurement() with SC-specific types.
-    """
-    t = measurement_type or ''
-    tl = t.lower()
-    fl = filename.lower()
-
-    # Check for SC waveform first (handled separately, but just in case)
-    if 'waveform' in tl or 'sc_waveform' in tl:
-        return 'SC_Waveform'
-
-    # Body diode
-    if re.search(r'bodydiode|body_diode|bodydiodev', tl):
-        return 'Bodydiode'
-
-    # Subthreshold
-    if re.search(r'subthreshold|subth', tl):
-        return 'Subthreshold'
-
-    # Hysteresis
-    if re.search(r'hysteresis|hyst', tl):
-        return 'Hysteresis'
-
-    # MOS channel diode
-    if re.search(r'channeldiode|moschanneldiode', tl):
-        return 'ChannelDiode'
-
-    # Standard categories (same logic as baselines_ingestion.py)
-    if re.search(r'idvg|id_vg|vd\d+mv|vd\d+v?$|_vd\d|vd5$|vd5v', tl):
-        return 'IdVg'
-    if re.search(r'idvd|id_vd|rds_|rds_on|rdson|_rds|_vg\d|vg101520|idvvdvg', tl) and 'igss' not in tl:
-        return 'IdVd'
-    if re.search(r'3rd|quad|third', tl):
-        return '3rd_Quadrant'
-    if re.search(r'block|bvdss|idss|idvdss|dvdss|listv', tl):
-        return 'Blocking'
-    if re.search(r'igss', tl):
-        return 'Igss'
-    if re.search(r'\bvth\b|vth_', tl):
-        return 'Vth'
-    if re.search(r'rdson', tl):
-        return 'Rdson'
-
-    return 'Other'
+# categorize_sc_measurement() is imported from common.categorize_measurement.
 
 
 # ── CSV Parsing ──────────────────────────────────────────────────────────────
@@ -839,116 +791,10 @@ def parse_keithley_csv(filepath):
     return headers, rows
 
 
-# ── Column Mapping (reused from baselines_ingestion.py pattern) ──────────────
-
-def map_columns(headers, row):
-    """Map CSV columns to standard schema columns."""
-    result = {
-        'v_gate': None, 'i_gate': None,
-        'v_drain': None, 'i_drain': None,
-        'rds': None, 'bv': None, 'time_val': None,
-    }
-
-    for i, h in enumerate(headers):
-        if i >= len(row):
-            break
-        val = row[i]
-        hl = h.lower().strip()
-        base = re.sub(r'\(\d+\)', '', hl).strip()
-
-        if base in ('v_gate', 'vgs', 'vg'):
-            if result['v_gate'] is None:
-                result['v_gate'] = val
-        elif base in ('i_gate', 'igs', 'ig'):
-            if result['i_gate'] is None:
-                result['i_gate'] = val
-        elif base in ('v_drain', 'vds', 'vd'):
-            if result['v_drain'] is None:
-                result['v_drain'] = val
-        elif base in ('i_drain', 'ids', 'id'):
-            if result['i_drain'] is None:
-                result['i_drain'] = val
-        elif base in ('rds', 'r_ds', 'rdson'):
-            if result['rds'] is None:
-                result['rds'] = val
-        elif base in ('bv', 'bvdss'):
-            if result['bv'] is None:
-                result['bv'] = val
-        elif base in ('time', 'time_val', 't'):
-            if result['time_val'] is None:
-                result['time_val'] = val
-
-    return result
+# map_columns() and expand_multistep_rows() are imported from common.py.
 
 
-def expand_multistep_rows(headers, rows):
-    """
-    For multi-step CSV files with columns like V_Drain(1), I_Drain(1),
-    V_Drain(2), I_Drain(2), ... expand into separate rows per step.
-
-    Returns list of (step_index, mapped_values_dict, point_index)
-    """
-    # Detect numbered columns
-    numbered_cols = {}
-    for i, h in enumerate(headers):
-        m = re.match(r'(.+)\((\d+)\)', h)
-        if m:
-            base = m.group(1).strip()
-            step = int(m.group(2))
-            if step not in numbered_cols:
-                numbered_cols[step] = {}
-            numbered_cols[step][base] = i
-
-    results = []
-
-    if not numbered_cols:
-        # Simple single-step file
-        for pidx, row in enumerate(rows):
-            mapped = map_columns(headers, row)
-            results.append((0, mapped, pidx))
-    else:
-        # Multi-step file
-        for pidx, row in enumerate(rows):
-            for step_idx in sorted(numbered_cols.keys()):
-                cols = numbered_cols[step_idx]
-                mapped = {
-                    'v_gate': None, 'i_gate': None,
-                    'v_drain': None, 'i_drain': None,
-                    'rds': None, 'bv': None, 'time_val': None,
-                }
-                for base_name, col_idx in cols.items():
-                    bl = base_name.lower()
-                    val = row[col_idx] if col_idx < len(row) else None
-
-                    if bl in ('v_gate', 'vgs', 'vg'):
-                        mapped['v_gate'] = val
-                    elif bl in ('i_gate', 'igs', 'ig'):
-                        mapped['i_gate'] = val
-                    elif bl in ('v_drain', 'vds', 'vd'):
-                        mapped['v_drain'] = val
-                    elif bl in ('i_drain', 'ids', 'id'):
-                        mapped['i_drain'] = val
-                    elif bl in ('rds',):
-                        mapped['rds'] = val
-                    elif bl in ('bv',):
-                        mapped['bv'] = val
-                    elif bl in ('time',):
-                        mapped['time_val'] = val
-
-                results.append((step_idx, mapped, pidx))
-
-    return results
-
-
-# ── Utility ──────────────────────────────────────────────────────────────────
-
-def compute_file_hash(filepath):
-    """Compute MD5 hash of a file for deduplication."""
-    h = hashlib.md5()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''):
-            h.update(chunk)
-    return h.hexdigest()
+# compute_file_hash() is imported from common.py.
 
 
 def extract_experiment_name(csv_path, root_dir):
@@ -991,64 +837,22 @@ def map_device_type(csv_path, root_dir, device_library=None):
     return None, None
 
 
-def load_device_library(cur):
-    """Load device library from SQL table, sorted by part_number length desc."""
-    cur.execute("""
-        SELECT part_number, device_category, manufacturer,
-               voltage_rating, rdson_mohm, current_rating_a, package_type
-        FROM device_library
-        ORDER BY LENGTH(part_number) DESC
-    """)
-    cols = [desc[0] for desc in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+# load_device_library() is imported from common.py.
 
 
-def find_matching_tsp(csv_path):
-    """
-    Given a CSV path, find the matching TSP file in sibling lib/ directories.
-    """
-    csv_p = Path(csv_path)
-    stem = csv_p.stem
-
-    # Build list of stems to try
-    stems_to_try = [stem]
-    stripped = re.sub(r'_append\d*$', '', stem)
-    if stripped != stem:
-        stems_to_try.append(stripped)
-
-    # Also try without numbered prefix (e.g. "1_IdVg" -> "IdVg")
-    stripped2 = re.sub(r'^\d+_', '', stem)
-    if stripped2 != stem:
-        stems_to_try.append(stripped2)
-
-    # Search in parent directories for lib/ folders
-    search_dirs = []
-    p = csv_p.parent
-    for _ in range(5):
-        lib_dir = p / 'lib'
-        if lib_dir.is_dir():
-            search_dirs.append(lib_dir)
-        p = p.parent
-
-    for search_stem in stems_to_try:
-        for lib_dir in search_dirs:
-            tsp_file = lib_dir / f'{search_stem}.tsp'
-            if tsp_file.exists():
-                return str(tsp_file)
-
-    return None
+# find_matching_tsp() is imported from common.py.
 
 
-# ── TSP Parser (simplified -- import from baselines_ingestion if available) ──
+# ── TSP Parser ───────────────────────────────────────────────────────────────
 
 def parse_tsp_file(filepath):
     """
-    Parse a .tsp file. Try to import from baselines_ingestion first;
-    if unavailable, return empty params.
+    Parse a .tsp file. Delegates to baselines_ingestion's full parser;
+    falls back to empty params if unavailable.
     """
     try:
-        from baselines_ingestion import parse_tsp_file as _parse_tsp
-        return _parse_tsp(filepath)
+        from baselines_ingestion import parse_tsp_file as _parse_tsp_full
+        return _parse_tsp_full(filepath)
     except ImportError:
         pass
 

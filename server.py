@@ -82,12 +82,11 @@ def readme():
 
 
 # ── Device Library ───────────────────────────────────────────────────────────
-DB_CONFIG = dict(host="localhost", port=5435, dbname="mosfets",
-                 user="postgres", password="APSLab")
+from data_processing_scripts.db_config import get_connection
 
 def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
-	return psycopg2.connect(**DB_CONFIG)
+	return get_connection()
 
 # Allowed values for drop-down fields
 DEVICE_CATEGORIES = ["MOSFET", "Diode", "IGBT", "Other"]

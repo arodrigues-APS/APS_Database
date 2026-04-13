@@ -22,12 +22,8 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
     import psycopg2
 
-# ── DB Connection (same as baselines_ingestion.py) ───────────────────────────
-DB_HOST = "localhost"
-DB_PORT = 5435
-DB_NAME = "mosfets"
-DB_USER = "postgres"
-DB_PASSWORD = "APSLab"
+# ── DB Connection ────────────────────────────────────────────────────────────
+from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 
 
 # ── Device Catalogue ─────────────────────────────────────────────────────────

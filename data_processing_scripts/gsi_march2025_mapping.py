@@ -43,11 +43,7 @@ PRISTINE_BLOCKING = os.path.join(PRISTINE_ROOT, "MOSFET_Blocking_preCharact_GSI_
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "gsi_march2025_mapping.csv")
 
 # ── DB Connection ────────────────────────────────────────────────────────────
-DB_HOST = "localhost"
-DB_PORT = 5435
-DB_NAME = "mosfets"
-DB_USER = "postgres"
-DB_PASSWORD = "APSLab"
+from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 
 
 # ── Chip ID Normalization ────────────────────────────────────────────────────

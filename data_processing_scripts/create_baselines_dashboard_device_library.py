@@ -57,110 +57,12 @@ Usage:
 """
 
 import json
-import re
 import sys
-import uuid
-import requests
 
-SUPERSET_URL = "http://localhost:8088"
-USERNAME = "admin"
-PASSWORD = "admin"
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def get_session():
-    """Authenticate with both form login and JWT token.
-
-    Form login establishes Flask-Login session (so current_user is a real
-    user object, needed for dataset creation which sets owners).
-    JWT token satisfies the API Authorization header requirement.
-    """
-    session = requests.Session()
-    # 1. Form-based login to establish Flask-Login session cookie
-    resp = session.get(f"{SUPERSET_URL}/login/")
-    resp.raise_for_status()
-    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', resp.text)
-    if not match:
-        raise RuntimeError("Could not find CSRF token on login page")
-    resp = session.post(
-        f"{SUPERSET_URL}/login/",
-        data={"username": USERNAME, "password": PASSWORD,
-              "csrf_token": match.group(1)},
-        allow_redirects=True,
-    )
-    resp.raise_for_status()
-    # 2. JWT token for API auth header
-    resp = requests.post(
-        f"{SUPERSET_URL}/api/v1/security/login",
-        json={
-            "username": USERNAME,
-            "password": PASSWORD,
-            "provider": "db",
-            "refresh": True,
-        },
-    )
-    resp.raise_for_status()
-    access_token = resp.json()["access_token"]
-    session.headers["Authorization"] = f"Bearer {access_token}"
-    # 3. API CSRF token for mutating requests
-    resp = session.get(f"{SUPERSET_URL}/api/v1/security/csrf_token/")
-    if resp.ok:
-        csrf = resp.json().get("result", "")
-        if csrf:
-            session.headers["X-CSRFToken"] = csrf
-            session.headers["Referer"] = SUPERSET_URL
-    session.headers["Content-Type"] = "application/json"
-    return session
-
-
-def find_database(session):
-    """Find the database connection for the mosfets DB."""
-    resp = session.get(
-        f"{SUPERSET_URL}/api/v1/database/",
-        params={"q": json.dumps({"page_size": 100})},
-    )
-    resp.raise_for_status()
-    for db in resp.json()["result"]:
-        name = db.get("database_name", "").lower()
-        if "mosfet" in name or "postgresql" in name or "aps" in name:
-            print(f"  Found database: {db['database_name']} (id={db['id']})")
-            return db["id"]
-    for db in resp.json()["result"]:
-        detail = session.get(f"{SUPERSET_URL}/api/v1/database/{db['id']}").json()
-        uri = detail.get("result", {}).get("sqlalchemy_uri", "")
-        if "mosfets" in uri or "postgresqlv2" in uri or "5435" in uri:
-            print(f"  Found database by URI: {db['database_name']} (id={db['id']})")
-            return db["id"]
-    print("  ERROR: Could not find database.")
-    return None
-
-
-def find_or_create_dataset(session, db_id, table_name, schema="public"):
-    """Find or create a dataset for a given table/view."""
-    resp = session.get(
-        f"{SUPERSET_URL}/api/v1/dataset/",
-        params={"q": json.dumps({
-            "filters": [{"col": "table_name", "opr": "eq", "value": table_name}],
-            "page_size": 100,
-        })},
-    )
-    resp.raise_for_status()
-    for ds in resp.json()["result"]:
-        if ds.get("table_name") == table_name:
-            print(f"  Dataset '{table_name}' exists (id={ds['id']})")
-            return ds["id"]
-
-    resp = session.post(f"{SUPERSET_URL}/api/v1/dataset/", json={
-        "database": db_id, "table_name": table_name, "schema": schema,
-    })
-    if resp.ok:
-        ds_id = resp.json()["id"]
-        print(f"  Created dataset '{table_name}' (id={ds_id})")
-        return ds_id
-    print(f"  ERROR creating dataset '{table_name}': "
-          f"{resp.status_code} {resp.text[:200]}")
-    return None
+from superset_api import (get_session, find_database, find_or_create_dataset,
+                          refresh_dataset_columns, create_chart,
+                          create_or_update_dashboard, build_json_metadata)
+from db_config import SUPERSET_URL
 
 
 # ── Calculated Parameters SQL ─────────────────────────────────────────────────
@@ -785,62 +687,7 @@ def find_or_create_virtual_dataset(session, db_id, name, sql_query,
     return None
 
 
-def refresh_dataset_columns(session, ds_id):
-    """Refresh dataset columns and clear cached column statistics."""
-    session.put(f"{SUPERSET_URL}/api/v1/dataset/{ds_id}/refresh", json={})
-    # Also trigger a column resync by reading + writing the dataset
-    resp = session.get(f"{SUPERSET_URL}/api/v1/dataset/{ds_id}")
-    if resp.ok:
-        session.put(f"{SUPERSET_URL}/api/v1/dataset/{ds_id}", json={})
-        session.put(f"{SUPERSET_URL}/api/v1/dataset/{ds_id}/refresh", json={})
-
-
-def create_chart(session, name, datasource_id, viz_type, params):
-    """Create a chart. Returns (chart_id, chart_uuid)."""
-    resp = session.get(
-        f"{SUPERSET_URL}/api/v1/chart/",
-        params={"q": json.dumps({
-            "filters": [{"col": "slice_name", "opr": "eq", "value": name}],
-            "page_size": 100,
-        })},
-    )
-    if resp.ok:
-        for chart in resp.json()["result"]:
-            if chart.get("slice_name") == name:
-                # Update existing chart with latest params
-                update_resp = session.put(
-                    f"{SUPERSET_URL}/api/v1/chart/{chart['id']}",
-                    json={
-                        "params": json.dumps(params),
-                        "viz_type": viz_type,
-                        "datasource_id": datasource_id,
-                        "datasource_type": "table",
-                    },
-                )
-                detail = session.get(
-                    f"{SUPERSET_URL}/api/v1/chart/{chart['id']}"
-                ).json()
-                uid = detail.get("result", {}).get("uuid", str(uuid.uuid4()))
-                status = "updated" if update_resp.ok else "exists (update failed)"
-                print(f"  Chart '{name}' {status} (id={chart['id']})")
-                return chart["id"], uid
-
-    resp = session.post(f"{SUPERSET_URL}/api/v1/chart/", json={
-        "slice_name": name,
-        "datasource_id": datasource_id,
-        "datasource_type": "table",
-        "viz_type": viz_type,
-        "params": json.dumps(params),
-    })
-    if resp.ok:
-        chart_id = resp.json()["id"]
-        detail = session.get(f"{SUPERSET_URL}/api/v1/chart/{chart_id}").json()
-        real_uuid = detail.get("result", {}).get("uuid", str(uuid.uuid4()))
-        print(f"  Created chart '{name}' (id={chart_id})")
-        return chart_id, real_uuid
-    print(f"  ERROR creating chart '{name}': "
-          f"{resp.status_code} {resp.text[:300]}")
-    return None, None
+# refresh_dataset_columns() and create_chart() are imported from superset_api.
 
 
 # ── Dashboard Layout ─────────────────────────────────────────────────────────
@@ -1127,77 +974,7 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
     return filters
 
 
-def build_json_metadata(chart_ids, native_filters):
-    chart_config = {}
-    for cid in chart_ids:
-        chart_config[str(cid)] = {
-            "id": cid,
-            "crossFilters": {
-                "scope": "global",
-                "chartsInScope": [c for c in chart_ids if c != cid],
-            },
-        }
-    return {
-        "timed_refresh_immune_slices": [],
-        "expanded_slices": {},
-        "refresh_frequency": 0,
-        "color_scheme": "",
-        "label_colors": {},
-        "cross_filters_enabled": True,
-        "chart_configuration": chart_config,
-        "global_chart_configuration": {
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-            "chartsInScope": chart_ids,
-        },
-        "native_filter_configuration": native_filters,
-        "default_filters": "{}",
-        "shared_label_colors": {},
-        "color_scheme_domain": [],
-        "filter_scopes": {},
-    }
-
-
-def create_or_update_dashboard(session, title, position_json, json_metadata,
-                                slug="baselines-device-library"):
-    resp = session.get(
-        f"{SUPERSET_URL}/api/v1/dashboard/",
-        params={"q": json.dumps({
-            "filters": [{"col": "slug", "opr": "eq", "value": slug}],
-            "page_size": 10,
-        })},
-    )
-    existing_id = None
-    if resp.ok:
-        for dash in resp.json()["result"]:
-            if dash.get("slug") == slug:
-                existing_id = dash["id"]
-                break
-
-    payload = {
-        "dashboard_title": title,
-        "slug": slug,
-        "published": True,
-        "position_json": json.dumps(position_json),
-        "json_metadata": json.dumps(json_metadata),
-    }
-
-    if existing_id:
-        resp = session.put(
-            f"{SUPERSET_URL}/api/v1/dashboard/{existing_id}", json=payload
-        )
-        if resp.ok:
-            print(f"  Updated dashboard (id={existing_id})")
-            return existing_id
-        print(f"  ERROR updating: {resp.status_code} {resp.text[:300]}")
-        return existing_id
-    else:
-        resp = session.post(f"{SUPERSET_URL}/api/v1/dashboard/", json=payload)
-        if resp.ok:
-            dash_id = resp.json()["id"]
-            print(f"  Created dashboard (id={dash_id})")
-            return dash_id
-        print(f"  ERROR creating: {resp.status_code} {resp.text[:300]}")
-        return None
+# build_json_metadata() and create_or_update_dashboard() are imported from superset_api.
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -2068,7 +1845,8 @@ def main():
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
     dash_id = create_or_update_dashboard(
-        session, "Baselines Device Library", position_json, json_metadata
+        session, "Baselines Device Library", position_json, json_metadata,
+        slug="baselines-device-library",
     )
 
     # 6. Associate charts with dashboard
