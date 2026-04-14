@@ -94,7 +94,8 @@ MANUFACTURERS = ["Wolfspeed", "Infineon", "Rohm", "STMicroelectronics",
                  "onsemi", "Hitachi", "Mitsubishi", "Other"]
 PACKAGE_TYPES = ["bare_die", "TO-247", "TO-263", "home_made_TO", "QFN", "Other"]
 
-ION_SPECIES = ["proton", "neutron", "Au", "Fe", "Xe", "Ca", "C", "Si", "Other"]
+ION_SPECIES = ["proton", "neutron", "Au", "Ar", "Fe", "Xe", "Kr", "Ca",
+               "C", "Cl", "N", "Ne", "Ni", "Si", "Other"]
 BEAM_TYPES = ["broad_beam", "micro_beam", "Other"]
 IRRAD_ROLES = ["pre_irrad", "post_irrad"]
 
@@ -110,14 +111,25 @@ class DeviceForm(FlaskForm):
 	submit = SubmitField("Add Device")
 
 
+IRRADIATION_ROOT = os.path.join(
+	os.environ.get("APS_DATA_ROOT", "/home/arodrigues/APS_Database"),
+	"Measurements", "Irradiation")
+
+def list_irradiation_folders():
+	"""Return folder names under Measurements/Irradiation/."""
+	if not os.path.isdir(IRRADIATION_ROOT):
+		return []
+	return sorted(
+		d for d in os.listdir(IRRADIATION_ROOT)
+		if os.path.isdir(os.path.join(IRRADIATION_ROOT, d))
+		and not d.startswith('.')
+	)
+
 class CampaignForm(FlaskForm):
 	campaign_name = StringField("Campaign Name")
-	ion_species = SelectField("Ion Species", choices=ION_SPECIES)
-	beam_energy_mev = StringField("Beam Energy (MeV)")
-	beam_type = SelectField("Beam Type", choices=BEAM_TYPES)
+	folder_name = SelectField("Data Folder", choices=[])
 	facility = StringField("Facility")
-	fluence_range = StringField("Fluence Range")
-	let_mev_cm2_mg = StringField("LET (MeV cm²/mg)")
+	beam_type = SelectField("Beam Type", choices=BEAM_TYPES)
 	notes = StringField("Notes")
 	submit = SubmitField("Add Campaign")
 
@@ -230,6 +242,8 @@ def edit_device(device_id):
 @app.route("/irradiation", methods=["GET", "POST"])
 def irradiation():
 	form = CampaignForm()
+	folders = list_irradiation_folders()
+	form.folder_name.choices = [("", "— none —")] + [(f, f) for f in folders]
 	error = None
 	if form.validate_on_submit():
 		name = form.campaign_name.data.strip()
@@ -241,16 +255,13 @@ def irradiation():
 				cur = conn.cursor()
 				cur.execute("""
 					INSERT INTO irradiation_campaigns
-					    (campaign_name, ion_species, beam_energy_mev, beam_type,
-					     facility, fluence_range, let_mev_cm2_mg, notes)
-					VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+					    (campaign_name, folder_name, beam_type,
+					     facility, notes)
+					VALUES (%s, %s, %s, %s, %s)""",
 					(name,
-					 form.ion_species.data,
-					 form.beam_energy_mev.data or None,
+					 form.folder_name.data or None,
 					 form.beam_type.data or None,
 					 form.facility.data or None,
-					 form.fluence_range.data or None,
-					 form.let_mev_cm2_mg.data or None,
 					 form.notes.data or None))
 				conn.commit()
 				cur.close(); conn.close()
@@ -262,6 +273,7 @@ def irradiation():
 				error = f"Database error: {e}"
 
 	campaigns = []
+	runs = []
 	mappings = []
 	experiments = []
 	try:
@@ -269,6 +281,13 @@ def irradiation():
 		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 		cur.execute("SELECT * FROM irradiation_campaigns ORDER BY campaign_name")
 		campaigns = cur.fetchall()
+		cur.execute("""
+			SELECT ir.*, ic.campaign_name
+			FROM irradiation_runs ir
+			JOIN irradiation_campaigns ic ON ir.campaign_id = ic.id
+			ORDER BY ic.campaign_name, ir.ion_species, ir.beam_energy_mev
+		""")
+		runs = cur.fetchall()
 		cur.execute("""
 			SELECT ecm.*, ic.campaign_name
 			FROM experiment_campaign_map ecm
@@ -287,7 +306,9 @@ def irradiation():
 
 	return render_template("irradiation.html",
 	                       form=form, campaigns=campaigns,
+	                       runs=runs,
 	                       mappings=mappings, experiments=experiments,
+	                       folders=folders,
 	                       ion_species=ION_SPECIES, beam_types=BEAM_TYPES,
 	                       irrad_roles=IRRAD_ROLES, error=error)
 
@@ -314,21 +335,15 @@ def edit_campaign(campaign_id):
 		cur.execute("""
 			UPDATE irradiation_campaigns
 			SET campaign_name   = %s,
-			    ion_species     = %s,
-			    beam_energy_mev = %s,
+			    folder_name     = %s,
 			    beam_type       = %s,
 			    facility        = %s,
-			    fluence_range   = %s,
-			    let_mev_cm2_mg  = %s,
 			    notes           = %s
 			WHERE id = %s""",
 			(request.form["campaign_name"].strip(),
-			 request.form["ion_species"],
-			 request.form["beam_energy_mev"] or None,
+			 request.form.get("folder_name") or None,
 			 request.form["beam_type"] or None,
 			 request.form["facility"] or None,
-			 request.form["fluence_range"] or None,
-			 request.form["let_mev_cm2_mg"] or None,
 			 request.form["notes"] or None,
 			 campaign_id))
 		conn.commit()
@@ -340,6 +355,90 @@ def edit_campaign(campaign_id):
 		flash(f"Error: {e}", "danger")
 	return redirect("/irradiation")
 
+
+# ── Irradiation Runs ─────────────────────────────────────────────────────────
+
+@app.route("/irradiation/run", methods=["POST"])
+def add_irradiation_run():
+	campaign_id = request.form.get("campaign_id", "").strip()
+	ion_species = request.form.get("ion_species", "").strip()
+	if not campaign_id or not ion_species:
+		flash("Campaign and ion species are required.", "danger")
+		return redirect("/irradiation")
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("""
+			INSERT INTO irradiation_runs
+			    (campaign_id, ion_species, beam_energy_mev,
+			     let_surface, let_bragg_peak, range_um,
+			     beam_type, notes)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+			(int(campaign_id), ion_species,
+			 request.form.get("beam_energy_mev") or None,
+			 request.form.get("let_surface") or None,
+			 request.form.get("let_bragg_peak") or None,
+			 request.form.get("range_um") or None,
+			 request.form.get("run_beam_type") or None,
+			 request.form.get("run_notes") or None))
+		conn.commit()
+		cur.close(); conn.close()
+		flash(f"Run '{ion_species}' added to campaign.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("That ion/energy combination already exists for this campaign.", "danger")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/irradiation")
+
+
+@app.route("/irradiation/run/edit/<int:run_id>", methods=["POST"])
+def edit_irradiation_run(run_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("""
+			UPDATE irradiation_runs
+			SET ion_species     = %s,
+			    beam_energy_mev = %s,
+			    let_surface     = %s,
+			    let_bragg_peak  = %s,
+			    range_um        = %s,
+			    beam_type       = %s,
+			    notes           = %s
+			WHERE id = %s""",
+			(request.form["ion_species"],
+			 request.form.get("beam_energy_mev") or None,
+			 request.form.get("let_surface") or None,
+			 request.form.get("let_bragg_peak") or None,
+			 request.form.get("range_um") or None,
+			 request.form.get("run_beam_type") or None,
+			 request.form.get("run_notes") or None,
+			 run_id))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Run updated.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("That ion/energy combination already exists for this campaign.", "danger")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/irradiation")
+
+
+@app.route("/irradiation/run/delete/<int:run_id>", methods=["POST"])
+def delete_irradiation_run(run_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (run_id,))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Run removed.", "success")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/irradiation")
+
+
+# ── Experiment Mappings ──────────────────────────────────────────────────────
 
 @app.route("/irradiation/map", methods=["POST"])
 def add_experiment_mapping():
@@ -376,6 +475,48 @@ def delete_experiment_mapping(map_id):
 		conn.commit()
 		cur.close(); conn.close()
 		flash("Mapping removed.", "success")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/irradiation")
+
+
+# ── Assign Run to Measurements ───────────────────────────────────────────────
+
+@app.route("/irradiation/assign_run", methods=["POST"])
+def assign_run_to_measurements():
+	"""Bulk-assign an irradiation run to all measurements matching filters."""
+	run_id = request.form.get("run_id", "").strip()
+	campaign_id = request.form.get("filter_campaign_id", "").strip()
+	device_filter = request.form.get("filter_device_id", "").strip()
+	filename_pattern = request.form.get("filter_filename", "").strip()
+	if not run_id or not campaign_id:
+		flash("Run and campaign are required.", "danger")
+		return redirect("/irradiation")
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		# Build WHERE clause for filtering measurements
+		conditions = ["md.irrad_campaign_id = %s"]
+		params = [int(campaign_id)]
+		if device_filter:
+			conditions.append("md.device_id ILIKE %s")
+			params.append(f"%{device_filter}%")
+		if filename_pattern:
+			conditions.append("md.filename ILIKE %s")
+			params.append(f"%{filename_pattern}%")
+		where = " AND ".join(conditions)
+		rid = int(run_id)
+		sql = f"""
+			UPDATE baselines_metadata md
+			SET irrad_run_id = %s
+			WHERE {where}
+			  AND (md.irrad_run_id IS DISTINCT FROM %s)
+		"""
+		cur.execute(sql, (rid, *params, rid))
+		n = cur.rowcount
+		conn.commit()
+		cur.close(); conn.close()
+		flash(f"Assigned run to {n} measurement(s).", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
 	return redirect("/irradiation")

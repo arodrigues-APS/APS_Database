@@ -36,11 +36,8 @@
 
     <h4>Irradiation Campaigns</h4>
     <p class="text-muted">
-      Register irradiation campaigns (ion species, beam energy, beam type, facility) and map
-      experiment folder names to campaigns. Used by the
-      <a href="http://localhost:8088/superset/dashboard/irradiation/" target="_blank">Irradiation</a>
-      Superset dashboard. After adding or editing mappings, click
-      <strong>Sync to Metadata</strong> to propagate campaign IDs to the measurement database.
+      Manage irradiation campaigns (facility, beam type), their runs (ion species,
+      energy, LET), and map experiments/measurements to specific runs.
     </p>
 
     <!-- Flash messages -->
@@ -66,35 +63,23 @@
         <form method="POST" action="/irradiation">
           {{ form.csrf_token }}
           <div class="row g-2 align-items-end">
-            <div class="col-md-2">
+            <div class="col-md-3">
               <label class="form-label">Campaign Name <span class="text-danger">*</span></label>
-              {{ form.campaign_name(class="form-control form-control-sm", placeholder="e.g. GSI_March_2025_Au") }}
+              {{ form.campaign_name(class="form-control form-control-sm", placeholder="e.g. GSI_March_2025") }}
             </div>
-            <div class="col-md-1">
-              <label class="form-label">Ion Species</label>
-              {{ form.ion_species(class="form-select form-select-sm") }}
-            </div>
-            <div class="col-md-1">
-              <label class="form-label">Energy (MeV)</label>
-              {{ form.beam_energy_mev(class="form-control form-control-sm", placeholder="1162") }}
-            </div>
-            <div class="col-md-1">
-              <label class="form-label">Beam Type</label>
-              {{ form.beam_type(class="form-select form-select-sm") }}
+            <div class="col-md-2">
+              <label class="form-label">Data Folder</label>
+              {{ form.folder_name(class="form-select form-select-sm") }}
             </div>
             <div class="col-md-2">
               <label class="form-label">Facility</label>
               {{ form.facility(class="form-control form-control-sm", placeholder="GSI Darmstadt") }}
             </div>
             <div class="col-md-2">
-              <label class="form-label">Fluence Range</label>
-              {{ form.fluence_range(class="form-control form-control-sm", placeholder="1e10 – 1e12 ions/cm²") }}
+              <label class="form-label">Beam Type</label>
+              {{ form.beam_type(class="form-select form-select-sm") }}
             </div>
-            <div class="col-md-1">
-              <label class="form-label">LET</label>
-              {{ form.let_mev_cm2_mg(class="form-control form-control-sm", placeholder="MeV cm²/mg") }}
-            </div>
-            <div class="col-md-1">
+            <div class="col-md-2">
               <label class="form-label">Notes</label>
               {{ form.notes(class="form-control form-control-sm", placeholder="optional") }}
             </div>
@@ -111,12 +96,9 @@
       <thead class="table-dark">
         <tr>
           <th>Campaign Name</th>
-          <th>Ion Species</th>
-          <th>Energy (MeV)</th>
-          <th>Beam Type</th>
+          <th>Data Folder</th>
           <th>Facility</th>
-          <th>Fluence Range</th>
-          <th>LET</th>
+          <th>Beam Type</th>
           <th>Notes</th>
           <th></th>
         </tr>
@@ -125,21 +107,18 @@
         {% for c in campaigns %}
         <tr id="view-c-{{ c.id }}">
           <td><strong>{{ c.campaign_name }}</strong></td>
-          <td>{{ c.ion_species or '' }}</td>
-          <td>{{ c.beam_energy_mev or '' }}</td>
-          <td>{{ c.beam_type or '' }}</td>
+          <td><code>{{ c.folder_name or '' }}</code></td>
           <td>{{ c.facility or '' }}</td>
-          <td>{{ c.fluence_range or '' }}</td>
-          <td>{{ c.let_mev_cm2_mg or '' }}</td>
+          <td>{{ c.beam_type or '' }}</td>
           <td>{{ c.notes or '' }}</td>
           <td class="text-nowrap">
             <button class="btn btn-outline-secondary btn-sm"
-                    onclick="toggleEditCampaign({{ c.id }})">✎</button>
+                    onclick="toggleEdit('c', {{ c.id }})">&#9998;</button>
             <form method="POST" action="/irradiation/delete/{{ c.id }}"
                   onsubmit="return confirm('Remove {{ c.campaign_name }}?');"
                   style="display:inline">
               {{ form.csrf_token }}
-              <button type="submit" class="btn btn-outline-danger btn-sm">✕</button>
+              <button type="submit" class="btn btn-outline-danger btn-sm">&#10005;</button>
             </form>
           </td>
         </tr>
@@ -148,40 +127,222 @@
             {{ form.csrf_token }}
             <td><input name="campaign_name" value="{{ c.campaign_name }}" class="form-control form-control-sm"></td>
             <td>
-              <select name="ion_species" class="form-select form-select-sm">
-                {% for sp in ion_species %}
-                <option {{ 'selected' if c.ion_species == sp }}>{{ sp }}</option>
+              <select name="folder_name" class="form-select form-select-sm">
+                <option value="">-- none --</option>
+                {% for f in folders %}
+                <option value="{{ f }}" {{ 'selected' if c.folder_name == f }}>{{ f }}</option>
                 {% endfor %}
               </select>
             </td>
-            <td><input name="beam_energy_mev" value="{{ c.beam_energy_mev or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="facility" value="{{ c.facility or '' }}" class="form-control form-control-sm"></td>
             <td>
               <select name="beam_type" class="form-select form-select-sm">
-                <option value="">—</option>
+                <option value="">--</option>
                 {% for bt in beam_types %}
                 <option {{ 'selected' if c.beam_type == bt }}>{{ bt }}</option>
                 {% endfor %}
               </select>
             </td>
-            <td><input name="facility" value="{{ c.facility or '' }}" class="form-control form-control-sm"></td>
-            <td><input name="fluence_range" value="{{ c.fluence_range or '' }}" class="form-control form-control-sm"></td>
-            <td><input name="let_mev_cm2_mg" value="{{ c.let_mev_cm2_mg or '' }}" class="form-control form-control-sm"></td>
             <td><input name="notes" value="{{ c.notes or '' }}" class="form-control form-control-sm"></td>
             <td class="text-nowrap">
               <button type="submit" class="btn btn-outline-success btn-sm">Save</button>
               <button type="button" class="btn btn-outline-secondary btn-sm"
-                      onclick="toggleEditCampaign({{ c.id }})">Cancel</button>
+                      onclick="toggleEdit('c', {{ c.id }})">Cancel</button>
             </td>
           </form>
         </tr>
         {% else %}
-        <tr><td colspan="9" class="text-muted text-center">No campaigns registered yet.</td></tr>
+        <tr><td colspan="6" class="text-muted text-center">No campaigns registered yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
     <p class="text-muted"><small>{{ campaigns|length }} campaign(s) registered.</small></p>
 
-    <!-- ── Card 2: Experiment Mappings ──────────────────────────────────── -->
+    <!-- ── Card 2: Irradiation Runs ──────────────────────────────────────── -->
+    <div class="card mb-4 mt-4">
+      <div class="card-header">Add an Irradiation Run</div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">
+          Each run represents a specific ion species + energy combination within a campaign.
+          LET values from papers can be recorded here for dashboard filtering.
+        </p>
+        <form method="POST" action="/irradiation/run" class="row g-2 align-items-end">
+          {{ form.csrf_token }}
+          <div class="col-md-2">
+            <label class="form-label">Campaign <span class="text-danger">*</span></label>
+            <select name="campaign_id" class="form-select form-select-sm" required>
+              <option value="">-- select --</option>
+              {% for c in campaigns %}
+              <option value="{{ c.id }}">{{ c.campaign_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label">Ion <span class="text-danger">*</span></label>
+            <select name="ion_species" class="form-select form-select-sm" required>
+              {% for sp in ion_species %}
+              <option>{{ sp }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label">Energy (MeV)</label>
+            <input name="beam_energy_mev" class="form-control form-control-sm" placeholder="1162">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">LET surface</label>
+            <input name="let_surface" class="form-control form-control-sm" placeholder="MeV cm2/mg">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label">LET Bragg</label>
+            <input name="let_bragg_peak" class="form-control form-control-sm" placeholder="MeV cm2/mg">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label">Range (um)</label>
+            <input name="range_um" class="form-control form-control-sm" placeholder="45.5">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">Beam Type</label>
+            <select name="run_beam_type" class="form-select form-select-sm">
+              <option value="">-- inherit --</option>
+              {% for bt in beam_types %}
+              <option>{{ bt }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-1">
+            <label class="form-label">Notes</label>
+            <input name="run_notes" class="form-control form-control-sm" placeholder="optional">
+          </div>
+          <div class="col-md-1">
+            <button type="submit" class="btn btn-primary btn-sm w-100">Add Run</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Runs table -->
+    <table class="table table-sm table-striped table-hover">
+      <thead class="table-dark">
+        <tr>
+          <th>Campaign</th>
+          <th>Ion</th>
+          <th>Energy (MeV)</th>
+          <th>LET surface</th>
+          <th>LET Bragg</th>
+          <th>Range (um)</th>
+          <th>Beam Type</th>
+          <th>Notes</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr id="view-r-{{ r.id }}">
+          <td>{{ r.campaign_name }}</td>
+          <td><strong>{{ r.ion_species }}</strong></td>
+          <td>{{ r.beam_energy_mev or '' }}</td>
+          <td>{{ r.let_surface or '' }}</td>
+          <td>{{ r.let_bragg_peak or '' }}</td>
+          <td>{{ r.range_um or '' }}</td>
+          <td>{{ r.beam_type or '' }}</td>
+          <td>{{ r.notes or '' }}</td>
+          <td class="text-nowrap">
+            <button class="btn btn-outline-secondary btn-sm"
+                    onclick="toggleEdit('r', {{ r.id }})">&#9998;</button>
+            <form method="POST" action="/irradiation/run/delete/{{ r.id }}"
+                  onsubmit="return confirm('Remove this run?');"
+                  style="display:inline">
+              {{ form.csrf_token }}
+              <button type="submit" class="btn btn-outline-danger btn-sm">&#10005;</button>
+            </form>
+          </td>
+        </tr>
+        <tr id="edit-r-{{ r.id }}" style="display:none">
+          <form method="POST" action="/irradiation/run/edit/{{ r.id }}">
+            {{ form.csrf_token }}
+            <td>{{ r.campaign_name }}</td>
+            <td>
+              <select name="ion_species" class="form-select form-select-sm">
+                {% for sp in ion_species %}
+                <option {{ 'selected' if r.ion_species == sp }}>{{ sp }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="beam_energy_mev" value="{{ r.beam_energy_mev or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="let_surface" value="{{ r.let_surface or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="let_bragg_peak" value="{{ r.let_bragg_peak or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="range_um" value="{{ r.range_um or '' }}" class="form-control form-control-sm"></td>
+            <td>
+              <select name="run_beam_type" class="form-select form-select-sm">
+                <option value="">-- inherit --</option>
+                {% for bt in beam_types %}
+                <option {{ 'selected' if r.beam_type == bt }}>{{ bt }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="run_notes" value="{{ r.notes or '' }}" class="form-control form-control-sm"></td>
+            <td class="text-nowrap">
+              <button type="submit" class="btn btn-outline-success btn-sm">Save</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm"
+                      onclick="toggleEdit('r', {{ r.id }})">Cancel</button>
+            </td>
+          </form>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-muted text-center">No runs defined yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="text-muted"><small>{{ runs|length }} run(s) defined.</small></p>
+
+    <!-- ── Card 3: Assign Run to Measurements ────────────────────────────── -->
+    <div class="card mb-4 mt-4">
+      <div class="card-header">Assign Run to Measurements</div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">
+          Bulk-assign an irradiation run (ion + energy) to measurements within a campaign.
+          Use the device ID and filename filters to narrow which measurements get tagged.
+        </p>
+        <form method="POST" action="/irradiation/assign_run" class="row g-2 align-items-end">
+          {{ form.csrf_token }}
+          <div class="col-md-2">
+            <label class="form-label">Campaign <span class="text-danger">*</span></label>
+            <select name="filter_campaign_id" class="form-select form-select-sm" required>
+              <option value="">-- select --</option>
+              {% for c in campaigns %}
+              <option value="{{ c.id }}">{{ c.campaign_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Run <span class="text-danger">*</span></label>
+            <select name="run_id" class="form-select form-select-sm" required>
+              <option value="">-- select run --</option>
+              {% for r in runs %}
+              <option value="{{ r.id }}">{{ r.campaign_name }} / {{ r.ion_species }} {{ r.beam_energy_mev or '?' }} MeV</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">Device ID filter</label>
+            <input name="filter_device_id" class="form-control form-control-sm" placeholder="e.g. CPM3-1200">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Filename filter</label>
+            <input name="filter_filename" class="form-control form-control-sm" placeholder="e.g. _irrad">
+          </div>
+          <div class="col-md-2">
+            <button type="submit" class="btn btn-warning btn-sm w-100"
+                    onclick="return confirm('Assign this run to all matching measurements?');">
+              Assign Run
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ── Card 4: Experiment Mappings ──────────────────────────────────── -->
     <div class="card mb-4 mt-4">
       <div class="card-header">Map Experiments to Campaigns</div>
       <div class="card-body">
@@ -197,7 +358,7 @@
           <div class="col-md-4">
             <label class="form-label">Experiment <span class="text-danger">*</span></label>
             <select name="experiment" class="form-select form-select-sm">
-              <option value="">— select experiment —</option>
+              <option value="">-- select experiment --</option>
               {% for exp in experiments %}
               <option value="{{ exp }}">{{ exp }}</option>
               {% endfor %}
@@ -206,7 +367,7 @@
           <div class="col-md-3">
             <label class="form-label">Campaign <span class="text-danger">*</span></label>
             <select name="campaign_id" class="form-select form-select-sm">
-              <option value="">— select campaign —</option>
+              <option value="">-- select campaign --</option>
               {% for c in campaigns %}
               <option value="{{ c.id }}">{{ c.campaign_name }}</option>
               {% endfor %}
@@ -249,7 +410,7 @@
                   onsubmit="return confirm('Remove mapping for {{ m.experiment }}?');"
                   style="display:inline">
               {{ form.csrf_token }}
-              <button type="submit" class="btn btn-outline-danger btn-sm">✕</button>
+              <button type="submit" class="btn btn-outline-danger btn-sm">&#10005;</button>
             </form>
           </td>
         </tr>
@@ -276,9 +437,9 @@
   </div>
 
   <script>
-    function toggleEditCampaign(id) {
-      var viewRow = document.getElementById('view-c-' + id);
-      var editRow = document.getElementById('edit-c-' + id);
+    function toggleEdit(prefix, id) {
+      var viewRow = document.getElementById('view-' + prefix + '-' + id);
+      var editRow = document.getElementById('edit-' + prefix + '-' + id);
       if (editRow.style.display === 'none') {
         viewRow.style.display = 'none';
         editRow.style.display = '';

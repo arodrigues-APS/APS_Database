@@ -52,52 +52,51 @@ from common import (load_device_library, compute_file_hash, categorize_measureme
 # ── Irradiation root ────────────────────────────────────────────────────────
 IRRADIATION_ROOT = os.path.join(DATA_ROOT, "Measurements", "Irradiation")
 
-# ── Campaign folder configs ─────────────────────────────────────────────────
-# Each entry maps a filesystem folder name to:
-#   campaign_name:  must match irradiation_campaigns.campaign_name
-#   data_subdirs:   list of relative subdirectory globs to scan for .txt files
-#                   (None means scan the entire folder recursively)
-#   facility, ion_species, beam_energy_mev, beam_type: campaign metadata
-#   notes:          human-readable description
+# ── Campaign discovery ──────────────────────────────────────────────────────
+# Campaigns are managed via the Flask /irradiation UI.  Each campaign row has
+# a folder_name column linking it to a subdirectory of Measurements/Irradiation/.
+# This script discovers campaigns from the DB rather than hardcoding them.
 
-CAMPAIGN_CONFIGS = [
-    {
-        "folder": "GSIMarch2025Au",
-        "campaign_name": "GSI_March_2025_Au",
-        "facility": "GSI Darmstadt",
-        "ion_species": "Au",
-        "beam_energy_mev": 1162.0,
-        "beam_type": "broad_beam",
-        "notes": "Gold ions at 1162 MeV, March 2025 campaign at GSI",
-    },
-    {
-        "folder": "2022_30_08_PSI",
-        "campaign_name": "PSI_Proton_2022",
-        "facility": "PSI Villigen",
-        "ion_species": "proton",
-        "beam_energy_mev": None,
-        "beam_type": "broad_beam",
-        "notes": "Proton irradiation, August 2022 at PSI",
-    },
-    {
-        "folder": "2023_03_08_UCL_ions",
-        "campaign_name": "UCL_Ions_2023",
-        "facility": "UCL",
-        "ion_species": "Fe",
-        "beam_energy_mev": None,
-        "beam_type": "broad_beam",
-        "notes": "Heavy ion irradiation, March 2023 at UCL",
-    },
-    {
-        "folder": "2022_01_06_GSI_Ca",
-        "campaign_name": "GSI_Ca_2022",
-        "facility": "GSI Darmstadt",
-        "ion_species": "Ca",
-        "beam_energy_mev": None,
-        "beam_type": "broad_beam",
-        "notes": "Calcium ions, January 2022 campaign at GSI",
-    },
-]
+def load_campaigns_from_db(cur):
+    """
+    Load campaigns that have a folder_name assigned from the database.
+    Returns list of dicts with keys: id, campaign_name, folder_name.
+    """
+    # Ensure folder_name column exists (idempotent)
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE irradiation_campaigns ADD COLUMN folder_name TEXT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+    """)
+    cur.execute("""
+        SELECT id, campaign_name, folder_name
+        FROM irradiation_campaigns
+        WHERE folder_name IS NOT NULL AND folder_name != ''
+        ORDER BY campaign_name
+    """)
+    cols = [desc[0] for desc in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def discover_unmapped_folders(cur):
+    """
+    List Irradiation subfolders that exist on disk but have no campaign
+    with a matching folder_name in the DB.
+    """
+    if not os.path.isdir(IRRADIATION_ROOT):
+        return []
+    all_folders = set(
+        d for d in os.listdir(IRRADIATION_ROOT)
+        if os.path.isdir(os.path.join(IRRADIATION_ROOT, d))
+        and not d.startswith('.')
+    )
+    cur.execute("""
+        SELECT folder_name FROM irradiation_campaigns
+        WHERE folder_name IS NOT NULL AND folder_name != ''
+    """)
+    mapped = set(r[0] for r in cur.fetchall())
+    return sorted(all_folders - mapped)
 
 
 # ── Known device chip-ID normalization ──────────────────────────────────────
@@ -127,6 +126,14 @@ CHIP_ID_TO_DEVICE = {
     "CPW4-1200-010B": ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
     "CPW412000020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed"),
     "CPW41200S020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed"),
+    "CPW41200S010B":  ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
+    "CPW41700":       ("CPW5-1700-Z050A", "Diode", "Wolfspeed"),
+    "CPW41700b":      ("CPW5-1700-Z050A", "Diode", "Wolfspeed"),
+
+    # Wolfspeed Diodes (generic naming from ANSTO)
+    "Cree_diode":       ("Cree-Diode", "Diode", "Wolfspeed"),
+    "Cree_diode_1.7kV": ("Cree-Diode-1.7kV", "Diode", "Wolfspeed"),
+    "Cree_diode_1200V": ("Cree-Diode-1200V", "Diode", "Wolfspeed"),
 
     # Infineon
     "IFX Trench":     ("IFX-Trench", "MOSFET", "Infineon"),
@@ -369,12 +376,14 @@ def find_txt_files(campaign_folder_path):
     """
     txt_files = []
     skip_dirs = {'Script', 'script', 'Scripts', 'png', 'Degradation_rates',
-                 '__pycache__', '.cache', 'ProjectMedia',
+                 '__pycache__', '.cache', 'ProjectMedia', 'Images',
                  'NI Project Data', 'Automation Examples',
                  'Getting Started Workbook', 'Tasks',
                  'CAMAC_CaMay22', 'CNAFS',
                  'Other_data_from_GSI', 'Corinna',
-                 'Script_we_used_GSI_2024'}
+                 'Script_we_used_GSI_2024',
+                 'ANSTO_Microscope_Images', 'Data_analysis_paper',
+                 'DLTS&MCTS CPW4 B4'}
 
     for root, dirs, files in os.walk(campaign_folder_path):
         # Prune skipped directories
@@ -394,34 +403,12 @@ def find_txt_files(campaign_folder_path):
     return txt_files
 
 
-def ensure_campaign_exists(cur, config):
+def get_campaign_id(cur, campaign):
     """
-    Ensure the irradiation campaign exists in the database.
-    Returns the campaign id.
+    Look up the campaign id from the database.
+    campaign is a dict with at least 'id' key.
     """
-    cur.execute(
-        "SELECT id FROM irradiation_campaigns WHERE campaign_name = %s",
-        (config["campaign_name"],)
-    )
-    row = cur.fetchone()
-    if row:
-        return row[0]
-
-    cur.execute("""
-        INSERT INTO irradiation_campaigns
-            (campaign_name, facility, ion_species, beam_energy_mev,
-             beam_type, notes)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING id
-    """, (
-        config["campaign_name"],
-        config.get("facility"),
-        config["ion_species"],
-        config.get("beam_energy_mev"),
-        config.get("beam_type"),
-        config.get("notes"),
-    ))
-    return cur.fetchone()[0]
+    return campaign["id"]
 
 
 def ensure_data_source_column(cur):
@@ -465,33 +452,26 @@ def match_device_from_library(chip_id, device_library):
     return chip_id, None
 
 
-def ingest_campaign(cur, conn, config, device_library, dry_run=False):
+def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
     """
     Ingest all measurement files from one irradiation campaign folder.
 
+    campaign is a dict with keys: id, campaign_name, folder_name.
+
     Returns (files_loaded, files_skipped, files_error, total_points).
     """
-    folder_path = os.path.join(IRRADIATION_ROOT, config["folder"])
-    campaign_name = config["campaign_name"]
+    folder_name = campaign["folder_name"]
+    folder_path = os.path.join(IRRADIATION_ROOT, folder_name)
+    campaign_name = campaign["campaign_name"]
+    campaign_id = campaign["id"]
 
     if not os.path.isdir(folder_path):
         print(f"  WARNING: folder not found: {folder_path}")
         return 0, 0, 0, 0
 
-    # Ensure campaign exists in DB
-    if not dry_run:
-        campaign_id = ensure_campaign_exists(cur, config)
-    else:
-        cur.execute(
-            "SELECT id FROM irradiation_campaigns WHERE campaign_name = %s",
-            (campaign_name,)
-        )
-        row = cur.fetchone()
-        campaign_id = row[0] if row else None
-
     # Find all measurement .txt files
     txt_files = find_txt_files(folder_path)
-    print(f"  Found {len(txt_files)} measurement files in {config['folder']}")
+    print(f"  Found {len(txt_files)} measurement files in {folder_name}")
 
     if not txt_files:
         return 0, 0, 0, 0
@@ -508,7 +488,7 @@ def ingest_campaign(cur, conn, config, device_library, dry_run=False):
         raw_chip_id = extract_chip_id(filename)
         measurement_type = extract_measurement_type(filename)
         measurement_category = categorize_measurement(measurement_type, filename)
-        device_id = extract_device_id_from_path(fpath, config["folder"])
+        device_id = extract_device_id_from_path(fpath, folder_name)
 
         # Resolve device type from chip ID
         device_type, manufacturer = match_device_from_library(
@@ -579,7 +559,7 @@ def ingest_campaign(cur, conn, config, device_library, dry_run=False):
                     %s, %s, %s
                 ) RETURNING id
             """, (
-                config["folder"], device_id, measurement_type,
+                folder_name, device_id, measurement_type,
                 measurement_category, filename, fpath,
                 ','.join(headers), len(data_rows),
                 drain_bias_value,
@@ -689,15 +669,37 @@ def main():
     device_library = load_device_library(cur)
     print(f"\nDevice library: {len(device_library)} entries")
 
-    # Filter campaigns if --campaign specified
-    campaigns = CAMPAIGN_CONFIGS
+    # Load campaigns from DB (only those with a folder_name assigned)
+    campaigns = load_campaigns_from_db(cur)
+    conn.commit()
+
     if args.campaign:
-        campaigns = [c for c in campaigns if c["folder"] == args.campaign]
+        campaigns = [c for c in campaigns
+                     if c["folder_name"] == args.campaign]
         if not campaigns:
-            print(f"\nERROR: Unknown campaign folder: {args.campaign}")
-            print("Available folders:",
-                  ", ".join(c["folder"] for c in CAMPAIGN_CONFIGS))
+            print(f"\nERROR: No campaign mapped to folder: {args.campaign}")
+            print("Create a campaign via the /irradiation web UI and "
+                  "assign this folder.")
             sys.exit(1)
+
+    if not campaigns:
+        print("\nNo campaigns with folder_name assignments found.")
+        print("Use the /irradiation web UI to create campaigns and "
+              "assign Data Folders.")
+        sys.exit(0)
+
+    print(f"\nCampaigns to ingest: {len(campaigns)}")
+    for c in campaigns:
+        print(f"  {c['campaign_name']} -> {c['folder_name']}")
+
+    # Report unmapped folders
+    unmapped = discover_unmapped_folders(cur)
+    if unmapped:
+        print(f"\nWARNING: {len(unmapped)} folder(s) without a campaign:")
+        for f in unmapped:
+            print(f"  {f}")
+        print("  Assign them via the /irradiation web UI to include "
+              "their data.")
 
     # Ingest each campaign
     t0 = perf_counter()
@@ -706,13 +708,14 @@ def main():
     grand_error = 0
     grand_points = 0
 
-    for config in campaigns:
+    for campaign in campaigns:
         print(f"\n{'─' * 60}")
-        print(f"Campaign: {config['campaign_name']} ({config['folder']})")
+        print(f"Campaign: {campaign['campaign_name']} "
+              f"({campaign['folder_name']})")
         print(f"{'─' * 60}")
 
         loaded, skipped, errors, points = ingest_campaign(
-            cur, conn, config, device_library, dry_run=args.dry_run
+            cur, conn, campaign, device_library, dry_run=args.dry_run
         )
 
         grand_loaded += loaded
