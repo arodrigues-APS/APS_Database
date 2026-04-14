@@ -36,8 +36,8 @@ except ImportError:
     psycopg2 = None
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-GSI_ROOT = "/home/arodrigues/APS_Database/GSIMarch2025Au"
-PRISTINE_ROOT = "/home/arodrigues/APS_Database/Pristine measurements"
+GSI_ROOT = "/home/arodrigues/APS_Database/Measurements/Irradiation/GSIMarch2025Au"
+PRISTINE_ROOT = "/home/arodrigues/APS_Database/Measurements/Pristine"
 PRISTINE_PRECHARACT = os.path.join(PRISTINE_ROOT, "MOSFET_preCharact_GSI_March25", "data")
 PRISTINE_BLOCKING = os.path.join(PRISTINE_ROOT, "MOSFET_Blocking_preCharact_GSI_March25", "data")
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "gsi_march2025_mapping.csv")

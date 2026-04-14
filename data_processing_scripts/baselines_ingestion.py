@@ -54,7 +54,7 @@ from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 from common import (load_device_library, compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows, categorize_measurement)
 
-PRISTINE_ROOT = "/home/arodrigues/APS_Database/Pristine measurements"
+PRISTINE_ROOT = "/home/arodrigues/APS_Database/Measurements/Pristine"
 
 # Set to True to drop existing baseline tables and rebuild from scratch
 REBUILD = False
@@ -715,6 +715,20 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
+-- Irradiation campaign link (idempotent; FK omitted here so this runs even
+-- if irradiation_campaigns doesn't exist yet -- seed_irradiation_campaigns.py
+-- adds the proper FK constraint when the campaigns table is present)
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN irrad_campaign_id INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN irrad_role TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_baselines_meta_irrad_campaign
+    ON baselines_metadata(irrad_campaign_id);
+
 -- Measurements table: all data points
 CREATE TABLE IF NOT EXISTS baselines_measurements (
     id BIGSERIAL PRIMARY KEY,
@@ -1244,6 +1258,26 @@ def main():
         """)
         for exp, cnt, ndev in cur.fetchall():
             print(f"    {exp}: {cnt} files, {ndev} devices")
+
+    # ── Backfill irradiation campaign links ──────────────────────────────
+    # Propagates irrad_campaign_id / irrad_role from experiment_campaign_map
+    # to baselines_metadata.  No-op if the table doesn't exist yet.
+    try:
+        cur.execute("""
+            UPDATE baselines_metadata md
+            SET irrad_campaign_id = ecm.campaign_id,
+                irrad_role        = ecm.role
+            FROM experiment_campaign_map ecm
+            WHERE md.experiment = ecm.experiment
+              AND (md.irrad_campaign_id IS DISTINCT FROM ecm.campaign_id
+                   OR md.irrad_role IS DISTINCT FROM ecm.role)
+        """)
+        n_linked = cur.rowcount
+        conn.commit()
+        if n_linked:
+            print(f"\n  Linked {n_linked} metadata rows to irradiation campaigns.")
+    except Exception:
+        conn.rollback()
 
     # Print results
     elapsed = perf_counter() - start_time
