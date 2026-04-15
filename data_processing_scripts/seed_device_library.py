@@ -136,7 +136,7 @@ def main():
     conn.autocommit = False
     cur = conn.cursor()
 
-    # Ensure the table exists (same DDL as baselines_ingestion.py)
+    # Ensure the table exists (same DDL as ingestion_baselines.py)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS device_library (
             id SERIAL PRIMARY KEY,

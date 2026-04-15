@@ -1,7 +1,7 @@
 """
 Shared utility functions for APS Database ingestion scripts.
 
-Extracted from baselines_ingestion.py and sc_ingestion.py to eliminate
+Extracted from ingestion_baselines.py and ingestion_sc.py to eliminate
 duplication.  Both scripts import from here instead of maintaining their
 own copies.
 """

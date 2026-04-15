@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Create the "SC Ruggedness" dashboard in Apache Superset via its REST API.
+Create the "Short Circuit" dashboard in Apache Superset via its REST API.
 
 This dashboard visualises Short-Circuit ruggedness test data:
   - Pre-SC (pristine) vs post-SC IV curve overlays per device sample
   - SC event waveforms (oscilloscope time-domain captures)
   - Degradation tracking (Vth shift, Rdson change vs SC stress)
 
-Datasets (SQL views created by sc_ingestion.py):
+Datasets (SQL views created by ingestion_sc.py):
   1. sc_ruggedness_view       – all SC IV curves
   2. sc_waveform_view         – time-domain SC event captures
   3. sc_degradation_summary   – pre-aggregated per condition
@@ -40,8 +40,8 @@ from superset_api import (get_session, find_database, find_or_create_dataset,
                           create_or_update_dashboard, build_json_metadata)
 from db_config import SUPERSET_URL
 
-DASHBOARD_TITLE = "SC Ruggedness"
-DASHBOARD_SLUG = "sc-ruggedness"
+DASHBOARD_TITLE = "Short Circuit"
+DASHBOARD_SLUG = "short-circuit"
 
 
 # ── Dashboard Layout ─────────────────────────────────────────────────────────
@@ -446,7 +446,7 @@ def main():
                                         "sc_degradation_summary")
     if not main_ds:
         print("  FATAL: Could not create sc_ruggedness_view dataset.")
-        print("  Run sc_ingestion.py first to create the views.")
+        print("  Run ingestion_sc.py first to create the views.")
         sys.exit(1)
 
     for ds_id in [main_ds, waveform_ds, degrad_ds]:

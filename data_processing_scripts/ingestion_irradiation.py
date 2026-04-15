@@ -26,7 +26,7 @@ Skipped campaigns (incompatible data formats):
 
 Usage:
     source /home/apsadmin/py3/bin/activate
-    python3 irradiation_ingestion.py [--dry-run] [--rebuild]
+    python3 ingestion_irradiation.py [--dry-run] [--rebuild]
 """
 
 import os

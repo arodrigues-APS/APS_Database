@@ -93,8 +93,6 @@ RUNS = [
     # ── GSI March 2025 (Paper 2, Table I) ───────────────────────────────
     ("GSI_March_2025", "Au", 1162.0, 67.1,  None, 45.55, None, None),
     ("GSI_March_2025", "Ar",  344.0, 11.07, None, 62.4,  None, None),
-    ("GSI_March_2025", "Xe",   12.1, 42.5,  None,  7.49, "micro_beam",
-     "UNILAC micro-probe line at GSI"),
 
     # ── GSI Ca 2022 ─────────────────────────────────────────────────────
     ("GSI_Ca_2022", "Ca", None, None, None, None, None, None),

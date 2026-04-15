@@ -12,9 +12,9 @@ with additional SC-specific columns (data_source='sc_ruggedness').
 Also handles oscilloscope SC event waveform CSVs (time-domain Vds/Id/Vgs captures).
 
 Usage:
-    python3 sc_ingestion.py              # full ingestion
-    python3 sc_ingestion.py --subset     # only C3M0075120D for testing
-    python3 sc_ingestion.py --rebuild    # drop SC data and re-ingest
+    python3 ingestion_sc.py              # full ingestion
+    python3 ingestion_sc.py --subset     # only C3M0075120D for testing
+    python3 ingestion_sc.py --rebuild    # drop SC data and re-ingest
 """
 
 import os
@@ -847,11 +847,11 @@ def map_device_type(csv_path, root_dir, device_library=None):
 
 def parse_tsp_file(filepath):
     """
-    Parse a .tsp file. Delegates to baselines_ingestion's full parser;
+    Parse a .tsp file. Delegates to ingestion_baselines's full parser;
     falls back to empty params if unavailable.
     """
     try:
-        from baselines_ingestion import parse_tsp_file as _parse_tsp_full
+        from ingestion_baselines import parse_tsp_file as _parse_tsp_full
         return _parse_tsp_full(filepath)
     except ImportError:
         pass
@@ -873,7 +873,7 @@ def parse_tsp_file(filepath):
 # ── Main Ingestion ───────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='SC Ruggedness Data Ingestion')
+    parser = argparse.ArgumentParser(description='Short Circuit Data Ingestion')
     parser.add_argument('--subset', action='store_true',
                         help='Only ingest C3M0075120D from ForDataAnalysis (for testing)')
     parser.add_argument('--rebuild', action='store_true',

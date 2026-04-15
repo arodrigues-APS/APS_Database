@@ -1004,7 +1004,7 @@ def main():
                                       "baselines_view_device_library")
     if not avg_ds:
         print("  FATAL: Could not create baselines_device_averages dataset.")
-        print("  Run baselines_ingestion.py first to create the view.")
+        print("  Run ingestion_baselines.py first to create the view.")
         sys.exit(1)
     if not indiv_ds:
         print("  WARNING: Could not create baselines_view_device_library dataset.")

@@ -17,7 +17,7 @@ Tables created:
 
 Usage:
     source /home/apsadmin/py3/bin/activate
-    python3 baselines_ingestion.py
+    python3 ingestion_baselines.py
 """
 
 import os
@@ -522,7 +522,7 @@ FLAG_IRRADIATED_SQL = """
 --      - If only APPEND Vth files are flagged → only post-irradiation
 --        re-measurements are affected → flag only _append files
 
--- Reset flags for baselines records only (SC records managed by sc_ingestion.py)
+-- Reset flags for baselines records only (SC records managed by ingestion_sc.py)
 UPDATE baselines_metadata SET is_likely_irradiated = FALSE
 WHERE data_source IS NULL OR data_source = 'baselines';
 
@@ -1053,7 +1053,7 @@ def main():
 
     # Sync deletions: remove baselines DB records for files no longer on disk.
     # Only touch baselines records (data_source IS NULL or 'baselines') —
-    # SC ruggedness records are managed by sc_ingestion.py.
+    # SC ruggedness records are managed by ingestion_sc.py.
     print("\nSyncing deletions...")
     on_disk_paths = set(measurement_files)
     cur.execute(
