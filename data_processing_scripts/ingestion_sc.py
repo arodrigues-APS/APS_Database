@@ -224,7 +224,8 @@ SELECT
     md.sc_duration_us,
     md.sc_condition_label,
     md.measurement_category,
-    ROUND(m.v_gate::numeric, 2) AS v_gate_bin,
+    ROUND(m.v_gate::numeric, 2)  AS v_gate_bin,
+    ROUND(m.v_drain::numeric, 2) AS v_drain_bin,
     AVG(m.i_drain) AS avg_i_drain,
     AVG(m.i_gate) AS avg_i_gate,
     AVG(ABS(m.i_drain)) AS avg_abs_i_drain,
@@ -235,10 +236,12 @@ WHERE md.data_source = 'sc_ruggedness'
   AND md.measurement_category NOT IN ('SC_Waveform')
   AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
   AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
+  AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
 GROUP BY md.device_type, md.manufacturer, md.sample_group,
          md.test_condition, md.sc_voltage_v, md.sc_duration_us,
          md.sc_condition_label, md.measurement_category,
-         ROUND(m.v_gate::numeric, 2);
+         ROUND(m.v_gate::numeric, 2),
+         ROUND(m.v_drain::numeric, 2);
 """
 
 

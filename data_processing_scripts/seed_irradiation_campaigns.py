@@ -69,12 +69,15 @@ CAMPAIGNS = [
 # beam_type_override: if set, overrides campaign-level beam_type for this run
 
 RUNS = [
-    # ── UCL broad-beam (Paper 1, Table I — "UCL" facility) ──────────────
+    # ── UCL broad-beam (Paper 1, Table I — HIF facility, UCL Belgium) ───
     ("UCL_Ions_2023", "N",  16.5,   1.5,   4.53,  None, None, None),
     ("UCL_Ions_2023", "Ne", 10.65, 20.4,   6.6,   None, None, None),
     ("UCL_Ions_2023", "Fe", None,   9.3,   None,  None, None, None),
     ("UCL_Ions_2023", "Kr",  9.53, 32.4,  62.5,   None, None, None),
     ("UCL_Ions_2023", "Xe", 14.53, 41.0,  65.6,   None, None, None),
+    # Ni confirmed in logbook (Trench_B4 sheet); LET/energy TBD
+    ("UCL_Ions_2023", "Ni", None,  None,  None,   None, None,
+     "Confirmed in LOGBOOK_09_03_2023.xlsx Trench_B4; LET/energy to be confirmed"),
 
     # ── RADEF broad-beam (Paper 1, Table I — "RADEF" facility) ──────────
     ("RADEF_2023", "N",  16.5,   1.5,   4.53,  None, None, None),
@@ -83,24 +86,36 @@ RUNS = [
     ("RADEF_2023", "Kr",  9.53, 32.4,  62.5,   None, None, None),
     ("RADEF_2023", "Xe", 14.53, 41.0,  65.6,   None, None, None),
 
-    # ── ANSTO microbeam (Paper 2, Table I) ──────────────────────────────
+    # ── ANSTO microbeam (Martinella et al. 2025, Table I — SIRIUS, ANSTO) ─
     ("ANSTO_Microbeam_2024", "C",  12.0,  4.83, None,  7.36, None, None),
     ("ANSTO_Microbeam_2024", "C",   6.0,  8.12, None,  3.29, None,
      "Short-range particle, does not cross full epitaxial layer"),
+    # C at 36 MeV confirmed in logbook (29_01_2024_commercial sheet)
+    ("ANSTO_Microbeam_2024", "C",  36.0,  None, None,  None, None,
+     "Confirmed in LOGBOOK_ANSTO_23_01_2024.xlsx; LET/range TBD from facility"),
     ("ANSTO_Microbeam_2024", "Cl", 36.0, 13.5,  None, 23.9,  None, None),
     ("ANSTO_Microbeam_2024", "Ni", 62.0, 27.4,  None, 22.9,  None, None),
 
-    # ── GSI March 2025 (Paper 2, Table I) ───────────────────────────────
+    # ── GSI March 2025 (Martinella et al. 2025, Table III) ─────────────
+    # Confirmed by logbook (Au 1162 MeV, 18-21 March 2025) and paper.
+    # Xe (12.1 MeV, UNILAC micro-probe) was seeded in error — removed.
     ("GSI_March_2025", "Au", 1162.0, 67.1,  None, 45.55, None, None),
     ("GSI_March_2025", "Ar",  344.0, 11.07, None, 62.4,  None, None),
 
-    # ── GSI Ca 2022 ─────────────────────────────────────────────────────
-    ("GSI_Ca_2022", "Ca", None, None, None, None, None, None),
+    # ── GSI Ca 2022 (Für et al. 2023, Table I — UNILAC microbeam) ───────
+    # Ca-40 at 8.6 MeV/amu = 344 MeV total; LET_surface=13.5; range=60 µm
+    ("GSI_Ca_2022", "Ca", 344.0, 13.5, None, 60.0, "micro_beam",
+     "UNILAC microbeam at GSI. 8.6 MeV/amu. Source: Für et al. 2023 Table I."),
 
     # ── Proton campaigns ────────────────────────────────────────────────
-    ("Padova_Proton",   "proton", None, None, None, None, None, None),
+    # Padova: 3 MeV protons at CN accelerator, INFN-LNL Legnaro
+    # Confirmed: Martinella et al. 2025 (DD/TID paper) and Bonaldo et al. 2024 (ultrahigh doses)
+    ("Padova_Proton",   "proton", 3.0,  None, None, None, None,
+     "CN accelerator, INFN-LNL Legnaro. 3 MeV protons."),
     ("D2019_Proton",    "proton", None, None, None, None, None, None),
-    ("PSI_Proton_2022", "proton", None, None, None, None, None, None),
+    # PSI: proton energy not confirmed from available papers
+    ("PSI_Proton_2022", "proton", None, None, None, None, None,
+     "PSI Villigen. Proton energy TBD — not in available papers."),
 ]
 
 
@@ -288,7 +303,8 @@ SELECT
     COALESCE(ir.ion_species, '?') || ' ' ||
         COALESCE(ir.beam_energy_mev::text, '?') || ' MeV' AS irrad_condition_label,
     md.measurement_category,
-    ROUND(m.v_gate::numeric, 2) AS v_gate_bin,
+    ROUND(m.v_gate::numeric, 2)  AS v_gate_bin,
+    ROUND(m.v_drain::numeric, 2) AS v_drain_bin,
     AVG(m.i_drain)              AS avg_i_drain,
     AVG(m.i_gate)               AS avg_i_gate,
     AVG(ABS(m.i_drain))         AS avg_abs_i_drain,
@@ -300,13 +316,15 @@ LEFT JOIN irradiation_runs  ir ON md.irrad_run_id      = ir.id
 WHERE md.irrad_campaign_id IS NOT NULL
   AND (m.v_gate  IS NULL OR ABS(m.v_gate)  < 1e30)
   AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
+  AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
 GROUP BY
     md.device_type, md.manufacturer, md.device_id,
     md.irrad_role, ic.campaign_name, ic.facility,
     ir.ion_species, ir.beam_energy_mev, ir.let_surface,
     COALESCE(ir.beam_type, ic.beam_type),
     md.measurement_category,
-    ROUND(m.v_gate::numeric, 2);
+    ROUND(m.v_gate::numeric, 2),
+    ROUND(m.v_drain::numeric, 2);
 
 
 -- ── irradiation_campaign_overview ───────────────────────────────────────────

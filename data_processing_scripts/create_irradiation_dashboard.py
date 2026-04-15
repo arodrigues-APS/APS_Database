@@ -317,7 +317,9 @@ def main():
     # ── Tab 1: Campaign Overview ─────────────────────────────────────────
     print("\n   Tab 1: Campaign Overview...")
 
-    tab1_chart_defs = [
+    tab1_chart_defs = []
+    if overview_ds:
+        tab1_chart_defs = [
         # 0 – Campaign Summary table
         (
             "Irrad – Campaign Summary",
@@ -572,7 +574,7 @@ def main():
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
-                    "x_axis": "v_gate_bin",
+                    "x_axis": "v_drain_bin",
                     "time_grain_sqla": None,
                     "x_axis_sort_asc": True,
                     "metrics": [{
@@ -587,7 +589,7 @@ def main():
                     "show_legend": True,
                     "legendType": "scroll",
                     "rich_tooltip": True,
-                    "x_axis_title": "V_Gate (V)",
+                    "x_axis_title": "V_Drain (V)",
                     "y_axis_title": "Avg |I_Drain| (A)",
                     "y_axis_format": "SMART_NUMBER",
                     "truncateYAxis": False,
