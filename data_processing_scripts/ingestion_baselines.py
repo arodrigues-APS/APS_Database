@@ -729,6 +729,28 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_baselines_meta_irrad_campaign
     ON baselines_metadata(irrad_campaign_id);
 
+-- Audit columns written by promote_pre_irrad_to_baselines.py.
+-- Track the gate decision that flipped a pre_irrad file's data_source to
+-- 'baselines' (or recorded why it was left as 'irradiation').
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN promotion_decision TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN promotion_reason TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN promotion_ts TIMESTAMP;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN gate_params JSONB;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_baselines_meta_promotion
+    ON baselines_metadata(promotion_decision);
+
 -- Measurements table: all data points
 CREATE TABLE IF NOT EXISTS baselines_measurements (
     id BIGSERIAL PRIMARY KEY,
@@ -792,15 +814,15 @@ SELECT
     -- _r columns: rounded to 2 d.p. for use as chart x-axes and range-filter targets.
     -- They are NULL wherever the raw value was a Keithley overflow sentinel (9.91e+37).
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
+         THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END  AS v_gate_r,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
+         THEN ROUND(m.v_drain::numeric, 2)::double precision ELSE NULL END AS v_drain_r,
     -- _bin columns: rounded to 2 d.p. (0.01 V) for chart x-axes.
     -- Matches the resolution used by baselines_view_device_library and sc_ruggedness_view.
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_bin,
+         THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END  AS v_gate_bin,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_bin,
+         THEN ROUND(m.v_drain::numeric, 2)::double precision ELSE NULL END AS v_drain_bin,
     m.rds,
     m.bv,
     m.time_val,
@@ -844,27 +866,27 @@ SELECT
     CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
          THEN m.i_drain ELSE NULL END    AS i_drain,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_r,
+         THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END  AS v_gate_r,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-         THEN ROUND(m.v_drain::numeric, 2) ELSE NULL END AS v_drain_r,
+         THEN ROUND(m.v_drain::numeric, 2)::double precision ELSE NULL END AS v_drain_r,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END  AS v_gate_bin,
+         THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END  AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(ROUND(m.v_gate::numeric, 2)) ELSE NULL END  AS v_gate_bias,
+         THEN ROUND(ROUND(m.v_gate::numeric, 2))::double precision ELSE NULL END  AS v_gate_bias,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric)
+        THEN ROUND(md.drain_bias_value::numeric)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(ROUND(m.v_drain::numeric, 2))
+        THEN ROUND(ROUND(m.v_drain::numeric, 2))::double precision
         ELSE NULL
     END AS v_drain_bias,
     m.rds,
@@ -873,7 +895,8 @@ SELECT
     m.step_index,
     md.is_likely_irradiated
 FROM baselines_measurements m
-JOIN baselines_metadata md ON m.metadata_id = md.id;
+JOIN baselines_metadata md ON m.metadata_id = md.id
+WHERE md.data_source IS NULL OR md.data_source = 'baselines';
 
 -- Per-run max |i_drain|, used to detect compliance-limited points.
 -- A point is considered compliance-limited when |i_drain| >= 99% of the
@@ -900,13 +923,13 @@ SELECT
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 2) AS v_gate_bin,
+    ROUND(m.v_gate::numeric, 2)::double precision AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
     AVG(m.i_drain)               AS dev_avg_i_drain,
@@ -919,6 +942,7 @@ FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
 LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
 WHERE md.device_type IS NOT NULL
+  AND (md.data_source IS NULL OR md.data_source = 'baselines')
   AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
   AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
   AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
@@ -932,13 +956,13 @@ GROUP BY
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 2),
+    ROUND(m.v_gate::numeric, 2)::double precision,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END;
 
@@ -952,8 +976,8 @@ GROUP BY
 CREATE VIEW baselines_device_averages AS
 SELECT
     sub.*,
-    ROUND(sub.v_gate_bin) AS v_gate_bias,
-    ROUND(sub.v_drain_bin) AS v_drain_bias
+    ROUND(sub.v_gate_bin)::double precision AS v_gate_bias,
+    ROUND(sub.v_drain_bin)::double precision AS v_drain_bias
 FROM (
     SELECT
         device_type,

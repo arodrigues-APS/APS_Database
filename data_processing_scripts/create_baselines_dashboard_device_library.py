@@ -34,6 +34,9 @@ Mean Curves tab charts:
   9. Calculated Parameters – Vth, Rds(on), Igss, Vsd, gfs, V_gfs_peak,
                              SS, Id_on, BV_DSS, IDSS derived from data
                              (virtual dataset: device_calculated_params)
+  10-13. Box & Whisker Plots – RDS(on), Vth, Vf, VBR distributions
+                             per device type (virtual dataset:
+                             device_params_per_device)
 
 Individual Runs tab charts:
   1. Run Summary          – table: device_id × experiment × measurement_type
@@ -653,6 +656,174 @@ FULL JOIN idss_vals  iss USING (device_type, manufacturer)
 ORDER BY device_type
 """
 
+BOXPLOT_PARAMS_SQL = """WITH
+/* Per-device parameter values for box-and-whisker plots.
+   Reuses the same extraction logic as device_calculated_params but stops
+   at the per-device level so each row represents one physical device.
+   Only pristine (non-irradiated) devices are included.                    */
+
+/* ── Test-condition discovery ──────────────────────────────────────────── */
+idvd_dev_bias AS (
+    SELECT device_id, device_type, manufacturer,
+           MAX(v_gate_bin)  AS max_vgs,
+           MAX(v_drain_bin) AS max_vds
+    FROM baselines_per_device
+    WHERE measurement_category = 'IdVd'
+      AND dev_avg_i_drain > 0
+      AND NOT is_likely_irradiated
+    GROUP BY device_id, device_type, manufacturer
+),
+q3_dev_bias AS (
+    SELECT device_id, device_type, manufacturer,
+           MIN(v_gate_bin)       AS min_vgs,
+           MIN(dev_avg_i_drain)  AS min_id
+    FROM baselines_per_device
+    WHERE measurement_category = '3rd_Quadrant'
+      AND dev_avg_i_drain < 0
+      AND NOT is_likely_irradiated
+    GROUP BY device_id, device_type, manufacturer
+),
+
+/* ── Vth per device ────────────────────────────────────────────────────── */
+vth_dev_peak AS (
+    SELECT device_id, device_type, manufacturer,
+           GREATEST(0.005, MAX(dev_avg_i_drain) * 0.01) AS i_thresh
+    FROM baselines_per_device
+    WHERE measurement_category = 'Vth'
+      AND dev_avg_i_drain > 0
+      AND NOT is_likely_irradiated
+    GROUP BY device_id, device_type, manufacturer
+),
+vth_dev_crossing AS (
+    SELECT b.device_id, b.device_type, b.manufacturer,
+           b.v_drain_bin,
+           MIN(b.v_gate_bin) AS vth_v
+    FROM baselines_per_device b
+    JOIN vth_dev_peak t USING (device_id, device_type, manufacturer)
+    WHERE b.measurement_category = 'Vth'
+      AND b.dev_avg_i_drain >= t.i_thresh
+      AND NOT b.is_likely_irradiated
+    GROUP BY b.device_id, b.device_type, b.manufacturer, b.v_drain_bin
+),
+vth_dev_min_vds AS (
+    SELECT device_id, device_type, manufacturer,
+           MIN(ABS(v_drain_bin)) AS min_abs_vds
+    FROM vth_dev_crossing
+    GROUP BY device_id, device_type, manufacturer
+),
+vth_per_device AS (
+    SELECT c.device_id, c.device_type, c.manufacturer,
+           c.vth_v
+    FROM vth_dev_crossing c
+    JOIN vth_dev_min_vds m USING (device_id, device_type, manufacturer)
+    WHERE ABS(c.v_drain_bin) = m.min_abs_vds
+),
+
+/* ── Rds(on) per device ────────────────────────────────────────────────── */
+rdson_per_device AS (
+    SELECT b.device_id, b.device_type, b.manufacturer,
+           SUM(b.v_drain_bin * b.v_drain_bin) /
+               NULLIF(SUM(b.v_drain_bin * b.dev_avg_i_drain), 0)
+               * 1000.0 AS rdson_mohm
+    FROM baselines_per_device b
+    JOIN idvd_dev_bias m USING (device_id, device_type, manufacturer)
+    WHERE b.measurement_category = 'IdVd'
+      AND b.v_gate_bin  BETWEEN m.max_vgs - 1.0 AND m.max_vgs + 1.0
+      AND b.v_drain_bin >  0.0
+      AND b.v_drain_bin <= LEAST(m.max_vds * 0.15, 2.0)
+      AND b.dev_avg_i_drain > 0.0
+      AND NOT b.is_likely_irradiated
+    GROUP BY b.device_id, b.device_type, b.manufacturer
+),
+
+/* ── Vsd (body diode forward voltage) per device ───────────────────────── */
+vsd_dev_target AS (
+    SELECT device_id, device_type, manufacturer,
+           min_vgs,
+           min_id * 0.1 AS target_id
+    FROM q3_dev_bias
+),
+vsd_dev_ranked AS (
+    SELECT b.device_id, b.device_type, b.manufacturer,
+           ABS(b.v_drain_bin) AS vsd_v,
+           ROW_NUMBER() OVER (
+               PARTITION BY b.device_id, b.device_type, b.manufacturer
+               ORDER BY ABS(b.dev_avg_i_drain - t.target_id) ASC
+           ) AS rn
+    FROM baselines_per_device b
+    JOIN vsd_dev_target t USING (device_id, device_type, manufacturer)
+    WHERE b.measurement_category = '3rd_Quadrant'
+      AND b.v_gate_bin BETWEEN t.min_vgs - 0.5 AND t.min_vgs + 0.5
+      AND b.dev_avg_i_drain < 0
+      AND NOT b.is_likely_irradiated
+),
+vsd_per_device AS (
+    SELECT device_id, device_type, manufacturer, vsd_v
+    FROM vsd_dev_ranked WHERE rn = 1
+),
+
+/* ── V(BR)DSS per device ───────────────────────────────────────────────── */
+bvdss_dev_crossed AS (
+    SELECT device_id, device_type, manufacturer,
+           MIN(v_drain_bin) AS bvdss_v
+    FROM baselines_per_device
+    WHERE measurement_category = 'Blocking'
+      AND v_gate_bin BETWEEN -1.0 AND 1.0
+      AND dev_avg_abs_i_drain >= 100e-6
+      AND NOT is_likely_irradiated
+    GROUP BY device_id, device_type, manufacturer
+),
+bvdss_dev_held AS (
+    SELECT device_id, device_type, manufacturer,
+           MAX(v_drain_bin) AS bvdss_v
+    FROM baselines_per_device
+    WHERE measurement_category = 'Blocking'
+      AND v_gate_bin BETWEEN -1.0 AND 1.0
+      AND NOT is_likely_irradiated
+      AND (device_id, device_type, manufacturer) NOT IN (
+          SELECT device_id, device_type, manufacturer
+          FROM bvdss_dev_crossed
+      )
+    GROUP BY device_id, device_type, manufacturer
+),
+bvdss_per_device AS (
+    SELECT * FROM bvdss_dev_crossed
+    UNION ALL
+    SELECT * FROM bvdss_dev_held
+),
+
+/* ── Combine all per-device values into one wide row ───────────────────── */
+all_devices AS (
+    SELECT DISTINCT device_id, device_type, manufacturer
+    FROM (
+        SELECT device_id, device_type, manufacturer FROM vth_per_device
+        UNION
+        SELECT device_id, device_type, manufacturer FROM rdson_per_device
+        UNION
+        SELECT device_id, device_type, manufacturer FROM vsd_per_device
+        UNION
+        SELECT device_id, device_type, manufacturer FROM bvdss_per_device
+    ) u
+)
+
+SELECT
+    a.device_id,
+    a.device_type,
+    a.manufacturer,
+    ROUND(v.vth_v::numeric,       3) AS vth_v,
+    ROUND(r.rdson_mohm::numeric,  2) AS rdson_mohm,
+    ROUND(s.vsd_v::numeric,       3) AS vsd_v,
+    ROUND(bv.bvdss_v::numeric,    1) AS bvdss_v
+FROM all_devices a
+LEFT JOIN vth_per_device    v  USING (device_id, device_type, manufacturer)
+LEFT JOIN rdson_per_device  r  USING (device_id, device_type, manufacturer)
+LEFT JOIN vsd_per_device    s  USING (device_id, device_type, manufacturer)
+LEFT JOIN bvdss_per_device  bv USING (device_id, device_type, manufacturer)
+WHERE r.rdson_mohm IS NULL OR (r.rdson_mohm > 0 AND r.rdson_mohm < 1e6)
+ORDER BY a.device_type, a.device_id
+"""
+
+
 def find_or_create_virtual_dataset(session, db_id, name, sql_query,
                                    schema="public"):
     """Find or create a SQL-based (virtual) dataset; update SQL if it exists."""
@@ -793,9 +964,10 @@ def build_dashboard_layout(charts, sigma_charts=None, individual_charts=None):
 # ── Native Filters ───────────────────────────────────────────────────────────
 
 def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
+                         irrad_excluded=None,
                          v_drain_chart_ids=None, v_gate_chart_ids=None,
                          indiv_ds_id=None, calc_ds_id=None,
-                         meta_ds_id=None):
+                         meta_ds_id=None, boxplot_ds_id=None):
     """
     Five native filters for the averaged device-performance dashboard:
 
@@ -805,10 +977,18 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
     4. V_Drain Bias (V)     – optional range, scoped to IdVg/Vth charts
     5. V_Gate Bias (V)      – optional range, scoped to IdVd/3rdQ charts
 
+    *always_excluded* — charts excluded from Manufacturer / Device Type
+    filters (e.g. device_library table, calc params virtual dataset).
+    *irrad_excluded* — charts excluded from the Likely Irradiated filter
+    (superset of always_excluded; also includes box plots whose virtual
+    dataset has no is_likely_irradiated column).
+
     If *indiv_ds_id* is provided, the bias filters also target the
     individual-runs dataset (same column names: v_drain_bias, v_gate_bias).
     If *meta_ds_id* is provided, Manufacturer and Device Type filters also
     target baselines_metadata so the TSP Parameters table is filtered.
+    If *boxplot_ds_id* is provided, Manufacturer and Device Type filters
+    also target the box-plot virtual dataset.
     *calc_ds_id* is accepted but not used as a filter target — the calculated-
     parameters chart is excluded from all filters (always-excluded) to avoid
     a failing virtual-dataset SQL from breaking the filter dropdowns.
@@ -820,7 +1000,9 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
     vg_fid  = "NATIVE_FILTER-v-gate-bias"
 
     always_excluded = always_excluded or []
+    irrad_excluded = irrad_excluded or always_excluded
     filtered = [c for c in chart_ids if c not in always_excluded]
+    irrad_filtered = [c for c in chart_ids if c not in irrad_excluded]
     v_drain_chart_ids = v_drain_chart_ids or []
     v_gate_chart_ids = v_gate_chart_ids or []
 
@@ -844,7 +1026,10 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
                          "column": {"name": "manufacturer"}}]
                        + ([{"datasetId": meta_ds_id,
                             "column": {"name": "manufacturer"}}]
-                          if meta_ds_id else []),
+                          if meta_ds_id else [])
+                       + ([{"datasetId": boxplot_ds_id,
+                            "column": {"name": "manufacturer"}}]
+                          if boxplot_ds_id else []),
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
             "cascadeParentIds": [],
@@ -858,7 +1043,7 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
         {
             "id": dev_fid,
             "controlValues": {
-                "enableEmptyFilter": True,
+                "enableEmptyFilter": False,
                 "defaultToFirstItem": False,
                 "multiSelect": True,
                 "searchAllOptions": True,
@@ -870,7 +1055,10 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
                          "column": {"name": "device_type"}}]
                        + ([{"datasetId": meta_ds_id,
                             "column": {"name": "device_type"}}]
-                          if meta_ds_id else []),
+                          if meta_ds_id else [])
+                       + ([{"datasetId": boxplot_ds_id,
+                            "column": {"name": "device_type"}}]
+                          if boxplot_ds_id else []),
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
             "cascadeParentIds": [mfr_fid],
@@ -962,12 +1150,12 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
             },
             "cascadeParentIds": [],
             "scope": {"rootPath": ["ROOT_ID"],
-                      "excluded": list(always_excluded)},
+                      "excluded": list(irrad_excluded)},
             "type": "NATIVE_FILTER",
             "description": "Filter by irradiation status "
                            "(select false for pristine-only, true for "
                            "irradiated-only, or leave empty for all data)",
-            "chartsInScope": filtered,
+            "chartsInScope": irrad_filtered,
             "tabsInScope": [],
         },
     ]
@@ -1019,7 +1207,13 @@ def main():
     if not calc_ds:
         print("  WARNING: Could not create device_calculated_params dataset.")
         print("  Calculated Parameters chart will be skipped.")
-    for ds_id in [avg_ds, devlib_ds, indiv_ds, meta_ds, calc_ds]:
+    boxplot_ds = find_or_create_virtual_dataset(
+        session, db_id, "device_params_per_device", BOXPLOT_PARAMS_SQL
+    )
+    if not boxplot_ds:
+        print("  WARNING: Could not create device_params_per_device dataset.")
+        print("  Box plot charts will be skipped.")
+    for ds_id in [avg_ds, devlib_ds, indiv_ds, meta_ds, calc_ds, boxplot_ds]:
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -1467,6 +1661,48 @@ def main():
             12, 60,
         ))
 
+    # 9–12 – Box & Whisker plots for key parameters (virtual dataset)
+    # Each box plot shows the distribution of a calculated parameter across
+    # individual devices, grouped by device_type on the x-axis.
+    boxplot_chart_defs = []
+    if boxplot_ds:
+        boxplot_params_list = [
+            ("Device Library – RDS(on) Distribution",
+             "rdson_mohm", "RDS(on) (mΩ)"),
+            ("Device Library – Vth Distribution",
+             "vth_v", "Vth (V)"),
+            ("Device Library – Vf (Vsd) Distribution",
+             "vsd_v", "Vf / Vsd (V)"),
+            ("Device Library – VBR Distribution",
+             "bvdss_v", "V(BR)DSS (V)"),
+        ]
+        for bp_name, bp_col, bp_label in boxplot_params_list:
+            boxplot_chart_defs.append((
+                bp_name,
+                boxplot_ds,
+                "box_plot",
+                {
+                    "columns": ["device_id"],
+                    "metrics": [{
+                        "expressionType": "SIMPLE",
+                        "column": {"column_name": bp_col},
+                        "aggregate": "AVG",
+                        "label": bp_label,
+                    }],
+                    "groupby": ["device_type"],
+                    "adhoc_filters": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": f"{bp_col} IS NOT NULL",
+                        "clause": "WHERE",
+                    }],
+                    "whiskerOptions": "Tukey",  # <-- Changed this line
+                    "x_ticks_layout": "auto",
+                    "color_scheme": "supersetColors",
+                    "row_limit": 10000,
+                },
+                6, 50,
+            ))
+
     # ── ±1σ chart definitions (one per curve chart) ────────────────────────
     sigma_chart_defs = [
         # 0 – IdVg ±1σ
@@ -1775,6 +2011,19 @@ def main():
         if cid:
             chart_ids_only.append(cid)
 
+    # Box plot charts (appended to Mean Curves tab after other charts)
+    boxplot_charts_info = []
+    boxplot_chart_ids = []
+    if boxplot_chart_defs:
+        print("\n   Creating box plot charts...")
+        for name, ds_id, viz_type, params, width, height in boxplot_chart_defs:
+            cid, cuuid = create_chart(session, name, ds_id, viz_type, params)
+            charts_info.append((cid, cuuid, name, width, height))
+            boxplot_charts_info.append((cid, cuuid, name, width, height))
+            if cid:
+                chart_ids_only.append(cid)
+                boxplot_chart_ids.append(cid)
+
     sigma_charts_info = []
     sigma_chart_ids = []
 
@@ -1803,7 +2052,13 @@ def main():
     # from all filters to prevent a failing virtual-dataset SQL from breaking
     # the Manufacturer / Device Type filter dropdowns.
     calc_chart_id = charts_info[8][0] if len(charts_info) > 8 else None
+    # always_excluded: charts with no device_type/manufacturer columns
+    # (excluded from Manufacturer + Device Type filters)
     always_excluded = [c for c in [devlib_chart_id, calc_chart_id] if c]
+    # irrad_excluded: additionally includes box plots whose virtual dataset
+    # has no is_likely_irradiated column (already pristine-only by SQL)
+    irrad_excluded = [c for c in [devlib_chart_id, calc_chart_id]
+                      + boxplot_chart_ids if c]
 
     # Collect chart IDs for bias-filter scoping
     # V_Drain bias → IdVg Transfer + Vth (mean, sigma, individual)
@@ -1837,11 +2092,13 @@ def main():
     native_filters = build_native_filters(
         all_chart_ids, avg_ds,
         always_excluded=always_excluded,
+        irrad_excluded=irrad_excluded,
         v_drain_chart_ids=v_drain_chart_ids,
         v_gate_chart_ids=v_gate_chart_ids,
         indiv_ds_id=indiv_ds,
         calc_ds_id=calc_ds,
         meta_ds_id=meta_ds,
+        boxplot_ds_id=boxplot_ds,
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
     dash_id = create_or_update_dashboard(
@@ -1865,8 +2122,10 @@ def main():
         print("Dashboard ready!")
         print(f"  URL: {SUPERSET_URL}/superset/dashboard/baselines-device-library/")
         calc_chart_count = 1 if calc_ds else 0
+        bp_count = len(boxplot_chart_ids)
         print(f"  Charts: {len(all_chart_ids)} "
-              f"({len(chart_ids_only)} mean [{calc_chart_count} calculated]"
+              f"({len(chart_ids_only)} mean"
+              f" [{calc_chart_count} calculated, {bp_count} box plots]"
               f" + {len(sigma_chart_ids)} ±1σ"
               f" + {len(indiv_chart_ids)} individual)")
         print("  Tabs:")

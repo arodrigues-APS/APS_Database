@@ -269,13 +269,13 @@ SELECT
          THEN m.i_drain ELSE NULL END AS i_drain,
     -- 0.01 V bin resolution
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
-         THEN ROUND(m.v_gate::numeric, 2) ELSE NULL END AS v_gate_bin,
+         THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
     m.rds, m.bv, m.time_val
@@ -303,8 +303,8 @@ SELECT
     COALESCE(ir.ion_species, '?') || ' ' ||
         COALESCE(ir.beam_energy_mev::text, '?') || ' MeV' AS irrad_condition_label,
     md.measurement_category,
-    ROUND(m.v_gate::numeric, 2)  AS v_gate_bin,
-    ROUND(m.v_drain::numeric, 2) AS v_drain_bin,
+    ROUND(m.v_gate::numeric, 2)::double precision  AS v_gate_bin,
+    ROUND(m.v_drain::numeric, 2)::double precision AS v_drain_bin,
     AVG(m.i_drain)              AS avg_i_drain,
     AVG(m.i_gate)               AS avg_i_gate,
     AVG(ABS(m.i_drain))         AS avg_abs_i_drain,
@@ -317,14 +317,20 @@ WHERE md.irrad_campaign_id IS NOT NULL
   AND (m.v_gate  IS NULL OR ABS(m.v_gate)  < 1e30)
   AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
   AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
+  -- gate-swept categories must have a non-NULL v_gate so v_gate_bin is valid
+  AND NOT (md.measurement_category IN ('IdVg','Vth','Igss','Subthreshold')
+           AND m.v_gate IS NULL)
+  -- drain-swept categories must have a non-NULL v_drain so v_drain_bin is valid
+  AND NOT (md.measurement_category IN ('IdVd','Blocking','3rd_Quadrant')
+           AND m.v_drain IS NULL)
 GROUP BY
     md.device_type, md.manufacturer, md.device_id,
     md.irrad_role, ic.campaign_name, ic.facility,
     ir.ion_species, ir.beam_energy_mev, ir.let_surface,
     COALESCE(ir.beam_type, ic.beam_type),
     md.measurement_category,
-    ROUND(m.v_gate::numeric, 2),
-    ROUND(m.v_drain::numeric, 2);
+    ROUND(m.v_gate::numeric, 2)::double precision,
+    ROUND(m.v_drain::numeric, 2)::double precision;
 
 
 -- ── irradiation_campaign_overview ───────────────────────────────────────────
