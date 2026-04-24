@@ -48,7 +48,8 @@ except ImportError:
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 from common import (load_device_library, compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows,
-                    categorize_measurement as categorize_sc_measurement)
+                    categorize_measurement as categorize_sc_measurement,
+                    sweep_stats, refine_category_by_sweep)
 
 SC_ROOTS = [
     "/home/arodrigues/NAS/Common_Files/Short Circuit Measurements/ForDataAnalysis",
@@ -184,7 +185,7 @@ SELECT
     m.rds, m.bv, m.time_val
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
-WHERE md.data_source = 'sc_ruggedness';
+WHERE md.sample_group IS NOT NULL;
 
 -- SC waveform view (time-domain oscilloscope captures)
 DROP VIEW IF EXISTS sc_waveform_view CASCADE;
@@ -232,7 +233,7 @@ SELECT
     COUNT(*) AS n_points
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
-WHERE md.data_source = 'sc_ruggedness'
+WHERE md.sample_group IS NOT NULL
   AND md.measurement_category NOT IN ('SC_Waveform')
   AND (m.v_gate  IS NULL OR ABS(m.v_gate)  < 1e30)
   AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
@@ -1043,6 +1044,17 @@ def main():
         if not rows:
             files_skipped += 1
             continue
+
+        # Refine the string-based category using the actual sweep range.
+        # Catches filenames that match the IdVd regex but describe Blocking
+        # or 3rd-quadrant sweeps (see common.refine_category_by_sweep).
+        if not is_waveform:
+            stats = sweep_stats(headers, rows, map_columns)
+            refined, reason = refine_category_by_sweep(measurement_category, stats)
+            if refined != measurement_category:
+                print(f"    RECLASSIFY {filename}: "
+                      f"{measurement_category} → {refined} ({reason})")
+                measurement_category = refined
 
         # Find and parse matching TSP (if available)
         tsp_path = find_matching_tsp(fpath)

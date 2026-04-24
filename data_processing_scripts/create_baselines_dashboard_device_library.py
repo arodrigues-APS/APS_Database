@@ -110,11 +110,12 @@ idvg_dev_bias AS (
     GROUP BY device_id, device_type, manufacturer
 ),
 
--- Most negative Vgs and peak negative Id per device in 3rd-Quadrant (for Vsd)
-q3_dev_bias AS (
+-- Anchor Vgs for body-diode Vsd extraction: LEAST negative Vgs bin
+-- where Id<0.  Using MIN() here picks the deep blocking bias and reads
+-- back the off-state I-V, not the body-diode forward drop.
+q3_dev_anchor AS (
     SELECT device_id, device_type, manufacturer,
-           MIN(v_gate_bin)       AS min_vgs,
-           MIN(dev_avg_i_drain)  AS min_id
+           MAX(v_gate_bin) AS anchor_vgs
     FROM baselines_per_device
     WHERE measurement_category = '3rd_Quadrant'
       AND dev_avg_i_drain < 0
@@ -265,15 +266,27 @@ igss_vals AS (
    than a fixed current so the method works regardless of how far the
    sweep was taken.                                                         */
 vsd_dev_target AS (
-    SELECT device_id, device_type, manufacturer,
-           min_vgs,
-           min_id * 0.1 AS target_id
-    FROM q3_dev_bias
+    -- Reference current = 10 % of peak |Id| measured WITHIN the
+    -- anchor slice (not globally).  Devices whose pristine 3Q data
+    -- is only reverse leakage (< 10 mA peak) drop out — the outer
+    -- LEFT JOIN then yields NULL Vsd so we do not report a noise-
+    -- floor knee as a body-diode forward drop.
+    SELECT b.device_id, b.device_type, b.manufacturer,
+           a.anchor_vgs,
+           MIN(b.dev_avg_i_drain) * 0.1 AS target_id
+    FROM baselines_per_device b
+    JOIN q3_dev_anchor a USING (device_id, device_type, manufacturer)
+    WHERE b.measurement_category = '3rd_Quadrant'
+      AND b.dev_avg_i_drain < 0
+      AND NOT b.is_likely_irradiated
+      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
+    GROUP BY b.device_id, b.device_type, b.manufacturer, a.anchor_vgs
+    HAVING ABS(MIN(b.dev_avg_i_drain)) >= 0.010
 ),
 vsd_dev_ranked AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            ABS(b.v_drain_bin) AS vsd_v,
-           t.min_vgs          AS vsd_test_vgs,
+           t.anchor_vgs       AS vsd_test_vgs,
            ABS(t.target_id)   AS vsd_ref_id_a,
            ROW_NUMBER() OVER (
                PARTITION BY b.device_id, b.device_type, b.manufacturer
@@ -282,7 +295,7 @@ vsd_dev_ranked AS (
     FROM baselines_per_device b
     JOIN vsd_dev_target t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
-      AND b.v_gate_bin BETWEEN t.min_vgs - 0.5 AND t.min_vgs + 0.5
+      AND b.v_gate_bin BETWEEN t.anchor_vgs - 0.5 AND t.anchor_vgs + 0.5
       AND b.dev_avg_i_drain < 0
       AND NOT b.is_likely_irradiated
 ),
@@ -673,10 +686,11 @@ idvd_dev_bias AS (
       AND NOT is_likely_irradiated
     GROUP BY device_id, device_type, manufacturer
 ),
-q3_dev_bias AS (
+q3_dev_anchor AS (
+    -- Body-diode VGS anchor: least-negative bin where Id<0.  See
+    -- device_calculated_params for full reasoning.
     SELECT device_id, device_type, manufacturer,
-           MIN(v_gate_bin)       AS min_vgs,
-           MIN(dev_avg_i_drain)  AS min_id
+           MAX(v_gate_bin) AS anchor_vgs
     FROM baselines_per_device
     WHERE measurement_category = '3rd_Quadrant'
       AND dev_avg_i_drain < 0
@@ -738,10 +752,19 @@ rdson_per_device AS (
 
 /* ── Vsd (body diode forward voltage) per device ───────────────────────── */
 vsd_dev_target AS (
-    SELECT device_id, device_type, manufacturer,
-           min_vgs,
-           min_id * 0.1 AS target_id
-    FROM q3_dev_bias
+    -- Reference current WITHIN the anchor slice, with a 10 mA
+    -- conduction floor.  See device_calculated_params for reasoning.
+    SELECT b.device_id, b.device_type, b.manufacturer,
+           a.anchor_vgs,
+           MIN(b.dev_avg_i_drain) * 0.1 AS target_id
+    FROM baselines_per_device b
+    JOIN q3_dev_anchor a USING (device_id, device_type, manufacturer)
+    WHERE b.measurement_category = '3rd_Quadrant'
+      AND b.dev_avg_i_drain < 0
+      AND NOT b.is_likely_irradiated
+      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
+    GROUP BY b.device_id, b.device_type, b.manufacturer, a.anchor_vgs
+    HAVING ABS(MIN(b.dev_avg_i_drain)) >= 0.010
 ),
 vsd_dev_ranked AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
@@ -753,7 +776,7 @@ vsd_dev_ranked AS (
     FROM baselines_per_device b
     JOIN vsd_dev_target t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
-      AND b.v_gate_bin BETWEEN t.min_vgs - 0.5 AND t.min_vgs + 0.5
+      AND b.v_gate_bin BETWEEN t.anchor_vgs - 0.5 AND t.anchor_vgs + 0.5
       AND b.dev_avg_i_drain < 0
       AND NOT b.is_likely_irradiated
 ),
@@ -1220,13 +1243,6 @@ def main():
     # 4. Create charts
     print("\n4. Creating charts...")
 
-    # Common adhoc filter: only show bins with ≥2 devices (real averaging)
-    min_dev_filter = {
-        "expressionType": "SQL",
-        "sqlExpression": "n_devices >= 2",
-        "clause": "WHERE",
-    }
-
     # Helper to build a category filter
     def cat_filter(cat):
         return {
@@ -1274,7 +1290,7 @@ def main():
                 "label": metric_label,
             }],
             "groupby": groupby,
-            "adhoc_filters": [cat_filter(cat), min_dev_filter],
+            "adhoc_filters": [cat_filter(cat)],
             "row_limit": 50000,
             "truncate_metric": True,
             "show_legend": True,
@@ -1339,7 +1355,7 @@ def main():
                 },
             ],
             "groupby": groupby,
-            "adhoc_filters": [cat_filter(cat), min_dev_filter],
+            "adhoc_filters": [cat_filter(cat)],
             "row_limit": 50000,
             "truncate_metric": True,
             "show_legend": True,
@@ -1514,7 +1530,7 @@ def main():
                      ),
                      "label": "Avg Std Dev"},
                 ],
-                "adhoc_filters": [min_dev_filter],
+                "adhoc_filters": [],
                 "all_columns": [],
                 "order_by_cols": [],
                 "row_limit": 1000,

@@ -112,7 +112,7 @@ def build_dashboard_layout(tab_defs):
 # ── Native Filters ───────────────────────────────────────────────────────────
 
 def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
-                         overview_ds_id=None):
+                         overview_ds_id=None, waveform_ds_id=None):
     """Build 8 cascading native filters for the Irradiation dashboard."""
     ion_fid  = "NATIVE_FILTER-irrad-ion-species"
     nrg_fid  = "NATIVE_FILTER-irrad-beam-energy"
@@ -130,6 +130,9 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                             "column": {"name": col}})
         if overview_ds_id:
             targets.append({"datasetId": overview_ds_id,
+                            "column": {"name": col}})
+        if waveform_ds_id:
+            targets.append({"datasetId": waveform_ds_id,
                             "column": {"name": col}})
         return targets
 
@@ -190,8 +193,8 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                     description="pre_irrad = baseline before irradiation, "
                                 "post_irrad = after irradiation"),
 
-        # 8. Measurement Category — excludes overview dataset (already
-        #    grouped by category, so filtering would be confusing)
+        # 8. Measurement Category — excludes overview and waveform datasets
+        #    (overview is pre-grouped; waveform is pinned to 'Irradiation')
         make_filter(cat_fid, "Measurement Category", "measurement_category",
                     description="IdVg, IdVd, Blocking, Igss, etc.",
                     targets=(
@@ -276,6 +279,46 @@ def irrad_curve_params(x_axis, cat, x_title, y_title,
     return params
 
 
+def irrad_waveform_params(y_col, y_label, y_title):
+    """Line-chart params for irradiation waveform time-domain plots.
+
+    Groups by (device_type, device_id, irrad_condition_label) so each
+    device / ion-run combination appears as a separate series.  Time axis
+    is in seconds (Keithley SMU monitoring, not oscilloscope µs traces).
+    """
+    return {
+        "x_axis": "time_val",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": f"AVG({y_col})",
+            "label": y_label,
+        }],
+        "groupby": [
+            "device_type", "device_id", "irrad_condition_label",
+        ],
+        "adhoc_filters": [],
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Time (s)",
+        "y_axis_title": y_title,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "sort_series_type": "max",
+        "sort_series_ascending": False,
+        "series_limit": 50,
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -302,12 +345,14 @@ def main():
                                         "irradiation_degradation_summary")
     overview_ds = find_or_create_dataset(session, db_id,
                                           "irradiation_campaign_overview")
+    waveform_ds = find_or_create_dataset(session, db_id,
+                                          "irradiation_waveform_view")
     if not main_ds:
         print("  FATAL: Could not create irradiation_view dataset.")
         print("  Run seed_irradiation_campaigns.py first to create the views.")
         sys.exit(1)
 
-    for ds_id in [main_ds, degrad_ds, overview_ds]:
+    for ds_id in [main_ds, degrad_ds, overview_ds, waveform_ds]:
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -519,12 +564,44 @@ def main():
         ),
     ]
 
-    # ── Tab 3: Cross-Campaign Comparison ────────────────────────────────
-    print("   Tab 3: Cross-Campaign Comparison...")
+    # ── Tab 3: Waveform Viewer ───────────────────────────────────────────
+    print("   Tab 3: Waveform Viewer...")
 
     tab3_chart_defs = []
-    if degrad_ds:
+    if waveform_ds:
         tab3_chart_defs = [
+            # 0 – Vds vs Time
+            (
+                "Irrad – Waveform: Vds vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("vds", "Vds (V)", "V_DS (V)"),
+                12, 60,
+            ),
+            # 1 – Id vs Time
+            (
+                "Irrad – Waveform: Id vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("id_drain", "Id (A)", "I_D (A)"),
+                12, 60,
+            ),
+            # 2 – Vgs vs Time (populated only for 7-col files)
+            (
+                "Irrad – Waveform: Vgs vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("vgs", "Vgs (V)", "V_GS (V)"),
+                12, 60,
+            ),
+        ]
+
+    # ── Tab 4: Cross-Campaign Comparison ────────────────────────────────
+    print("   Tab 4: Cross-Campaign Comparison...")
+
+    tab4_chart_defs = []
+    if degrad_ds:
+        tab4_chart_defs = [
             # 0 – IdVg shift comparison by ion species (log Y)
             (
                 "Irrad – IdVg Shift by Ion Species",
@@ -635,10 +712,10 @@ def main():
             ),
         ]
 
-    # ── Tab 4: Individual Runs ───────────────────────────────────────────
-    print("   Tab 4: Individual Runs...")
+    # ── Tab 5: Individual Runs ───────────────────────────────────────────
+    print("   Tab 5: Individual Runs...")
 
-    tab4_chart_defs = [
+    tab5_chart_defs = [
         # 0 – Run Summary table
         (
             "Irrad – Run Summary",
@@ -817,6 +894,7 @@ def main():
     tab2_info = create_tab_charts(tab2_chart_defs)
     tab3_info = create_tab_charts(tab3_chart_defs)
     tab4_info = create_tab_charts(tab4_chart_defs)
+    tab5_info = create_tab_charts(tab5_chart_defs)
 
     # 5. Build dashboard
     print("\n5. Building dashboard layout...")
@@ -824,8 +902,9 @@ def main():
     tab_defs = [
         ("Campaign Overview",         "TAB-overview",    tab1_info),
         ("Pre/Post Comparison",        "TAB-prepost",     tab2_info),
-        ("Cross-Campaign Comparison",  "TAB-crosscamp",   tab3_info),
-        ("Individual Runs",            "TAB-individual",  tab4_info),
+        ("Waveform Viewer",            "TAB-waveform",    tab3_info),
+        ("Cross-Campaign Comparison",  "TAB-crosscamp",   tab4_info),
+        ("Individual Runs",            "TAB-individual",  tab5_info),
     ]
     # Skip empty tabs
     tab_defs = [td for td in tab_defs if td[2]]
@@ -836,6 +915,7 @@ def main():
         all_chart_ids, main_ds,
         degrad_ds_id=degrad_ds,
         overview_ds_id=overview_ds,
+        waveform_ds_id=waveform_ds,
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
 

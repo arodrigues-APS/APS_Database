@@ -333,6 +333,51 @@ GROUP BY
     ROUND(m.v_drain::numeric, 2)::double precision;
 
 
+-- ── irradiation_waveform_view ───────────────────────────────────────────────
+-- Time-domain monitoring captures (measurement_category = 'Irradiation').
+-- 3-col files: time / Vds / Id.  7-col files also have Vgs / Igs.
+DROP VIEW IF EXISTS irradiation_waveform_view CASCADE;
+CREATE VIEW irradiation_waveform_view AS
+SELECT
+    m.id               AS measurement_id,
+    md.id              AS metadata_id,
+    md.experiment,
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_type,
+    md.filename,
+    md.irrad_role      AS test_condition,
+    ic.campaign_name,
+    ic.facility,
+    COALESCE(ir.beam_type, ic.beam_type) AS beam_type,
+    ir.ion_species,
+    ir.beam_energy_mev,
+    ir.let_surface     AS let_mev_cm2_mg,
+    COALESCE(ir.ion_species, '?') || ' ' ||
+        COALESCE(ir.beam_energy_mev::text, '?') || ' MeV ' ||
+        COALESCE(ir.beam_type, ic.beam_type, '') AS irrad_condition_label,
+    -- Round to 1-second bins so Superset aggregates ~1600 time steps
+    -- instead of the ~335 K near-unique raw timestamps.
+    FLOOR(m.time_val)::double precision AS time_val,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN m.v_drain ELSE NULL END AS vds,
+    CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
+         THEN m.i_drain ELSE NULL END AS id_drain,
+    CASE WHEN m.v_gate  IS NOT NULL AND ABS(m.v_gate)  < 1e30
+         THEN m.v_gate  ELSE NULL END AS vgs,
+    CASE WHEN m.i_gate  IS NOT NULL AND ABS(m.i_gate)  < 1e30
+         THEN m.i_gate  ELSE NULL END AS igs,
+    m.point_index
+FROM baselines_measurements m
+JOIN baselines_metadata     md ON m.metadata_id         = md.id
+JOIN irradiation_campaigns  ic ON md.irrad_campaign_id  = ic.id
+LEFT JOIN irradiation_runs  ir ON md.irrad_run_id       = ir.id
+WHERE md.irrad_campaign_id IS NOT NULL
+  AND md.measurement_category = 'Irradiation'
+  AND m.time_val IS NOT NULL;
+
+
 -- ── irradiation_campaign_overview ───────────────────────────────────────────
 DROP VIEW IF EXISTS irradiation_campaign_overview CASCADE;
 CREATE VIEW irradiation_campaign_overview AS
@@ -548,6 +593,7 @@ def main():
     conn.commit()
     print("   Created: irradiation_view")
     print("   Created: irradiation_degradation_summary")
+    print("   Created: irradiation_waveform_view")
     print("   Created: irradiation_campaign_overview")
 
     cur.close()

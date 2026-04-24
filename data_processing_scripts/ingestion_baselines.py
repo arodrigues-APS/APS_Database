@@ -52,7 +52,8 @@ from luaparser import astnodes
 # ── Configuration ────────────────────────────────────────────────────────────
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 from common import (load_device_library, compute_file_hash, find_matching_tsp,
-                    map_columns, expand_multistep_rows, categorize_measurement)
+                    map_columns, expand_multistep_rows, categorize_measurement,
+                    sweep_stats, refine_category_by_sweep)
 
 PRISTINE_ROOT = "/home/arodrigues/APS_Database/Measurements/Pristine"
 
@@ -916,6 +917,23 @@ GROUP BY metadata_id;
 --
 -- Used by both baselines_device_averages (for dashboard curve charts) and
 -- CALCULATED_PARAMS_SQL (for per-device parameter extraction).
+-- Bin resolution rationale (per category):
+--   IdVd / 3rd_Quadrant:  Vg is a STEP bias set to a few nominal values
+--     (3-12 per run) with ±0.05 V of instrument jitter.  Vd is swept,
+--     but different devices use different sweep grids (steps of 0.01,
+--     0.05, 0.1 V; various offsets).  Fine-grained binning fragments
+--     each nominal step into sub-bins covering different device subsets,
+--     and the chart's final AVG mixes those subsets unequally at every
+--     point — producing ~0.1 V-period spikes in the averaged curve.
+--     Snapping Vg to integer and Vd to 0.1 V at the per-device stage
+--     aligns all devices onto a shared grid so baselines_device_averages
+--     is a clean weighted mean.  Rds_on slope still has ~20 points per
+--     device in the 0-2 V region — ample for the linear fit.
+--   IdVg / Vth / Subthreshold / Igss:  Vg is SWEPT — keep 0.01 V so
+--     Vth, gfs, and SS retain resolution.  Vd comes from drain_bias_value
+--     (exact step) or the sampled Vd for categories without a bias value.
+--   Other categories (Blocking, Bodydiode, ChannelDiode):  unchanged at
+--     0.01 V resolution.
 CREATE VIEW baselines_per_device AS
 SELECT
     md.device_id,
@@ -923,11 +941,18 @@ SELECT
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 2)::double precision AS v_gate_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+    END AS v_gate_bin,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
         THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
         THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
@@ -956,11 +981,18 @@ GROUP BY
     md.manufacturer,
     md.measurement_category,
     md.is_likely_irradiated,
-    ROUND(m.v_gate::numeric, 2)::double precision,
+    CASE
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+    END,
     CASE
         WHEN md.measurement_category IN ('IdVg', 'Vth')
              AND md.drain_bias_value IS NOT NULL
         THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)::double precision
         WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
         THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
@@ -1132,6 +1164,16 @@ def main():
                 print(f"  [{idx+1}/{len(measurement_files)}] SKIP (empty): {filename}")
             files_skipped += 1
             continue
+
+        # Refine the string-based category using the actual sweep range.
+        # Catches measurement_types that match the IdVd regex but describe
+        # Blocking (e.g. "IdVd_Blocking") or 3rd-quadrant sweeps.
+        stats = sweep_stats(headers, rows, map_columns)
+        refined, reason = refine_category_by_sweep(measurement_category, stats)
+        if refined != measurement_category:
+            print(f"  RECLASSIFY {filename}: "
+                  f"{measurement_category} → {refined} ({reason})")
+            measurement_category = refined
 
         # Find and parse matching TSP
         tsp_path = find_matching_tsp(fpath)

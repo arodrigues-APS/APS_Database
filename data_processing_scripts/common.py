@@ -12,6 +12,29 @@ import hashlib
 from pathlib import Path
 
 
+# ── Schema migrations ───────────────────────────────────────────────────────
+
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
+
+
+def apply_schema(conn):
+    """
+    Apply every .sql in schema/ in lexicographic order.
+
+    Files are idempotent (CREATE TABLE IF NOT EXISTS + DO $$ ALTER TABLE
+    ... ADD COLUMN ... EXCEPTION WHEN duplicate_column $$) so calling
+    this at startup is safe.  Callers: server.py on boot, every
+    ingestion_*.py before first write.
+    """
+    if not SCHEMA_DIR.is_dir():
+        return
+    cur = conn.cursor()
+    for sql_path in sorted(SCHEMA_DIR.glob("*.sql")):
+        cur.execute(sql_path.read_text())
+    conn.commit()
+    cur.close()
+
+
 # ── Device Library ──────────────────────────────────────────────────────────
 
 def load_device_library(cur):
@@ -215,15 +238,23 @@ def categorize_measurement(measurement_type, filename=''):
     if re.search(r'channeldiode|moschanneldiode', tl):
         return 'ChannelDiode'
 
+    # 3rd-quadrant (checked before IdVg/IdVd — filenames like "3rd_Vg0V"
+    # contain substrings that match the IdVd regex via `_vg\d`).
+    if re.search(r'3rd|quad|third', tl):
+        return '3rd_Quadrant'
+
+    # Blocking (checked before IdVd — "Idss…" filenames contain "id" fragments
+    # that could be picked up by the IdVd regex in edge cases).
+    # `dvd_vg` was removed: it was intended to catch standalone Blocking
+    # filenames but only ever matched `IdVd_Vg*` as a substring.
+    if re.search(r'block|bvdss|idss|idvdss|dvdss|listv', tl):
+        return 'Blocking'
+
     # Standard categories (union of baselines and SC patterns)
     if re.search(r'idvg|id_vg|vd\d+mv|vd\d+v?$|_vd\d|vd5$|vd5v|vd50|vd100|vd500', tl):
         return 'IdVg'
     if re.search(r'idvd|id_vd|rds_|rds_on|rdson|_rds|_vg\d|vg101520|idvvdvg', tl) and 'igss' not in tl:
         return 'IdVd'
-    if re.search(r'3rd|quad|third', tl):
-        return '3rd_Quadrant'
-    if re.search(r'block|bvdss|idss|idvdss|dvdss|dvd_vg|listv', tl):
-        return 'Blocking'
     if re.search(r'igss', tl):
         return 'Igss'
     if re.search(r'\bvth\b|vth_', tl):
@@ -233,3 +264,83 @@ def categorize_measurement(measurement_type, filename=''):
     if re.search(r'irrad', tl):
         return 'Irradiation'
     return 'Other'
+
+
+# ── Sweep-range-aware category refinement ──────────────────────────────────
+#
+# The string-based classifier above operates on the filename/measurement_type
+# alone.  Some source conventions (notably the irradiation campaigns' IDVDfwd
+# for blocking sweeps and IDVDrev for body-diode sweeps) label files in ways
+# that collide with the "IdVd" regex but describe completely different tests.
+# These functions catch that by inspecting the actual sweep range.
+
+# Thresholds calibrated against the current corpus:
+#   Real linear-region IdVd : Vd ≤ 15 V, |Id| up to tens of A.
+#   Blocking / BVDSS        : Vd ≥ 50 V (up to rated BV), |Id| in leakage range.
+#   3rd-quadrant / body Dio : Vd swept negative, Id noticeably negative.
+_REFINE_BLOCKING_VD_MIN   = 30.0   # V — no linear-region IdVd reaches 30 V
+_REFINE_BLOCKING_ID_ABS   = 1.0    # A — blocking sweeps show leakage, not conduction
+_REFINE_Q3_VD_MAX         = 0.5    # V — reverse sweep never goes strongly positive
+_REFINE_Q3_VD_MIN         = -0.1   # V — must actually excurse negative
+_REFINE_Q3_ID_MIN         = -1e-7  # A — measurable reverse current (rules out noise)
+
+
+def sweep_stats(headers, rows, map_fn):
+    """
+    Scan already-parsed rows once and return drain-voltage/current extrema.
+
+    Returns dict with keys vd_min, vd_max, id_min, id_max, id_abs_max, n_pts.
+    Missing/non-numeric values are skipped.  Returns None for each field if
+    no numeric values were found.
+    """
+    vd_min = vd_max = id_min = id_max = id_abs_max = None
+    n = 0
+    for row in rows:
+        mapped = map_fn(headers, row)
+        vd = mapped.get('v_drain')
+        idv = mapped.get('i_drain')
+        if isinstance(vd, (int, float)):
+            if vd_min is None or vd < vd_min: vd_min = vd
+            if vd_max is None or vd > vd_max: vd_max = vd
+        if isinstance(idv, (int, float)):
+            if id_min is None or idv < id_min: id_min = idv
+            if id_max is None or idv > id_max: id_max = idv
+            av = abs(idv)
+            if id_abs_max is None or av > id_abs_max: id_abs_max = av
+        n += 1
+    return {
+        'vd_min': vd_min, 'vd_max': vd_max,
+        'id_min': id_min, 'id_max': id_max,
+        'id_abs_max': id_abs_max, 'n_pts': n,
+    }
+
+
+def refine_category_by_sweep(category, stats):
+    """
+    Correct an 'IdVd' label that actually describes a Blocking or
+    3rd-Quadrant sweep, based on observed drain-voltage/current range.
+
+    Only 'IdVd' is ever second-guessed — other categories are returned
+    unchanged.  Returns (refined_category, reason) where reason is a short
+    string usable for logging (empty when no change was made).
+    """
+    if category != 'IdVd' or not stats:
+        return category, ''
+
+    vd_max = stats.get('vd_max')
+    vd_min = stats.get('vd_min')
+    id_min = stats.get('id_min')
+    id_abs = stats.get('id_abs_max')
+
+    if (vd_max is not None and vd_max >= _REFINE_BLOCKING_VD_MIN
+            and (id_abs is None or id_abs < _REFINE_BLOCKING_ID_ABS)):
+        return 'Blocking', (f'Vd_max={vd_max:.1f} V ≥ {_REFINE_BLOCKING_VD_MIN:g} V '
+                            f'with |Id|_max={0.0 if id_abs is None else id_abs:.3g} A')
+
+    if (vd_max is not None and vd_max <= _REFINE_Q3_VD_MAX
+            and vd_min is not None and vd_min < _REFINE_Q3_VD_MIN
+            and id_min is not None and id_min < _REFINE_Q3_ID_MIN):
+        return '3rd_Quadrant', (f'Vd=[{vd_min:.2f}, {vd_max:.2f}] V with '
+                                f'Id_min={id_min:.3g} A (reverse sweep)')
+
+    return category, ''

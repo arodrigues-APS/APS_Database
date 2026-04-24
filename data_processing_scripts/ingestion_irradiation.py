@@ -46,7 +46,8 @@ except ImportError:
     from psycopg2.extras import execute_values
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DATA_ROOT
-from common import (load_device_library, compute_file_hash, categorize_measurement)
+from common import (load_device_library, compute_file_hash, categorize_measurement,
+                    sweep_stats, refine_category_by_sweep)
 
 
 # ── Irradiation root ────────────────────────────────────────────────────────
@@ -513,6 +514,17 @@ def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
                 print(f"    SKIP (empty/unparseable): {filename}")
             files_skipped += 1
             continue
+
+        # Refine the string-based category using the actual sweep range.
+        # Handles IDVDfwd (→ Blocking) and IDVDrev (→ 3rd_Quadrant) that the
+        # regex classifier routes to 'IdVd' based on filename alone.
+        stats = sweep_stats(headers, data_rows, map_irrad_columns)
+        refined, reason = refine_category_by_sweep(measurement_category, stats)
+        if refined != measurement_category:
+            if not dry_run or (idx + 1) % 20 == 0 or idx == 0:
+                print(f"    RECLASSIFY {filename}: "
+                      f"{measurement_category} → {refined} ({reason})")
+            measurement_category = refined
 
         if dry_run:
             # In dry-run mode, just report what would be ingested

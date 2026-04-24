@@ -1,6 +1,8 @@
 # macOS
 .DS_Store
 ._*
+.cscs-keygen.sh
+
 
 # Lab data files
 *.csv
@@ -22,3 +24,11 @@ py3/
 
 # Superset Docker runtime (not your config)
 superset/docker/
+
+# Ad-hoc screenshots at repo root
+Screenshot*.png
+
+# Generated outputs — keep parity fingerprints, ignore everything else
+out/
+!out/fingerprints/
+!out/fingerprints/*.json

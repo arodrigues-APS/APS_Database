@@ -546,6 +546,228 @@ def sync_irradiation_metadata():
 	return redirect("/irradiation")
 
 
+# ── Avalanche Campaigns ───────────────────────────────────────────────────────
+
+from data_processing_scripts.db_config import NAS_ROOT
+
+AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
+
+AVALANCHE_OUTCOMES = ["unknown", "survived", "failed"]
+
+
+class AvalancheCampaignForm(FlaskForm):
+	folder_path        = StringField("Folder Path")
+	campaign_name      = StringField("Campaign Name")
+	inductance_mh      = StringField("Inductance (mH)")
+	temperature_c      = StringField("Temperature (°C)")
+	device_part_number = StringField("Device Part Number")
+	outcome_default    = SelectField("Default Outcome", choices=AVALANCHE_OUTCOMES)
+	notes              = StringField("Notes")
+	submit             = SubmitField("Add Campaign")
+
+
+_ENSURE_AVALANCHE_SQL = """
+CREATE TABLE IF NOT EXISTS avalanche_campaigns (
+    id                 SERIAL PRIMARY KEY,
+    folder_path        TEXT NOT NULL UNIQUE,
+    campaign_name      TEXT NOT NULL,
+    inductance_mh      DOUBLE PRECISION,
+    temperature_c      DOUBLE PRECISION,
+    device_part_number TEXT,
+    outcome_default    TEXT DEFAULT 'unknown',
+    notes              TEXT
+);
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN avalanche_inductance_mh DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+"""
+
+
+def _ensure_avalanche_schema(conn):
+	cur = conn.cursor()
+	cur.execute(_ENSURE_AVALANCHE_SQL)
+	conn.commit()
+	cur.close()
+
+
+def _list_avalanche_families(conn):
+	"""Return distinct avalanche_family values already in baselines_metadata."""
+	try:
+		cur = conn.cursor()
+		cur.execute("""
+			SELECT DISTINCT avalanche_family
+			FROM baselines_metadata
+			WHERE data_source = 'avalanche' AND avalanche_family IS NOT NULL
+			ORDER BY avalanche_family
+		""")
+		rows = [r[0] for r in cur.fetchall()]
+		cur.close()
+		return rows
+	except Exception:
+		return []
+
+
+@app.route("/avalanche", methods=["GET", "POST"])
+def avalanche():
+	error = None
+	conn = get_db()
+	try:
+		_ensure_avalanche_schema(conn)
+	except Exception as e:
+		error = f"Schema error: {e}"
+
+	form = AvalancheCampaignForm()
+	if form.validate_on_submit():
+		fp = form.folder_path.data.strip()
+		name = form.campaign_name.data.strip()
+		if not fp or not name:
+			error = "Folder path and campaign name are required."
+		else:
+			try:
+				cur = conn.cursor()
+				cur.execute("""
+					INSERT INTO avalanche_campaigns
+					    (folder_path, campaign_name, inductance_mh,
+					     temperature_c, device_part_number,
+					     outcome_default, notes)
+					VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+					(fp, name,
+					 form.inductance_mh.data or None,
+					 form.temperature_c.data or None,
+					 form.device_part_number.data.strip() or None,
+					 form.outcome_default.data or "unknown",
+					 form.notes.data or None))
+				conn.commit()
+				cur.close()
+				flash(f"Campaign '{name}' added.", "success")
+				return redirect("/avalanche")
+			except psycopg2.errors.UniqueViolation:
+				conn.rollback()
+				error = f"A campaign for folder '{fp}' already exists."
+			except Exception as e:
+				conn.rollback()
+				error = f"Database error: {e}"
+
+	campaigns = []
+	known_families = []
+	try:
+		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+		cur.execute("SELECT * FROM avalanche_campaigns ORDER BY folder_path")
+		campaigns = cur.fetchall()
+		cur.close()
+		known_families = _list_avalanche_families(conn)
+	except Exception as e:
+		error = f"Could not load campaigns: {e}"
+	finally:
+		conn.close()
+
+	return render_template("avalanche.html",
+	                       form=form, campaigns=campaigns,
+	                       known_families=known_families,
+	                       outcomes=AVALANCHE_OUTCOMES,
+	                       error=error)
+
+
+@app.route("/avalanche/delete/<int:campaign_id>", methods=["POST"])
+def delete_avalanche_campaign(campaign_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("DELETE FROM avalanche_campaigns WHERE id = %s", (campaign_id,))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Campaign removed.", "success")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/avalanche")
+
+
+@app.route("/avalanche/edit/<int:campaign_id>", methods=["POST"])
+def edit_avalanche_campaign(campaign_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("""
+			UPDATE avalanche_campaigns
+			SET folder_path        = %s,
+			    campaign_name      = %s,
+			    inductance_mh      = %s,
+			    temperature_c      = %s,
+			    device_part_number = %s,
+			    outcome_default    = %s,
+			    notes              = %s
+			WHERE id = %s""",
+			(request.form["folder_path"].strip(),
+			 request.form["campaign_name"].strip(),
+			 request.form.get("inductance_mh") or None,
+			 request.form.get("temperature_c") or None,
+			 request.form.get("device_part_number", "").strip() or None,
+			 request.form.get("outcome_default") or "unknown",
+			 request.form.get("notes") or None,
+			 campaign_id))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Campaign updated.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("A campaign for that folder path already exists.", "danger")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/avalanche")
+
+
+@app.route("/avalanche/sync", methods=["POST"])
+def sync_avalanche_metadata():
+	"""Push inductance / temperature / device overrides to baselines_metadata null fields."""
+	try:
+		conn = get_db()
+		_ensure_avalanche_schema(conn)
+		cur = conn.cursor()
+
+		cur.execute("""
+			UPDATE baselines_metadata bm
+			SET avalanche_inductance_mh = ac.inductance_mh
+			FROM avalanche_campaigns ac
+			WHERE bm.data_source = 'avalanche'
+			  AND bm.avalanche_family = ac.folder_path
+			  AND ac.inductance_mh IS NOT NULL
+			  AND bm.avalanche_inductance_mh IS NULL
+		""")
+		n_ind = cur.rowcount
+
+		cur.execute("""
+			UPDATE baselines_metadata bm
+			SET avalanche_temperature_c = ac.temperature_c
+			FROM avalanche_campaigns ac
+			WHERE bm.data_source = 'avalanche'
+			  AND bm.avalanche_family = ac.folder_path
+			  AND ac.temperature_c IS NOT NULL
+			  AND bm.avalanche_temperature_c IS NULL
+		""")
+		n_temp = cur.rowcount
+
+		cur.execute("""
+			UPDATE baselines_metadata bm
+			SET device_type = ac.device_part_number
+			FROM avalanche_campaigns ac
+			WHERE bm.data_source = 'avalanche'
+			  AND bm.avalanche_family = ac.folder_path
+			  AND ac.device_part_number IS NOT NULL
+			  AND bm.device_type IS NULL
+		""")
+		n_dev = cur.rowcount
+
+		conn.commit()
+		cur.close(); conn.close()
+		flash(
+			f"Sync complete: {n_ind} inductance, {n_temp} temperature, "
+			f"{n_dev} device-type field(s) updated.",
+			"success"
+		)
+	except Exception as e:
+		flash(f"Sync error: {e}", "danger")
+	return redirect("/avalanche")
+
+
 if __name__ == "__main__":
 	app.run(debug=False)
 
