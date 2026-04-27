@@ -53,6 +53,132 @@ def load_device_library(cur):
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# ── Device Mapping Rules (Phase 1) ─────────────────────────────────────────
+#
+# Unified device-matching helper that consults the device_mapping_rules
+# table (seeded from the three legacy hardcoded dicts) with a scope-aware
+# fallback to device_library substring matching.
+#
+# The per-scope ordering matters.  Legacy scripts applied rules and the
+# library in different orders — swapping this in Phase 1.4-1.6 without
+# preserving those orderings will silently mis-assign devices.
+#
+#   baselines:    library-substring  ->  library-prefix  ->  rules
+#   sc:           rules              ->  library-substring
+#   irradiation:  rules              ->  library-substring
+#   avalanche:    rules              ->  library-substring
+#
+# Rules are pre-filtered by scope and pre-sorted by (priority DESC,
+# LENGTH(pattern) DESC) at load time so the matcher is a simple linear
+# scan.  substring matches are case-insensitive; regex matches run with
+# re.IGNORECASE.
+
+
+def load_device_mapping_rules(cur, scope):
+    """
+    Load device_mapping_rules for the given scope (including scope='all').
+    Rows are pre-joined with device_library to populate manufacturer, and
+    pre-sorted by (priority DESC, LENGTH(pattern) DESC) so _apply_rules can
+    just iterate.
+    """
+    cur.execute("""
+        SELECT dmr.pattern, dmr.pattern_type, dmr.priority,
+               dmr.part_number, dl.manufacturer
+        FROM device_mapping_rules dmr
+        JOIN device_library dl ON dmr.part_number = dl.part_number
+        WHERE dmr.scope IN (%s, 'all')
+        ORDER BY dmr.priority DESC, LENGTH(dmr.pattern) DESC
+    """, (scope,))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _apply_rules(path_upper, rules):
+    for rule in rules:
+        pattern = rule["pattern"]
+        if rule["pattern_type"] == "substring":
+            if pattern.upper() in path_upper:
+                return rule["part_number"], rule["manufacturer"]
+        else:  # regex
+            if re.search(pattern, path_upper, re.IGNORECASE):
+                return rule["part_number"], rule["manufacturer"]
+    return None, None
+
+
+def _library_substring(path_upper, device_library):
+    for entry in device_library:
+        pn = entry["part_number"]
+        if pn and pn.upper() in path_upper:
+            return pn, entry.get("manufacturer")
+    return None, None
+
+
+def _library_prefix(path_upper, device_library):
+    """
+    Legacy baselines Pass-2: for part_numbers ending in a letter (most SiC
+    MOSFET part numbers do — e.g. C2M0080120D, SCT3030AL), strip the
+    trailing letter and look for the prefix followed by underscore.  This
+    handles filenames like "C2M0080120_DUT01_IdVg.csv".
+
+    Keeps the exact (buggy) r'[_\\b]' character class from the original —
+    \\b inside a character class is backspace, not a word boundary, so in
+    practice this only fires on underscore.  Replicated verbatim so the
+    parity harness matches legacy behaviour.
+    """
+    for entry in device_library:
+        pn = entry["part_number"]
+        if not pn:
+            continue
+        pnu = pn.upper()
+        if len(pnu) > 4 and pnu[-1].isalpha():
+            prefix = pnu[:-1]
+            if re.search(prefix + r"[_\b]", path_upper):
+                return pn, entry.get("manufacturer")
+    return None, None
+
+
+def match_device(path, scope, rules, device_library):
+    """
+    Resolve a file path to (part_number, manufacturer) using the
+    device_mapping_rules table + device_library fallback.
+
+    Arguments:
+        path            Case-insensitive file path to match against.  For
+                        scope='sc' callers MUST pass a path relative to
+                        the SC root (e.g. "SCT2080/DUT1/IdVg.csv"); SC
+                        patterns are anchored at the start of the path to
+                        emulate legacy parts[0] exact-match behaviour.
+                        Other scopes accept the full path.
+        scope           One of 'baselines', 'sc', 'irradiation',
+                        'avalanche'.  Controls rule-vs-library ordering.
+        rules           Output of load_device_mapping_rules(cur, scope).
+        device_library  List of dicts from load_device_library(cur).
+
+    Returns (part_number, manufacturer) or (None, None) if nothing matches.
+    """
+    if not path:
+        return None, None
+    path_upper = path.upper()
+
+    if scope == "baselines":
+        # Pass 1: library substring
+        pn, mfr = _library_substring(path_upper, device_library)
+        if pn:
+            return pn, mfr
+        # Pass 2: library prefix (trailing-letter strip)
+        pn, mfr = _library_prefix(path_upper, device_library)
+        if pn:
+            return pn, mfr
+        # Pass 3: experiment rules
+        return _apply_rules(path_upper, rules)
+
+    # sc, irradiation, avalanche: rules first, then library substring
+    pn, mfr = _apply_rules(path_upper, rules)
+    if pn:
+        return pn, mfr
+    return _library_substring(path_upper, device_library)
+
+
 # ── File Hashing ────────────────────────────────────────────────────────────
 
 def compute_file_hash(filepath):

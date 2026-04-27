@@ -51,7 +51,8 @@ from luaparser import astnodes
 
 # ── Configuration ────────────────────────────────────────────────────────────
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
-from common import (load_device_library, compute_file_hash, find_matching_tsp,
+from common import (load_device_library, load_device_mapping_rules, match_device,
+                    compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows, categorize_measurement,
                     sweep_stats, refine_category_by_sweep)
 
@@ -67,76 +68,6 @@ REBUILD = False
 # each time it runs.  Each row has a part_number (used as the search pattern
 # in filenames/paths) plus metadata columns.
 # load_device_library() is imported from common.py.
-
-
-def match_device_type(filepath, device_library):
-    """
-    Try to identify the commercial device type from the file path.
-
-    Three-pass matching strategy:
-      1. Substring match: search for each part_number (case-insensitive) in
-         the full file path.  Library is pre-sorted longest-first so more
-         specific part numbers win.
-      2. Prefix match: if the path contains a part_number base (e.g.
-         "C2M0080120" from "C2M0080120D") followed by an underscore, match
-         it.  Handles filenames like "C2M0080120_DUT01_IdVg.csv".
-      3. Experiment-name heuristic: when the experiment folder encodes the
-         manufacturer and Rds(on) (e.g. "Rohm_30mOhm_preIV_…"), look up the
-         unique device in the library that matches that manufacturer + Rds(on).
-         For the mixed Cree_80mOhm experiment, device_id prefixes "I" and
-         "ROHM"/"INFINEON" override the default Wolfspeed assignment.
-
-    Returns (part_number, manufacturer) on match, or (None, None).
-    """
-    import re
-    path_upper = filepath.upper()
-    filename_upper = os.path.basename(filepath).upper()
-
-    # Pass 1 – exact part-number substring
-    for entry in device_library:
-        if entry["part_number"].upper() in path_upper:
-            return entry["part_number"], entry["manufacturer"]
-
-    # Pass 2 – part-number prefix match (handles trailing D or other suffixes)
-    for entry in device_library:
-        pn = entry["part_number"].upper()
-        if len(pn) > 4 and pn[-1].isalpha():
-            prefix = pn[:-1]
-            if re.search(prefix + r'[_\b]', path_upper):
-                return entry["part_number"], entry["manufacturer"]
-
-    # Pass 3 – experiment-name heuristic.
-    # Maps experiment folder patterns directly to (part_number, manufacturer)
-    # to avoid ambiguity when multiple library entries share the same rdson.
-    # The mixed Cree_80mOhm experiment overrides the default for Infineon/Rohm
-    # files based on filename prefix.
-
-    def _lookup_part(part_number):
-        for entry in device_library:
-            if entry["part_number"] == part_number:
-                return entry["part_number"], entry["manufacturer"]
-        return None, None
-
-    _EXPERIMENT_RULES = [
-        ("ROHM_30MOHM",     "SCT3030AL"),
-        ("INFINEON_90MOHM", "IMW120R090M1H"),
-        ("CREE_25MOHM",     "C2M0025120D"),
-        ("CREE_80MOHM",     "C2M0080120D"),
-    ]
-
-    for pattern, default_part in _EXPERIMENT_RULES:
-        if pattern not in path_upper:
-            continue
-        # For mixed experiments (Cree_80mOhm has Wolfspeed + Infineon + Rohm),
-        # check device_id prefix in the filename to override the default.
-        if pattern == "CREE_80MOHM":
-            if re.match(r'I\d', filename_upper) or "INFINEON" in filename_upper:
-                return _lookup_part("IMW120R090M1H")
-            if "ROHM" in filename_upper:
-                return _lookup_part("SCT3030AL")
-        return _lookup_part(default_part)
-
-    return None, None
 
 
 # ── TSP Parser (using luaparser) ──────────────────────────────────────────────
@@ -1097,6 +1028,9 @@ def main():
         print("  Run  python3 seed_device_library.py  to populate it,")
         print("  or add devices via Superset SQL Lab.")
 
+    rules = load_device_mapping_rules(cur, 'baselines')
+    print(f"  {len(rules)} baselines device-matching rules.")
+
     # Find all measurement files (CSV + XLS)
     measurement_files = []
     for root, dirs, files in os.walk(PRISTINE_ROOT):
@@ -1138,7 +1072,7 @@ def main():
         experiment = extract_experiment_name(fpath)
         device_id, measurement_type = classify_measurement(filename)
         measurement_category = categorize_measurement(measurement_type)
-        device_type, manufacturer = match_device_type(fpath, device_library)
+        device_type, manufacturer = match_device(fpath, 'baselines', rules, device_library)
 
         # File hash for dedup
         file_hash = compute_file_hash(fpath)

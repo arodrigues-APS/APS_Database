@@ -256,6 +256,7 @@ SELECT
         COALESCE(ir.beam_type, ic.beam_type, '') AS irrad_condition_label,
     md.sweep_start, md.sweep_stop, md.sweep_points,
     md.bias_value, md.drain_bias_value,
+    md.fluence_at_meas,
     m.point_index,
     m.step_index,
     -- Keithley 9.9E37 overflow sentinel → NULL
@@ -368,6 +369,8 @@ SELECT
          THEN m.v_gate  ELSE NULL END AS vgs,
     CASE WHEN m.i_gate  IS NOT NULL AND ABS(m.i_gate)  < 1e30
          THEN m.i_gate  ELSE NULL END AS igs,
+    m.fluence,
+    md.fluence_at_meas,
     m.point_index
 FROM baselines_measurements m
 JOIN baselines_metadata     md ON m.metadata_id         = md.id

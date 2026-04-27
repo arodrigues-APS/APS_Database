@@ -83,10 +83,20 @@ def readme():
 
 # ── Device Library ───────────────────────────────────────────────────────────
 from data_processing_scripts.db_config import get_connection
+from data_processing_scripts.common import apply_schema
 
 def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
 	return get_connection()
+
+# Apply idempotent schema migrations (schema/*.sql).  Failure here is
+# non-fatal so the webserver can still boot when the DB is down.
+try:
+	_boot_conn = get_connection()
+	apply_schema(_boot_conn)
+	_boot_conn.close()
+except Exception as _e:
+	print(f"[warn] apply_schema skipped at boot: {_e}")
 
 # Allowed values for drop-down fields
 DEVICE_CATEGORIES = ["MOSFET", "Diode", "IGBT", "Other"]
@@ -99,6 +109,9 @@ ION_SPECIES = ["proton", "neutron", "Au", "Ar", "Fe", "Xe", "Kr", "Ca",
 BEAM_TYPES = ["broad_beam", "micro_beam", "Other"]
 IRRAD_ROLES = ["pre_irrad", "post_irrad"]
 
+MAPPING_PATTERN_TYPES = ["substring", "regex"]
+MAPPING_SCOPES = ["all", "baselines", "sc", "irradiation", "avalanche"]
+
 class DeviceForm(FlaskForm):
 	part_number = StringField("Part Number")
 	device_category = SelectField("Category", choices=DEVICE_CATEGORIES)
@@ -109,6 +122,18 @@ class DeviceForm(FlaskForm):
 	package_type = SelectField("Package", choices=PACKAGE_TYPES)
 	notes = StringField("Notes")
 	submit = SubmitField("Add Device")
+
+
+class DeviceMappingRuleForm(FlaskForm):
+	# part_number choices are populated at render time from device_library
+	pattern = StringField("Pattern")
+	pattern_type = SelectField("Type", choices=MAPPING_PATTERN_TYPES)
+	scope = SelectField("Scope", choices=MAPPING_SCOPES)
+	priority = StringField("Priority")
+	part_number = SelectField("Device", choices=[])
+	source_reference = StringField("Source")
+	notes = StringField("Notes")
+	submit = SubmitField("Add Rule")
 
 
 IRRADIATION_ROOT = os.path.join(
@@ -124,6 +149,22 @@ def list_irradiation_folders():
 		if os.path.isdir(os.path.join(IRRADIATION_ROOT, d))
 		and not d.startswith('.')
 	)
+
+
+def normalize_campaign_name(value):
+	"""Normalize campaign names for stable uniqueness checks."""
+	if value is None:
+		return None
+	value = " ".join(value.split())
+	return value or None
+
+
+def normalize_optional_text(value):
+	"""Trim optional free-text fields and collapse empty strings to NULL."""
+	if value is None:
+		return None
+	value = value.strip()
+	return value or None
 
 class CampaignForm(FlaskForm):
 	campaign_name = StringField("Campaign Name")
@@ -171,19 +212,133 @@ def device_library():
 			except Exception as e:
 				error = f"Database error: {e}"
 
-	# Fetch current devices
+	# Fetch current devices + mapping rules
 	devices = []
+	mapping_rules = []
 	try:
 		conn = get_db()
 		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 		cur.execute("SELECT * FROM device_library ORDER BY manufacturer, part_number")
 		devices = cur.fetchall()
+		cur.execute("""
+			SELECT * FROM device_mapping_rules
+			ORDER BY scope, priority DESC, LENGTH(pattern) DESC, pattern
+		""")
+		mapping_rules = cur.fetchall()
 		cur.close()
 		conn.close()
 	except Exception as e:
 		error = f"Could not load devices: {e}"
 
-	return render_template("devices.html", form=form, devices=devices, error=error)
+	rule_form = DeviceMappingRuleForm()
+	rule_form.part_number.choices = [(d["part_number"], d["part_number"])
+	                                 for d in devices]
+
+	return render_template("devices.html",
+	                       form=form, devices=devices,
+	                       mapping_rules=mapping_rules,
+	                       rule_form=rule_form,
+	                       mapping_pattern_types=MAPPING_PATTERN_TYPES,
+	                       mapping_scopes=MAPPING_SCOPES,
+	                       error=error)
+
+
+# ── Device Mapping Rules ─────────────────────────────────────────────────────
+
+def _parse_priority(raw, default=100):
+	try:
+		return int(raw)
+	except (TypeError, ValueError):
+		return default
+
+
+@app.route("/devices/mapping-rules", methods=["POST"])
+def add_mapping_rule():
+	pattern = request.form.get("pattern", "").strip()
+	pattern_type = request.form.get("pattern_type", "substring")
+	scope = request.form.get("scope", "all")
+	priority = _parse_priority(request.form.get("priority"), 100)
+	part_number = request.form.get("part_number", "").strip()
+	if not pattern or not part_number:
+		flash("Pattern and device are required.", "danger")
+		return redirect("/devices")
+	if pattern_type not in MAPPING_PATTERN_TYPES or scope not in MAPPING_SCOPES:
+		flash("Invalid pattern type or scope.", "danger")
+		return redirect("/devices")
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("""
+			INSERT INTO device_mapping_rules
+			    (pattern, pattern_type, scope, priority, part_number,
+			     source_reference, notes)
+			VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+			(pattern, pattern_type, scope, priority, part_number,
+			 request.form.get("source_reference") or None,
+			 request.form.get("notes") or None))
+		conn.commit()
+		cur.close(); conn.close()
+		flash(f"Rule '{pattern}' → {part_number} added.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("A rule with that pattern/type/scope already exists.", "danger")
+	except psycopg2.errors.ForeignKeyViolation:
+		flash(f"Device '{part_number}' is not in the device library.", "danger")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/devices")
+
+
+@app.route("/devices/mapping-rules/edit/<int:rule_id>", methods=["POST"])
+def edit_mapping_rule(rule_id):
+	pattern_type = request.form.get("pattern_type", "substring")
+	scope = request.form.get("scope", "all")
+	if pattern_type not in MAPPING_PATTERN_TYPES or scope not in MAPPING_SCOPES:
+		flash("Invalid pattern type or scope.", "danger")
+		return redirect("/devices")
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("""
+			UPDATE device_mapping_rules
+			SET pattern          = %s,
+			    pattern_type     = %s,
+			    scope            = %s,
+			    priority         = %s,
+			    part_number      = %s,
+			    source_reference = %s,
+			    notes            = %s
+			WHERE id = %s""",
+			(request.form["pattern"].strip(),
+			 pattern_type, scope,
+			 _parse_priority(request.form.get("priority"), 100),
+			 request.form["part_number"].strip(),
+			 request.form.get("source_reference") or None,
+			 request.form.get("notes") or None,
+			 rule_id))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Rule updated.", "success")
+	except psycopg2.errors.UniqueViolation:
+		flash("Another rule with that pattern/type/scope already exists.", "danger")
+	except psycopg2.errors.ForeignKeyViolation:
+		flash("Referenced device is not in the device library.", "danger")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/devices")
+
+
+@app.route("/devices/mapping-rules/delete/<int:rule_id>", methods=["POST"])
+def delete_mapping_rule(rule_id):
+	try:
+		conn = get_db()
+		cur = conn.cursor()
+		cur.execute("DELETE FROM device_mapping_rules WHERE id = %s", (rule_id,))
+		conn.commit()
+		cur.close(); conn.close()
+		flash("Rule removed.", "success")
+	except Exception as e:
+		flash(f"Error: {e}", "danger")
+	return redirect("/devices")
 
 
 @app.route("/devices/delete/<int:device_id>", methods=["POST"])
@@ -246,7 +401,7 @@ def irradiation():
 	form.folder_name.choices = [("", "— none —")] + [(f, f) for f in folders]
 	error = None
 	if form.validate_on_submit():
-		name = form.campaign_name.data.strip()
+		name = normalize_campaign_name(form.campaign_name.data)
 		if not name:
 			error = "Campaign name is required."
 		else:
@@ -259,10 +414,10 @@ def irradiation():
 					     facility, notes)
 					VALUES (%s, %s, %s, %s, %s)""",
 					(name,
-					 form.folder_name.data or None,
-					 form.beam_type.data or None,
-					 form.facility.data or None,
-					 form.notes.data or None))
+					 normalize_optional_text(form.folder_name.data),
+					 normalize_optional_text(form.beam_type.data),
+					 normalize_optional_text(form.facility.data),
+					 normalize_optional_text(form.notes.data)))
 				conn.commit()
 				cur.close(); conn.close()
 				flash(f"Campaign '{name}' added.", "success")
@@ -329,6 +484,10 @@ def delete_campaign(campaign_id):
 
 @app.route("/irradiation/edit/<int:campaign_id>", methods=["POST"])
 def edit_campaign(campaign_id):
+	name = normalize_campaign_name(request.form.get("campaign_name"))
+	if not name:
+		flash("Campaign name is required.", "danger")
+		return redirect("/irradiation")
 	try:
 		conn = get_db()
 		cur = conn.cursor()
@@ -340,11 +499,11 @@ def edit_campaign(campaign_id):
 			    facility        = %s,
 			    notes           = %s
 			WHERE id = %s""",
-			(request.form["campaign_name"].strip(),
-			 request.form.get("folder_name") or None,
-			 request.form["beam_type"] or None,
-			 request.form["facility"] or None,
-			 request.form["notes"] or None,
+			(name,
+			 normalize_optional_text(request.form.get("folder_name")),
+			 normalize_optional_text(request.form.get("beam_type")),
+			 normalize_optional_text(request.form.get("facility")),
+			 normalize_optional_text(request.form.get("notes")),
 			 campaign_id))
 		conn.commit()
 		cur.close(); conn.close()
@@ -770,4 +929,3 @@ def sync_avalanche_metadata():
 
 if __name__ == "__main__":
 	app.run(debug=False)
-

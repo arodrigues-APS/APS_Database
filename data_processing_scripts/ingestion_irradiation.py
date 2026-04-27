@@ -46,7 +46,8 @@ except ImportError:
     from psycopg2.extras import execute_values
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DATA_ROOT
-from common import (load_device_library, compute_file_hash, categorize_measurement,
+from common import (load_device_library, load_device_mapping_rules, match_device,
+                    compute_file_hash, categorize_measurement,
                     sweep_stats, refine_category_by_sweep)
 
 
@@ -98,64 +99,6 @@ def discover_unmapped_folders(cur):
     """)
     mapped = set(r[0] for r in cur.fetchall())
     return sorted(all_folders - mapped)
-
-
-# ── Known device chip-ID normalization ──────────────────────────────────────
-# Maps raw chip IDs found in filenames to (part_number, device_category,
-# manufacturer).  Extends the mapping from gsi_march2025_mapping.py to cover
-# all campaigns.
-
-CHIP_ID_TO_DEVICE = {
-    # Wolfspeed Gen 3 MOSFETs (1200V, 75mΩ)
-    "CPM312000075A": ("CPM3-1200-0075A", "MOSFET", "Wolfspeed"),
-    "CPM3120075A":   ("CPM3-1200-0075A", "MOSFET", "Wolfspeed"),
-    "CM312000075A":  ("CPM3-1200-0075A", "MOSFET", "Wolfspeed"),
-
-    # Wolfspeed Gen 2 MOSFETs (1200V, 80mΩ)
-    "CPM212000080A": ("CPM2-1200-0080A", "MOSFET", "Wolfspeed"),
-
-    # Wolfspeed packaged MOSFETs
-    "C2M0080120D": ("C2M0080120D", "MOSFET", "Wolfspeed"),
-    "C2M0025120D": ("C2M0025120D", "MOSFET", "Wolfspeed"),
-    "C3M0075120D": ("C3M0075120D", "MOSFET", "Wolfspeed"),
-
-    # Wolfspeed Diodes
-    "CPW51700Z050A":  ("CPW5-1700-Z050A", "Diode", "Wolfspeed"),
-    "CPW517000Z050B": ("CPW5-1700-Z050B", "Diode", "Wolfspeed"),
-    "CPW412000010B":  ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
-    "CPW41200010B":   ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
-    "CPW4-1200-010B": ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
-    "CPW412000020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed"),
-    "CPW41200S020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed"),
-    "CPW41200S010B":  ("CPW4-1200-S010B", "Diode", "Wolfspeed"),
-    "CPW41700":       ("CPW5-1700-Z050A", "Diode", "Wolfspeed"),
-    "CPW41700b":      ("CPW5-1700-Z050A", "Diode", "Wolfspeed"),
-
-    # Wolfspeed Diodes (generic naming from ANSTO)
-    "Cree_diode":       ("Cree-Diode", "Diode", "Wolfspeed"),
-    "Cree_diode_1.7kV": ("Cree-Diode-1.7kV", "Diode", "Wolfspeed"),
-    "Cree_diode_1200V": ("Cree-Diode-1200V", "Diode", "Wolfspeed"),
-
-    # Infineon
-    "IFX Trench":     ("IFX-Trench", "MOSFET", "Infineon"),
-    "IFX Trnech":     ("IFX-Trench", "MOSFET", "Infineon"),
-    "IFXDiode3x3":    ("IFX-Diode-3x3", "Diode", "Infineon"),
-    "IFX Diode 3x3":  ("IFX-Diode-3x3", "Diode", "Infineon"),
-    "12M1H090":       ("12M1H090", "MOSFET", "Infineon"),
-
-    # Rohm
-    "SCT3030KL": ("SCT3030KL", "MOSFET", "Rohm"),
-
-    # Infineon Trench (UCL naming)
-    "Trench": ("IFX-Trench", "MOSFET", "Infineon"),
-
-    # VU reference
-    "VU_MOSFET_uncoated": ("VU-MOSFET-uncoated", "MOSFET", "VU"),
-
-    # Diode generic names (GSI Ca data)
-    "diode":  (None, "Diode", None),
-    "Diode":  (None, "Diode", None),
-}
 
 
 def extract_chip_id(filename):
@@ -235,13 +178,6 @@ def extract_device_id_from_path(filepath, campaign_folder):
         if m:
             return f"{chip_id}_SN{m.group(1)}"
     return chip_id or "unknown"
-
-
-def normalize_chip_id(raw_chip_id):
-    """Normalize a raw chip ID to a device_library part number."""
-    if raw_chip_id in CHIP_ID_TO_DEVICE:
-        return CHIP_ID_TO_DEVICE[raw_chip_id]
-    return (raw_chip_id, None, None)
 
 
 def parse_keithley_txt(filepath):
@@ -338,14 +274,17 @@ def map_irrad_columns(headers, row):
       - Vg / Vgs / Vd / Vds  (gate/drain voltage)
       - Ig / Igs / Id / Ids  (gate/drain current)
       - time                 (time column)
-      - fluence, arduino_ms  (extra columns, stored as metadata)
+      - fluence              (cumulative fluence at this sample, ions/cm² —
+                              present in 7-col monitoring files only)
 
-    Returns dict with keys: v_gate, i_gate, v_drain, i_drain, time_val
+    Returns dict with keys: v_gate, i_gate, v_drain, i_drain, time_val,
+    fluence.
     """
     result = {
         'v_gate': None, 'i_gate': None,
         'v_drain': None, 'i_drain': None,
         'time_val': None,
+        'fluence': None,
     }
 
     for i, h in enumerate(headers):
@@ -364,6 +303,8 @@ def map_irrad_columns(headers, row):
             result['i_drain'] = val
         elif hl in ('time', 'time_val', 't'):
             result['time_val'] = val
+        elif hl in ('fluence', 'fluence_cm2', 'fluence_per_cm2'):
+            result['fluence'] = val
 
     return result
 
@@ -413,11 +354,34 @@ def get_campaign_id(cur, campaign):
 
 
 def ensure_data_source_column(cur):
-    """Add data_source column to baselines_metadata if it doesn't exist."""
+    """Add irradiation-specific columns to baselines_metadata /
+    baselines_measurements if they don't already exist.
+
+    fluence_at_meas (metadata): max cumulative fluence observed in the
+    file, ions/cm².  For 7-col monitoring files this is the last/highest
+    value of the fluence column; NULL for 4-col IV sweeps.
+
+    fluence (measurements): per-sample cumulative fluence, ions/cm².
+    Set only for irradiation 7-col monitoring rows; NULL elsewhere.
+    """
     cur.execute("""
         DO $$ BEGIN
             ALTER TABLE baselines_metadata
                 ADD COLUMN data_source TEXT DEFAULT 'baselines';
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+    """)
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE baselines_metadata
+                ADD COLUMN fluence_at_meas DOUBLE PRECISION;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+    """)
+    cur.execute("""
+        DO $$ BEGIN
+            ALTER TABLE baselines_measurements
+                ADD COLUMN fluence DOUBLE PRECISION;
         EXCEPTION WHEN duplicate_column THEN NULL;
         END $$;
     """)
@@ -427,33 +391,7 @@ def ensure_data_source_column(cur):
     """)
 
 
-def match_device_from_library(chip_id, device_library):
-    """
-    Try to match a chip ID against the device library entries.
-    Returns (device_type, manufacturer) or (None, None).
-    """
-    if not chip_id:
-        return None, None
-
-    # First try the hardcoded mapping
-    part_number, category, manufacturer = normalize_chip_id(chip_id)
-    if part_number and part_number != chip_id:
-        return part_number, manufacturer
-
-    # Then try substring match against device_library (longest match first)
-    chip_upper = chip_id.upper()
-    for dev in device_library:
-        pn = dev['part_number']
-        if pn and pn.upper() in chip_upper or chip_upper in pn.upper():
-            return pn, dev.get('manufacturer')
-
-    # Return the normalized chip ID even if not in library
-    if part_number:
-        return part_number, manufacturer
-    return chip_id, None
-
-
-def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
+def ingest_campaign(cur, conn, campaign, device_library, rules, dry_run=False):
     """
     Ingest all measurement files from one irradiation campaign folder.
 
@@ -491,10 +429,8 @@ def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
         measurement_category = categorize_measurement(measurement_type, filename)
         device_id = extract_device_id_from_path(fpath, folder_name)
 
-        # Resolve device type from chip ID
-        device_type, manufacturer = match_device_from_library(
-            raw_chip_id, device_library
-        )
+        # Resolve device type from file path
+        device_type, manufacturer = match_device(fpath, 'irradiation', rules, device_library)
 
         # File hash for dedup
         file_hash = compute_file_hash(fpath)
@@ -587,8 +523,12 @@ def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
 
         # Map columns and build measurement batch
         batch = []
+        max_fluence = None
         for point_idx, row in enumerate(data_rows):
             mapped = map_irrad_columns(headers, row)
+            f = mapped['fluence']
+            if isinstance(f, (int, float)) and (max_fluence is None or f > max_fluence):
+                max_fluence = f
             batch.append((
                 meta_id, point_idx,
                 mapped['v_gate'], mapped['i_gate'],
@@ -596,6 +536,7 @@ def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
                 None, None,  # rds, bv
                 mapped['time_val'],
                 0,  # step_index
+                f,
             ))
 
         if batch:
@@ -603,9 +544,16 @@ def ingest_campaign(cur, conn, campaign, device_library, dry_run=False):
                 execute_values(cur, """
                     INSERT INTO baselines_measurements
                     (metadata_id, point_index, v_gate, i_gate, v_drain,
-                     i_drain, rds, bv, time_val, step_index)
+                     i_drain, rds, bv, time_val, step_index, fluence)
                     VALUES %s
                 """, batch, page_size=5000)
+
+                if max_fluence is not None:
+                    cur.execute(
+                        "UPDATE baselines_metadata "
+                        "SET fluence_at_meas = %s WHERE id = %s",
+                        (max_fluence, meta_id),
+                    )
 
                 total_points += len(batch)
                 files_loaded += 1
@@ -681,6 +629,9 @@ def main():
     device_library = load_device_library(cur)
     print(f"\nDevice library: {len(device_library)} entries")
 
+    rules = load_device_mapping_rules(cur, 'irradiation')
+    print(f"Irradiation device-matching rules: {len(rules)}")
+
     # Load campaigns from DB (only those with a folder_name assigned)
     campaigns = load_campaigns_from_db(cur)
     conn.commit()
@@ -727,7 +678,7 @@ def main():
         print(f"{'─' * 60}")
 
         loaded, skipped, errors, points = ingest_campaign(
-            cur, conn, campaign, device_library, dry_run=args.dry_run
+            cur, conn, campaign, device_library, rules, dry_run=args.dry_run
         )
 
         grand_loaded += loaded

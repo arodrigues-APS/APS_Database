@@ -189,12 +189,156 @@
     </table>
     <p class="text-muted"><small>{{ devices|length }} device(s) registered.</small></p>
 
+    <hr class="my-4">
+
+    <h4>Device Mapping Rules</h4>
+    <p class="text-muted">
+      Rules that match measurement file paths to a device in the library.
+      Checked in order of <strong>priority</strong> (higher first), then
+      longer pattern first.  <strong>Scope</strong> limits a rule to one
+      ingestion pipeline (baselines, sc, irradiation, avalanche) or
+      applies it to <em>all</em>.
+      Pattern type <em>substring</em> does case-insensitive containment;
+      <em>regex</em> is matched against the upper-cased file path.
+    </p>
+
+    <!-- Add rule form -->
+    <div class="card mb-4">
+      <div class="card-header">Add a New Mapping Rule</div>
+      <div class="card-body">
+        <form method="POST" action="/devices/mapping-rules">
+          {{ rule_form.csrf_token }}
+          <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+              <label class="form-label">Pattern <span class="text-danger">*</span></label>
+              {{ rule_form.pattern(class="form-control form-control-sm", placeholder="e.g. CREE_80MOHM or ^.*/SCT2080") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Type</label>
+              {{ rule_form.pattern_type(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Scope</label>
+              {{ rule_form.scope(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Priority</label>
+              {{ rule_form.priority(class="form-control form-control-sm", type="number", value="100") }}
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Device <span class="text-danger">*</span></label>
+              {{ rule_form.part_number(class="form-select form-select-sm") }}
+            </div>
+            <div class="col-md-1">
+              <label class="form-label">Source</label>
+              {{ rule_form.source_reference(class="form-control form-control-sm", placeholder="paper/logbook") }}
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Notes</label>
+              {{ rule_form.notes(class="form-control form-control-sm", placeholder="optional") }}
+            </div>
+            <div class="col-md-1">
+              {{ rule_form.submit(class="btn btn-primary btn-sm w-100") }}
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <table class="table table-sm table-striped table-hover">
+      <thead class="table-dark">
+        <tr>
+          <th>Pattern</th>
+          <th>Type</th>
+          <th>Scope</th>
+          <th>Priority</th>
+          <th>Device</th>
+          <th>Source</th>
+          <th>Notes</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in mapping_rules %}
+        <tr id="rule-view-{{ r.id }}">
+          <td><code>{{ r.pattern }}</code></td>
+          <td>{{ r.pattern_type }}</td>
+          <td>{{ r.scope }}</td>
+          <td>{{ r.priority }}</td>
+          <td><strong>{{ r.part_number }}</strong></td>
+          <td>{{ r.source_reference or '' }}</td>
+          <td>{{ r.notes or '' }}</td>
+          <td class="text-nowrap">
+            <button class="btn btn-outline-secondary btn-sm"
+                    onclick="toggleRuleEdit({{ r.id }})">✎</button>
+            <form method="POST" action="/devices/mapping-rules/delete/{{ r.id }}"
+                  onsubmit="return confirm('Remove rule for {{ r.pattern }}?');"
+                  style="display:inline">
+              {{ rule_form.csrf_token }}
+              <button type="submit" class="btn btn-outline-danger btn-sm">✕</button>
+            </form>
+          </td>
+        </tr>
+
+        <tr id="rule-edit-{{ r.id }}" style="display:none">
+          <form method="POST" action="/devices/mapping-rules/edit/{{ r.id }}">
+            {{ rule_form.csrf_token }}
+            <td><input name="pattern" value="{{ r.pattern }}" class="form-control form-control-sm"></td>
+            <td>
+              <select name="pattern_type" class="form-select form-select-sm">
+                {% for t in mapping_pattern_types %}
+                <option {{ 'selected' if r.pattern_type == t }}>{{ t }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              <select name="scope" class="form-select form-select-sm">
+                {% for s in mapping_scopes %}
+                <option {{ 'selected' if r.scope == s }}>{{ s }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="priority" type="number" value="{{ r.priority }}" class="form-control form-control-sm"></td>
+            <td>
+              <select name="part_number" class="form-select form-select-sm">
+                {% for d in devices %}
+                <option {{ 'selected' if r.part_number == d.part_number }}>{{ d.part_number }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input name="source_reference" value="{{ r.source_reference or '' }}" class="form-control form-control-sm"></td>
+            <td><input name="notes" value="{{ r.notes or '' }}" class="form-control form-control-sm"></td>
+            <td class="text-nowrap">
+              <button type="submit" class="btn btn-outline-success btn-sm">Save</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm"
+                      onclick="toggleRuleEdit({{ r.id }})">Cancel</button>
+            </td>
+          </form>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="text-muted text-center">No mapping rules yet. Ingestion falls back to device_library substring match.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="text-muted"><small>{{ mapping_rules|length }} rule(s) configured.</small></p>
+
   </div>
 
   <script>
     function toggleEdit(id) {
       var viewRow = document.getElementById('view-' + id);
       var editRow = document.getElementById('edit-' + id);
+      if (editRow.style.display === 'none') {
+        viewRow.style.display = 'none';
+        editRow.style.display = '';
+      } else {
+        viewRow.style.display = '';
+        editRow.style.display = 'none';
+      }
+    }
+    function toggleRuleEdit(id) {
+      var viewRow = document.getElementById('rule-view-' + id);
+      var editRow = document.getElementById('rule-edit-' + id);
       if (editRow.style.display === 'none') {
         viewRow.style.display = 'none';
         editRow.style.display = '';

@@ -336,6 +336,44 @@ def parse_filename_metadata(base_stem):
     return info
 
 
+def parse_temperature_from_rel_path(rel_path):
+    """
+    Extract test temperature (°C) from a folder/filename token, returning
+    None when no explicit temperature is present.
+
+    Patterns recognised (case-insensitive, ordered most → least specific):
+      125degC, 25degC          → 125, 25
+      _RT_, /RT/, RT-anything  → 25 (room temperature convention)
+      _25C_, _125C_            → 25, 125  (bare integer with C suffix
+                                            bordered by path/underscore
+                                            separators so it does not
+                                            collide with part-number
+                                            tokens like "C2M0080120D")
+
+    Patterns intentionally NOT matched: bare integers without a C suffix,
+    "T25" without a delimiter, anything inside a longer alphanumeric run.
+    Falls back to NULL so the caller can defer to the campaign override.
+    """
+    if not rel_path:
+        return None
+
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*degC", rel_path, re.IGNORECASE)
+    if m:
+        return _safe_float(m.group(1))
+
+    if re.search(r"(?:^|[_/\\\-\s])RT(?:[_/\\\-\s.]|$)", rel_path, re.IGNORECASE):
+        return 25.0
+
+    m = re.search(
+        r"(?:^|[_/\\\-\s])(-?\d+(?:\.\d+)?)C(?=$|[_/\\\-\s.])",
+        rel_path,
+    )
+    if m:
+        return _safe_float(m.group(1))
+
+    return None
+
+
 def parse_inductance_from_rel_path(rel_path, family, campaign_lookup):
     """
     Extract inductance (mH) from the relative path, trying three token patterns
@@ -731,9 +769,11 @@ def main():
 
             campaign_meta = campaign_lookup.get(family, {})
             outcome = campaign_meta.get("outcome_default") or "unknown"
+            path_temperature_c = parse_temperature_from_rel_path(rel_path)
             temperature_c = (
-                file_info.get("avalanche_temperature_c")
-                or campaign_meta.get("temperature_c")
+                path_temperature_c
+                if path_temperature_c is not None
+                else campaign_meta.get("temperature_c")
             )
 
             device_type, manufacturer = map_device_type(paths, device_library)

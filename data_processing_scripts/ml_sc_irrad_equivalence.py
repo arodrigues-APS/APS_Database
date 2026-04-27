@@ -16,11 +16,10 @@ What it does:
      row per SC condition (device_type, sc_voltage_v, sc_duration_us)
      and one row per irradiation run (device_type, irrad_run_id), each
      with median ΔVth / ΔRds / ΔBV, IQR, and sample counts.
-  2. In Python: z-score normalizes the three damage axes on the combined
-     SC + irradiation population (per device_type), then for every
-     irradiation fingerprint finds the k=1 and k=3 nearest SC fingerprints
-     in that damage space.  Missing axes (e.g. ΔRds absent for an irrad
-     run) are dropped pairwise before distance computation.
+  2. In Python: builds a per-device-type damage-space nearest-neighbor
+     retriever. The distance metric is a reliability-weighted Euclidean
+     score over available axes (ΔVth, ΔRds, ΔBV), normalized by per-axis
+     robust scale. Missing axes are dropped pairwise.
   3. Writes `out/sc_irrad_equivalence/irrad_to_sc_equivalents.csv` and
      two scatter plots (ΔVth vs ΔRds, ΔVth vs ΔBV).
 
@@ -36,7 +35,6 @@ Usage:
 
 import argparse
 import csv
-import os
 import sys
 from pathlib import Path
 
@@ -44,13 +42,6 @@ try:
     import numpy as np
 except ImportError:
     sys.exit("numpy is required: pip install --break-system-packages numpy")
-
-try:
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.neighbors import NearestNeighbors
-except ImportError:
-    sys.exit("scikit-learn is required: "
-             "pip install --break-system-packages scikit-learn")
 
 try:
     import matplotlib
@@ -234,6 +225,7 @@ FROM irrad_fp;
 # ── Output paths ────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "out" / "sc_irrad_equivalence"
+DAMAGE_AXES = ("dvth", "drds", "dbv")
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -282,18 +274,68 @@ def load_fingerprints(conn, device_type=None):
     return rows
 
 
-def damage_vector(fp):
-    return np.array(
-        [fp.get("dvth"), fp.get("drds"), fp.get("dbv")],
-        dtype=float,
-    )
+def _robust_axis_scale(values):
+    """Robust per-axis scale used to normalize damage differences."""
+    vals = np.array([float(v) for v in values if v is not None], dtype=float)
+    if vals.size < 2:
+        return 1.0
+    q1, q3 = np.percentile(vals, [25.0, 75.0])
+    iqr = float(q3 - q1)
+    if iqr > 1e-12:
+        # Convert IQR to Gaussian-equivalent sigma.
+        return max(iqr / 1.349, 1e-6)
+    std = float(np.std(vals))
+    return max(std, 1.0)
+
+
+def _fit_axis_scales(group):
+    """Return per-axis robust scales for one device_type group."""
+    return {
+        axis: _robust_axis_scale([fp.get(axis) for fp in group])
+        for axis in DAMAGE_AXES
+    }
+
+
+def _axis_reliability(fp, axis):
+    """Reliability from axis sample count and spread (IQR)."""
+    n = fp.get(f"{axis}_n")
+    iqr = fp.get(f"{axis}_iqr")
+    n_term = np.sqrt(max(float(n), 1.0)) if n is not None else 1.0
+    iqr_term = 1.0 / (1.0 + abs(float(iqr))) if iqr is not None else 1.0
+    return n_term * iqr_term
+
+
+def _damage_space_distance(ir_fp, sc_fp, axis_scales):
+    """Reliability-weighted distance between one irrad and one SC fingerprint."""
+    weighted_sq = 0.0
+    total_w = 0.0
+    n_dims = 0
+    for axis in DAMAGE_AXES:
+        iv = ir_fp.get(axis)
+        sv = sc_fp.get(axis)
+        if iv is None or sv is None:
+            continue
+        scale = axis_scales.get(axis, 1.0)
+        if scale <= 0:
+            scale = 1.0
+        delta = (float(iv) - float(sv)) / scale
+        w = np.sqrt(_axis_reliability(ir_fp, axis) *
+                    _axis_reliability(sc_fp, axis))
+        weighted_sq += w * delta * delta
+        total_w += w
+        n_dims += 1
+
+    if n_dims == 0 or total_w <= 0.0:
+        return None, 0
+    return float(np.sqrt(weighted_sq / total_w)), n_dims
 
 
 def compute_matches(fps, k=3):
-    """For each irrad fingerprint, find k nearest SC fingerprints in the
-    same device_type, using z-scored (ΔVth, ΔRds, ΔBV) distance.  Missing
-    axes are dropped pairwise (Euclidean over the intersection of valid
-    dimensions), so irrad runs without ΔRds still produce a match.
+    """For each irrad fingerprint, retrieve k nearest SC fingerprints in the
+    same device_type using reliability-weighted damage-space distance.
+
+    Distance is computed over axis intersection (ΔVth/ΔRds/ΔBV) and each
+    axis is normalized by a robust per-device_type scale.
 
     Returns list of {irrad_fp, matches: [(sc_fp, distance, n_dims)]}.
     """
@@ -308,35 +350,15 @@ def compute_matches(fps, k=3):
         if not sc or not ir:
             continue
 
-        # Fit scaler on all damage vectors in this device_type (impute with
-        # the dimension mean for fitting only; distance handles NaNs pairwise).
-        raw = np.vstack([damage_vector(f) for f in grp])
-        col_means = np.nanmean(raw, axis=0)
-        filled = np.where(np.isnan(raw), col_means, raw)
-        scaler = StandardScaler().fit(filled)
+        axis_scales = _fit_axis_scales(grp)
 
-        sc_vecs_raw = np.vstack([damage_vector(f) for f in sc])
-        ir_vecs_raw = np.vstack([damage_vector(f) for f in ir])
-
-        # Scale while keeping NaNs so pairwise distance can skip them
-        sc_vecs = (sc_vecs_raw - scaler.mean_) / scaler.scale_
-        ir_vecs = (ir_vecs_raw - scaler.mean_) / scaler.scale_
-
-        for i, irfp in enumerate(ir):
-            ivec = ir_vecs[i]
-            valid_i = ~np.isnan(ivec)
-            if valid_i.sum() == 0:
-                continue
+        for irfp in ir:
             dists = []
-            for j, scfp in enumerate(sc):
-                svec = sc_vecs[j]
-                valid = valid_i & ~np.isnan(svec)
-                if valid.sum() == 0:
+            for scfp in sc:
+                d, n_dims = _damage_space_distance(irfp, scfp, axis_scales)
+                if d is None:
                     continue
-                diff = ivec[valid] - svec[valid]
-                # Normalize by sqrt(n_dims) so partial matches are comparable
-                d = float(np.sqrt(np.sum(diff * diff) / valid.sum()))
-                dists.append((scfp, d, int(valid.sum())))
+                dists.append((scfp, d, n_dims))
             dists.sort(key=lambda t: t[1])
             results.append({"irrad": irfp, "matches": dists[:k]})
     return results
@@ -483,13 +505,13 @@ def print_cli_prediction(conn, ion, energy, let, device_type):
     print(f"  {target['label']}  (device_type={target['device_type']})")
     print(f"  ΔVth={target['dvth']}, ΔRds={target['drds']}, ΔBV={target['dbv']}, "
           f"n_samples={target['n_samples']}")
-    print(f"\nNearest SC condition (Euclidean in z-scored damage space):")
+    print("\nNearest SC condition (reliability-weighted damage-space distance):")
     print(f"  {scfp['sc_voltage_v']:g} V × {scfp['sc_duration_us']:g} µs")
     print(f"  distance = {dist:.3f}  (over {n_dims} damage axes)")
     print(f"  SC ΔVth={scfp['dvth']}, ΔRds={scfp['drds']}, ΔBV={scfp['dbv']}, "
           f"n_samples={scfp['n_samples']}")
     if dist > 1.5:
-        print(f"\n  WARNING: distance > 1.5σ — this is a weak match. "
+        print("\n  WARNING: distance > 1.5 — this is a weak match. "
               f"Check IQR and consider extending the dataset.")
     if len(match["matches"]) > 1:
         print(f"\nAlternatives (k=3):")

@@ -46,7 +46,8 @@ except ImportError:
 
 # ── Configuration ────────────────────────────────────────────────────────────
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
-from common import (load_device_library, compute_file_hash, find_matching_tsp,
+from common import (load_device_library, load_device_mapping_rules, match_device,
+                    compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows,
                     categorize_measurement as categorize_sc_measurement,
                     sweep_stats, refine_category_by_sweep)
@@ -71,39 +72,6 @@ SKIP_FILES = {'MATLABscript.m', 'Document.rtf', '~$cument.rtf', 'current_list.cs
 
 # Directories to skip entirely
 SKIP_DIRS = {'New folder', 'Other', 'FailureAnalysis', '__pycache__'}
-
-
-# ── Device Type Mapping ──────────────────────────────────────────────────────
-# Maps top-level directory names to (device_type, manufacturer)
-
-DEVICE_DIR_MAP = {
-    # ForDataAnalysis
-    'C2M0080120D':   ('C2M0080120D',     'Wolfspeed'),
-    'C3M0075120D':   ('C3M0075120D',     'Wolfspeed'),
-    'C2M_160mohm':   ('C2M0280120D',     'Wolfspeed'),
-    'IMW120R060':    ('IMW120R060M1H',   'Infineon'),
-    'SCT2080':       ('SCT2080KE',       'Rohm'),
-    'SCT3080':       ('SCT3080AL',       'Rohm'),
-    'LF':            ('LSIC1MO120E0080', 'Littlefuse'),
-    'STM':           ('SCTW35N65G2V',    'STMicroelectronics'),
-    'STMGen2':       ('SCTW35N65G2V',    'STMicroelectronics'),
-    # curvetracermeasurements
-    'CREE3Pin2G':           ('C2M0080120D',     'Wolfspeed'),
-    'CREE3Pin3G':           ('C3M0075120D',     'Wolfspeed'),
-    'CREE4Pin3G':           ('C3M0075120D',     'Wolfspeed'),
-    'Infineon3Pin':         ('IMW120R090M1H',   'Infineon'),
-    'infineon4Pin':         ('IMW120R060M1H',   'Infineon'),
-    'RohmPlanar':           ('SCT3030AL',       'Rohm'),
-    'RohmTrench':           ('SCT2080KE',       'Rohm'),
-    'Littlefuse':           ('LSIC1MO120E0080', 'Littlefuse'),
-    'STMicroelectronic':    ('SCTW35N65G2V',    'STMicroelectronics'),
-    'STMicroGen2':          ('SCTW35N65G2V',    'STMicroelectronics'),
-    'SiIGBT':               (None,              None),
-    'DUTbodydiodecharacterisation': (None,       None),
-    'hysteresis':           (None,              None),
-    'hightemperatureLeakagecurrent': (None,      None),
-    'IV29062020':           (None,              None),
-}
 
 
 # ── Schema Changes ───────────────────────────────────────────────────────────
@@ -822,31 +790,6 @@ def extract_experiment_name(csv_path, root_dir):
     return f"{prefix}_unknown"
 
 
-def map_device_type(csv_path, root_dir, device_library=None):
-    """
-    Map a file path to (device_type, manufacturer) using the directory mapping table.
-    Falls back to substring search against device_library.
-    """
-    rel = os.path.relpath(csv_path, root_dir)
-    parts = rel.split(os.sep)
-
-    if parts:
-        device_dir = parts[0]
-        if device_dir in DEVICE_DIR_MAP:
-            dt, mfr = DEVICE_DIR_MAP[device_dir]
-            if dt is not None:
-                return dt, mfr
-
-    # Fallback: substring match against device_library
-    if device_library:
-        path_upper = csv_path.upper()
-        for entry in device_library:
-            if entry['part_number'].upper() in path_upper:
-                return entry['part_number'], entry['manufacturer']
-
-    return None, None
-
-
 # load_device_library() is imported from common.py.
 
 
@@ -933,6 +876,9 @@ def main():
     device_library = load_device_library(cur)
     print(f"  {len(device_library)} devices in library.")
 
+    rules = load_device_mapping_rules(cur, 'sc')
+    print(f"  {len(rules)} SC device-matching rules.")
+
     # Collect CSV files from all roots
     measurement_files = []  # list of (filepath, root_dir)
 
@@ -1017,7 +963,7 @@ def main():
         experiment = extract_experiment_name(fpath, root_dir)
         test_condition, sample_group = classify_test_condition(fpath, root_dir)
         sc_cond = parse_sc_condition(fpath)
-        device_type, manufacturer = map_device_type(fpath, root_dir, device_library)
+        device_type, manufacturer = match_device(rel_path, 'sc', rules, device_library)
 
         # Detect SC waveform vs curve tracer CSV
         is_waveform = detect_sc_waveform(fpath)
