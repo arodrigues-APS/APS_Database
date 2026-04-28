@@ -226,12 +226,12 @@ def irrad_curve_params(x_axis, cat, x_title, y_title,
                        bias_col=None):
     """Line-chart params for irradiation IV curves.
 
-    Groups by (device_type, test_condition, irrad_condition_label) so
-    pre-irrad and post-irrad lines from different ion species are
-    distinguishable.  If bias_col is given, adds it as an additional
-    groupby for multi-step sweeps.
+    Groups by the irradiation condition plus metadata_id / step_index so
+    separate physical sweeps are not stitched into one line.  If bias_col is
+    given, adds it as an additional groupby for multi-step sweeps.
     """
-    groupby = ["device_type", "test_condition", "irrad_condition_label"]
+    groupby = ["device_type", "device_id", "test_condition",
+               "irrad_condition_label", "metadata_id", "step_index"]
     if bias_col:
         groupby.append({
             "expressionType": "SQL",
@@ -296,7 +296,8 @@ def irrad_waveform_params(y_col, y_label, y_title):
             "label": y_label,
         }],
         "groupby": [
-            "device_type", "device_id", "irrad_condition_label",
+            "device_type", "device_id", "metadata_id",
+            "irrad_condition_label",
         ],
         "adhoc_filters": [],
         "row_limit": 50000,
@@ -487,11 +488,11 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             irrad_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 cat="IdVg",
                 x_title="V_Gate (V)",
                 y_title="I_Drain (A)",
-                bias_col="v_drain_bin",
+                bias_col="v_drain_plot_bin",
             ),
             12, 60,
         ),
@@ -502,11 +503,11 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             irrad_curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 cat="IdVd",
                 x_title="V_Drain (V)",
                 y_title="I_Drain (A)",
-                bias_col="v_gate_bin",
+                bias_col="v_gate_plot_bin",
             ),
             12, 60,
         ),
@@ -517,7 +518,7 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             irrad_curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 cat="Blocking",
                 x_title="V_Drain (V)",
                 y_title="|I_Drain| (A)",
@@ -534,7 +535,7 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             irrad_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 cat="Igss",
                 x_title="V_Gate (V)",
                 y_title="|I_Gate| (A)",
@@ -551,14 +552,14 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             irrad_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 cat="Subthreshold",
                 x_title="V_Gate (V)",
                 y_title="|I_Drain| (A)",
                 metric_expr="AVG(ABS(i_drain))",
                 metric_label="|I_Drain| (A)",
                 log_y=True,
-                bias_col="v_drain_bin",
+                bias_col="v_drain_plot_bin",
             ),
             12, 60,
         ),
@@ -608,12 +609,15 @@ def main():
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
-                    "x_axis": "v_gate_bin",
+                    "x_axis": "v_gate_plot_bin",
                     "time_grain_sqla": None,
                     "x_axis_sort_asc": True,
                     "metrics": [{
                         "expressionType": "SQL",
-                        "sqlExpression": "AVG(avg_abs_i_drain)",
+                        "sqlExpression": (
+                            "SUM(avg_abs_i_drain * n_points) "
+                            "/ NULLIF(SUM(n_points), 0)"
+                        ),
                         "label": "Avg |I_Drain| (A)",
                     }],
                     "groupby": ["device_type", "ion_species", "test_condition"],
@@ -651,12 +655,15 @@ def main():
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
-                    "x_axis": "v_drain_bin",
+                    "x_axis": "v_drain_plot_bin",
                     "time_grain_sqla": None,
                     "x_axis_sort_asc": True,
                     "metrics": [{
                         "expressionType": "SQL",
-                        "sqlExpression": "AVG(avg_abs_i_drain)",
+                        "sqlExpression": (
+                            "SUM(avg_abs_i_drain * n_points) "
+                            "/ NULLIF(SUM(n_points), 0)"
+                        ),
                         "label": "Avg |I_Drain| (A)",
                     }],
                     "groupby": ["device_type", "ion_species", "test_condition"],
@@ -756,7 +763,7 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_bin",
+                "x_axis": "v_gate_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -764,8 +771,9 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type",
-                            "test_condition", "irrad_condition_label"],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
                 "adhoc_filters": [cat_filter("IdVg")],
                 "row_limit": 100000,
                 "truncate_metric": True,
@@ -784,7 +792,7 @@ def main():
                 "series_limit": 50,
                 "series_limit_metric": {
                     "expressionType": "SQL",
-                    "sqlExpression": "COUNT(DISTINCT v_gate_bin)",
+                    "sqlExpression": "COUNT(DISTINCT v_gate_plot_bin)",
                     "label": "_rank_by_sweep_range",
                 },
             },
@@ -797,7 +805,7 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_bin",
+                "x_axis": "v_drain_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -805,8 +813,9 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type",
-                            "test_condition", "irrad_condition_label"],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
                 "adhoc_filters": [cat_filter("IdVd")],
                 "row_limit": 100000,
                 "truncate_metric": True,
@@ -825,7 +834,7 @@ def main():
                 "series_limit": 50,
                 "series_limit_metric": {
                     "expressionType": "SQL",
-                    "sqlExpression": "COUNT(DISTINCT v_drain_bin)",
+                    "sqlExpression": "COUNT(DISTINCT v_drain_plot_bin)",
                     "label": "_rank_by_sweep_range",
                 },
             },
@@ -838,7 +847,7 @@ def main():
             main_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_bin",
+                "x_axis": "v_drain_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -846,8 +855,9 @@ def main():
                     "sqlExpression": "AVG(ABS(i_drain))",
                     "label": "|I_Drain| (A)",
                 }],
-                "groupby": ["device_id", "measurement_type",
-                            "test_condition", "irrad_condition_label"],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
                 "adhoc_filters": [cat_filter("Blocking")],
                 "row_limit": 100000,
                 "truncate_metric": True,
@@ -867,7 +877,7 @@ def main():
                 "series_limit": 50,
                 "series_limit_metric": {
                     "expressionType": "SQL",
-                    "sqlExpression": "COUNT(DISTINCT v_drain_bin)",
+                    "sqlExpression": "COUNT(DISTINCT v_drain_plot_bin)",
                     "label": "_rank_by_sweep_range",
                 },
             },

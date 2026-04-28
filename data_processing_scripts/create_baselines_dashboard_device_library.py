@@ -1256,7 +1256,8 @@ def main():
     # bias condition appears as a separate line — matching the clean
     # per-experiment look of the Baselines dashboard.
     def curve_params(x_axis, bias_col, bias_round, cat, x_title, y_title,
-                     metric_expr="AVG(avg_i_drain)",
+                     metric_expr=("SUM(avg_i_drain * n_devices) "
+                                  "/ NULLIF(SUM(n_devices), 0)"),
                      metric_label="Mean I_Drain (A)",
                      log_y=False, series_limit=0):
         """
@@ -1320,12 +1321,18 @@ def main():
         return params
 
     def sigma_curve_params(x_axis, bias_col, bias_round, cat, x_title, y_title,
-                          upper_expr="AVG(upper_i_drain)",
-                          lower_expr="AVG(lower_i_drain)",
+                          upper_expr=None,
+                          lower_expr=None,
                           upper_label="+1\u03c3 I_Drain (A)",
                           lower_label="\u22121\u03c3 I_Drain (A)",
                           log_y=False, series_limit=0):
         """Like curve_params but with two metrics: upper and lower ±1σ bounds."""
+        upper_expr = (upper_expr if upper_expr is not None else
+                      "SUM(upper_i_drain * n_devices) "
+                      "/ NULLIF(SUM(n_devices), 0)")
+        lower_expr = (lower_expr if lower_expr is not None else
+                      "SUM(lower_i_drain * n_devices) "
+                      "/ NULLIF(SUM(n_devices), 0)")
         groupby = ["device_type"]
         if bias_col:
             if bias_round == 1:
@@ -1422,7 +1429,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col="v_drain_bin", bias_round=1,
                 cat="IdVg",
                 x_title="V_Gate (V)",
@@ -1439,7 +1446,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col="v_drain_bin", bias_round=1,
                 cat="Vth",
                 x_title="V_Gate (V)",
@@ -1457,7 +1464,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 bias_col="v_gate_bin", bias_round=1,
                 cat="IdVd",
                 x_title="V_Drain (V)",
@@ -1475,7 +1482,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 bias_col="v_gate_bin", bias_round=1,
                 cat="3rd_Quadrant",
                 x_title="V_Drain (V)",
@@ -1490,12 +1497,13 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col=None, bias_round=1,
                 cat="Igss",
                 x_title="V_Gate (V)",
                 y_title="Mean |I_Gate| (A)",
-                metric_expr="AVG(avg_abs_i_gate)",
+                metric_expr=("SUM(avg_abs_i_gate * n_devices) "
+                             "/ NULLIF(SUM(n_devices), 0)"),
                 metric_label="Mean |I_Gate| (A)",
                 log_y=True,
             ),
@@ -1727,7 +1735,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             sigma_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col="v_drain_bin", bias_round=1,
                 cat="IdVg",
                 x_title="V_Gate (V)",
@@ -1742,7 +1750,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             sigma_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col="v_drain_bin", bias_round=1,
                 cat="Vth",
                 x_title="V_Gate (V)",
@@ -1757,7 +1765,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             sigma_curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 bias_col="v_gate_bin", bias_round=1,
                 cat="IdVd",
                 x_title="V_Drain (V)",
@@ -1773,7 +1781,7 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             sigma_curve_params(
-                x_axis="v_drain_bin",
+                x_axis="v_drain_plot_bin",
                 bias_col="v_gate_bin", bias_round=1,
                 cat="3rd_Quadrant",
                 x_title="V_Drain (V)",
@@ -1788,13 +1796,15 @@ def main():
             avg_ds,
             "echarts_timeseries_line",
             sigma_curve_params(
-                x_axis="v_gate_bin",
+                x_axis="v_gate_plot_bin",
                 bias_col=None, bias_round=1,
                 cat="Igss",
                 x_title="V_Gate (V)",
                 y_title="|I_Gate| (A)",
-                upper_expr="AVG(avg_abs_i_gate + COALESCE(std_i_gate, 0))",
-                lower_expr="AVG(GREATEST(avg_abs_i_gate - COALESCE(std_i_gate, 0), 0))",
+                upper_expr=("SUM((avg_abs_i_gate + COALESCE(std_i_gate, 0)) "
+                            "* n_devices) / NULLIF(SUM(n_devices), 0)"),
+                lower_expr=("SUM(GREATEST(avg_abs_i_gate - COALESCE(std_i_gate, 0), 0) "
+                            "* n_devices) / NULLIF(SUM(n_devices), 0)"),
                 upper_label="+1σ |I_Gate| (A)",
                 lower_label="−1σ |I_Gate| (A)",
                 log_y=True,
@@ -1818,7 +1828,8 @@ def main():
         at each bias condition is a separate line.  A series_limit keeps
         the chart readable.
         """
-        groupby = ["device_id", "measurement_type"]
+        groupby = ["device_id", "measurement_type", "metadata_id",
+                   "step_index"]
         if bias_col:
             groupby.append(bias_col)
         params = {
@@ -1900,7 +1911,7 @@ def main():
                 indiv_ds,
                 "echarts_timeseries_line",
                 indiv_curve_params(
-                    x_axis="v_gate_bin",
+                    x_axis="v_gate_plot_bin",
                     cat="IdVg",
                     x_title="V_Gate (V)",
                     y_title="I_Drain (A)",
@@ -1916,7 +1927,7 @@ def main():
                 indiv_ds,
                 "echarts_timeseries_line",
                 indiv_curve_params(
-                    x_axis="v_gate_bin",
+                    x_axis="v_gate_plot_bin",
                     cat="Vth",
                     x_title="V_Gate (V)",
                     y_title="I_Drain (A)",
@@ -1932,7 +1943,7 @@ def main():
                 indiv_ds,
                 "echarts_timeseries_line",
                 indiv_curve_params(
-                    x_axis="v_drain_bin",
+                    x_axis="v_drain_plot_bin",
                     cat="IdVd",
                     x_title="V_Drain (V)",
                     y_title="I_Drain (A)",
@@ -1948,7 +1959,7 @@ def main():
                 indiv_ds,
                 "echarts_timeseries_line",
                 indiv_curve_params(
-                    x_axis="v_drain_bin",
+                    x_axis="v_drain_plot_bin",
                     cat="3rd_Quadrant",
                     x_title="V_Drain (V)",
                     y_title="I_Drain (A)",
@@ -1964,7 +1975,7 @@ def main():
                 indiv_ds,
                 "echarts_timeseries_line",
                 indiv_curve_params(
-                    x_axis="v_gate_bin",
+                    x_axis="v_gate_plot_bin",
                     cat="Igss",
                     x_title="V_Gate (V)",
                     y_title="|I_Gate| (A)",

@@ -166,7 +166,7 @@ def waveform_params(y_col, y_label, y_title):
             "label": y_label,
         }],
         "groupby": [
-            "device_type", "device_id",
+            "device_type", "device_id", "metadata_id",
             "avalanche_condition_label", "avalanche_outcome",
         ],
         "adhoc_filters": [],

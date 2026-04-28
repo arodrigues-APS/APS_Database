@@ -716,6 +716,7 @@ DROP VIEW IF EXISTS baselines_view CASCADE;
 CREATE VIEW baselines_view AS
 SELECT
     m.id AS measurement_id,
+    md.id AS metadata_id,
     md.experiment,
     md.device_id,
     md.measurement_type,
@@ -755,6 +756,24 @@ SELECT
          THEN ROUND(m.v_gate::numeric, 2)::double precision ELSE NULL END  AS v_gate_bin,
     CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
          THEN ROUND(m.v_drain::numeric, 2)::double precision ELSE NULL END AS v_drain_bin,
+    -- _plot_bin columns: coarser bins used only for dashboard x-axes.
+    -- Fine 0.01 V bins preserve calculations; plot bins prevent offset
+    -- sweep grids from being stitched into spike-like lines.
+    CASE
+        WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)::double precision
+        WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+        WHEN md.measurement_category = 'Blocking'
+        THEN ROUND(m.v_drain::numeric, 0)::double precision
+        ELSE ROUND(m.v_drain::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
     m.rds,
     m.bv,
     m.time_val,
@@ -768,6 +787,7 @@ DROP VIEW IF EXISTS baselines_view_device_library;
 CREATE VIEW baselines_view_device_library AS
 SELECT
     m.id AS measurement_id,
+    md.id AS metadata_id,
     md.experiment,
     md.device_id,
     md.device_type,
@@ -811,6 +831,21 @@ SELECT
         THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
+    CASE
+        WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)::double precision
+        WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+        WHEN md.measurement_category = 'Blocking'
+        THEN ROUND(m.v_drain::numeric, 0)::double precision
+        ELSE ROUND(m.v_drain::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
     CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
          THEN ROUND(ROUND(m.v_gate::numeric, 2))::double precision ELSE NULL END  AS v_gate_bias,
     CASE
@@ -939,6 +974,18 @@ GROUP BY
 CREATE VIEW baselines_device_averages AS
 SELECT
     sub.*,
+    CASE
+        WHEN sub.v_gate_bin IS NULL THEN NULL
+        WHEN sub.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(sub.v_gate_bin::numeric, 0)::double precision
+        ELSE ROUND(sub.v_gate_bin::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN sub.v_drain_bin IS NULL THEN NULL
+        WHEN sub.measurement_category = 'Blocking'
+        THEN ROUND(sub.v_drain_bin::numeric, 0)::double precision
+        ELSE ROUND(sub.v_drain_bin::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
     ROUND(sub.v_gate_bin)::double precision AS v_gate_bias,
     ROUND(sub.v_drain_bin)::double precision AS v_drain_bias
 FROM (

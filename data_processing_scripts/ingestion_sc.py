@@ -150,6 +150,21 @@ SELECT
         THEN ROUND(m.v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
+    CASE
+        WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)::double precision
+        WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+        WHEN md.measurement_category = 'Blocking'
+        THEN ROUND(m.v_drain::numeric, 0)::double precision
+        ELSE ROUND(m.v_drain::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
     m.rds, m.bv, m.time_val
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
@@ -160,6 +175,7 @@ DROP VIEW IF EXISTS sc_waveform_view CASCADE;
 CREATE VIEW sc_waveform_view AS
 SELECT
     m.id AS measurement_id,
+    md.id AS metadata_id,
     md.experiment,
     md.device_id,
     md.device_type,
@@ -195,6 +211,18 @@ SELECT
     md.measurement_category,
     ROUND(m.v_gate::numeric, 2)::double precision  AS v_gate_bin,
     ROUND(m.v_drain::numeric, 2)::double precision AS v_drain_bin,
+    CASE
+        WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+        WHEN md.measurement_category = 'Blocking'
+        THEN ROUND(m.v_drain::numeric, 0)::double precision
+        ELSE ROUND(m.v_drain::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
     AVG(m.i_drain) AS avg_i_drain,
     AVG(m.i_gate) AS avg_i_gate,
     AVG(ABS(m.i_drain)) AS avg_abs_i_drain,
@@ -216,7 +244,19 @@ GROUP BY md.device_type, md.manufacturer, md.sample_group,
          md.test_condition, md.sc_voltage_v, md.sc_duration_us,
          md.sc_condition_label, md.measurement_category,
          ROUND(m.v_gate::numeric, 2)::double precision,
-         ROUND(m.v_drain::numeric, 2)::double precision;
+         ROUND(m.v_drain::numeric, 2)::double precision,
+         CASE
+             WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+             WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+             THEN ROUND(m.v_gate::numeric, 0)::double precision
+             ELSE ROUND(m.v_gate::numeric, 1)::double precision
+         END,
+         CASE
+             WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+             WHEN md.measurement_category = 'Blocking'
+             THEN ROUND(m.v_drain::numeric, 0)::double precision
+             ELSE ROUND(m.v_drain::numeric, 1)::double precision
+         END;
 """
 
 

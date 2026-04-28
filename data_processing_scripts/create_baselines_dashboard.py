@@ -353,7 +353,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_bin",
+                "x_axis": "v_gate_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -361,7 +361,8 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -390,7 +391,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_bin",
+                "x_axis": "v_drain_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -398,7 +399,8 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type", "step_index"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -427,7 +429,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_bin",
+                "x_axis": "v_drain_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -435,7 +437,8 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -464,7 +467,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_drain_bin",
+                "x_axis": "v_drain_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -472,7 +475,8 @@ def main():
                     "sqlExpression": "AVG(ABS(i_drain))",
                     "label": "|I_Drain| (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -502,7 +506,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_bin",
+                "x_axis": "v_gate_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -510,7 +514,8 @@ def main():
                     "sqlExpression": "AVG(ABS(i_gate))",
                     "label": "|I_Gate| (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -540,7 +545,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_bin",
+                "x_axis": "v_gate_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -548,7 +553,8 @@ def main():
                     "sqlExpression": "AVG(ABS(i_drain))",
                     "label": "|I_Drain| (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
@@ -578,7 +584,7 @@ def main():
             view_ds,
             "echarts_timeseries_line",
             {
-                "x_axis": "v_gate_bin",
+                "x_axis": "v_gate_plot_bin",
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{
@@ -586,7 +592,8 @@ def main():
                     "sqlExpression": "AVG(i_drain)",
                     "label": "I_Drain (A)",
                 }],
-                "groupby": ["device_id", "measurement_type"],
+                "groupby": ["device_id", "measurement_type",
+                            "metadata_id", "step_index"],
                 "adhoc_filters": [{
                     "expressionType": "SQL",
                     "sqlExpression":
