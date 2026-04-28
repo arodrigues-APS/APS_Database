@@ -12,10 +12,16 @@ labeled pristine / pre_irrad.  Runs extract_damage_metrics.py first
 if gate_params is not populated.
 
 What it does:
-  1. Creates/refreshes SQL view `damage_equivalence_view` containing one
-     row per SC condition (device_type, sc_voltage_v, sc_duration_us)
-     and one row per irradiation run (device_type, irrad_run_id), each
-     with median ΔVth / ΔRds / ΔBV, IQR, and sample counts.
+  1. Creates/refreshes SQL views:
+       * `damage_equivalence_view` contains one row per SC condition
+         (device_type, sc_voltage_v, sc_duration_us) and one row per
+         irradiation run (device_type, irrad_run_id), each with median
+         ΔVth / ΔRds / ΔBV, IQR, and sample counts.
+       * `damage_equivalence_match_view` ranks nearest SC fingerprints
+         for each irradiation fingerprint and exposes axis overlap,
+         distance, and comparability status for the dashboard.
+       * `damage_equivalence_coverage_view` summarizes which device types
+         have enough SC/irradiation overlap to compare.
   2. In Python: builds a per-device-type damage-space nearest-neighbor
      retriever. The distance metric is a reliability-weighted Euclidean
      score over available axes (ΔVth, ΔRds, ΔBV), normalized by per-axis
@@ -70,6 +76,8 @@ from db_config import get_connection
 # — every device with post_sc or post_irrad data also has explicit pristine
 # or pre_irrad rows.
 DAMAGE_VIEW_SQL = """
+DROP VIEW IF EXISTS damage_equivalence_match_view CASCADE;
+DROP VIEW IF EXISTS damage_equivalence_coverage_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_view CASCADE;
 
 CREATE VIEW damage_equivalence_view AS
@@ -187,38 +195,317 @@ irrad_fp AS (
     JOIN irradiation_runs r ON r.id = ipf.irrad_run_id
     GROUP BY ipf.device_type, ipf.irrad_run_id,
              r.ion_species, r.beam_energy_mev, r.let_surface
+),
+raw_fp AS (
+    SELECT 'sc'::text                           AS source,
+           device_type,
+           sc_voltage_v, sc_duration_us,
+           NULL::text                           AS ion_species,
+           NULL::double precision               AS beam_energy_mev,
+           NULL::double precision               AS let_surface,
+           NULL::integer                        AS irrad_run_id,
+           dvth, dvth_iqr, dvth_n,
+           drds, drds_iqr, drds_n,
+           dbv,  dbv_iqr,  dbv_n,
+           n_samples,
+           sc_voltage_v::text || 'V / '
+             || sc_duration_us::text || 'us'    AS label
+    FROM sc_fp
+    UNION ALL
+    SELECT 'irrad'::text                        AS source,
+           device_type,
+           NULL::double precision               AS sc_voltage_v,
+           NULL::double precision               AS sc_duration_us,
+           ion_species, beam_energy_mev, let_surface,
+           irrad_run_id,
+           dvth, dvth_iqr, dvth_n,
+           drds, drds_iqr, drds_n,
+           dbv,  dbv_iqr,  dbv_n,
+           n_samples,
+           COALESCE(ion_species, '?')
+             || ' @ ' || COALESCE(beam_energy_mev::text, '?') || ' MeV'
+             || ' (LET ' || COALESCE(let_surface::text, '?') || ')'
+                                                    AS label
+    FROM irrad_fp
+),
+source_counts AS (
+    SELECT device_type,
+           COUNT(*) FILTER (WHERE source = 'sc')    AS device_sc_count,
+           COUNT(*) FILTER (WHERE source = 'irrad') AS device_irrad_count
+    FROM raw_fp
+    GROUP BY device_type
 )
+SELECT fp.*,
+       sc.device_sc_count,
+       sc.device_irrad_count,
+       CASE
+         WHEN sc.device_sc_count > 0 AND sc.device_irrad_count > 0
+           THEN 'SC + irradiation'
+         WHEN sc.device_sc_count > 0
+           THEN 'SC only'
+         WHEN sc.device_irrad_count > 0
+           THEN 'irradiation only'
+         ELSE 'no data'
+       END AS device_pair_status
+FROM raw_fp fp
+JOIN source_counts sc USING (device_type);
 
-SELECT 'sc'::text                              AS source,
-       device_type,
-       sc_voltage_v, sc_duration_us,
-       NULL::text                              AS ion_species,
-       NULL::double precision                  AS beam_energy_mev,
-       NULL::double precision                  AS let_surface,
-       NULL::integer                           AS irrad_run_id,
-       dvth, dvth_iqr, dvth_n,
-       drds, drds_iqr, drds_n,
-       dbv,  dbv_iqr,  dbv_n,
-       n_samples,
-       sc_voltage_v::text || 'V / '
-         || sc_duration_us::text || 'us'       AS label
-FROM sc_fp
-UNION ALL
-SELECT 'irrad'::text                           AS source,
-       device_type,
-       NULL::double precision                  AS sc_voltage_v,
-       NULL::double precision                  AS sc_duration_us,
-       ion_species, beam_energy_mev, let_surface,
-       irrad_run_id,
-       dvth, dvth_iqr, dvth_n,
-       drds, drds_iqr, drds_n,
-       dbv,  dbv_iqr,  dbv_n,
-       n_samples,
-       COALESCE(ion_species, '?')
-         || ' @ ' || COALESCE(beam_energy_mev::text, '?') || ' MeV'
-         || ' (LET ' || COALESCE(let_surface::text, '?') || ')'
-                                               AS label
-FROM irrad_fp;
+CREATE VIEW damage_equivalence_match_view AS
+WITH fp AS (
+    SELECT *
+    FROM damage_equivalence_view
+    WHERE device_pair_status = 'SC + irradiation'
+),
+axis_stats AS (
+    SELECT device_type,
+           PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY dvth)
+             FILTER (WHERE dvth IS NOT NULL)              AS dvth_q1,
+           PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY dvth)
+             FILTER (WHERE dvth IS NOT NULL)              AS dvth_q3,
+           STDDEV_SAMP(dvth)                              AS dvth_std,
+           PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY drds)
+             FILTER (WHERE drds IS NOT NULL)              AS drds_q1,
+           PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY drds)
+             FILTER (WHERE drds IS NOT NULL)              AS drds_q3,
+           STDDEV_SAMP(drds)                              AS drds_std,
+           PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY dbv)
+             FILTER (WHERE dbv IS NOT NULL)               AS dbv_q1,
+           PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY dbv)
+             FILTER (WHERE dbv IS NOT NULL)               AS dbv_q3,
+           STDDEV_SAMP(dbv)                               AS dbv_std
+    FROM fp
+    GROUP BY device_type
+),
+axis_scales AS (
+    SELECT device_type,
+           GREATEST(
+             COALESCE(NULLIF(dvth_q3 - dvth_q1, 0.0) / 1.349,
+                      NULLIF(dvth_std, 0.0), 1.0),
+             1e-6
+           ) AS dvth_scale,
+           GREATEST(
+             COALESCE(NULLIF(drds_q3 - drds_q1, 0.0) / 1.349,
+                      NULLIF(drds_std, 0.0), 1.0),
+             1e-6
+           ) AS drds_scale,
+           GREATEST(
+             COALESCE(NULLIF(dbv_q3 - dbv_q1, 0.0) / 1.349,
+                      NULLIF(dbv_std, 0.0), 1.0),
+             1e-6
+           ) AS dbv_scale
+    FROM axis_stats
+),
+pairs_raw AS (
+    SELECT ir.device_type,
+           ir.irrad_run_id,
+           ir.label                         AS irrad_label,
+           ir.ion_species,
+           ir.beam_energy_mev,
+           ir.let_surface,
+           ir.dvth                          AS irrad_dvth,
+           ir.dvth_iqr                      AS irrad_dvth_iqr,
+           ir.dvth_n                        AS irrad_dvth_n,
+           ir.drds                          AS irrad_drds,
+           ir.drds_iqr                      AS irrad_drds_iqr,
+           ir.drds_n                        AS irrad_drds_n,
+           ir.dbv                           AS irrad_dbv,
+           ir.dbv_iqr                       AS irrad_dbv_iqr,
+           ir.dbv_n                         AS irrad_dbv_n,
+           ir.n_samples                     AS irrad_n_samples,
+           sc.label                         AS sc_label,
+           sc.sc_voltage_v,
+           sc.sc_duration_us,
+           sc.dvth                          AS sc_dvth,
+           sc.dvth_iqr                      AS sc_dvth_iqr,
+           sc.dvth_n                        AS sc_dvth_n,
+           sc.drds                          AS sc_drds,
+           sc.drds_iqr                      AS sc_drds_iqr,
+           sc.drds_n                        AS sc_drds_n,
+           sc.dbv                           AS sc_dbv,
+           sc.dbv_iqr                       AS sc_dbv_iqr,
+           sc.dbv_n                         AS sc_dbv_n,
+           sc.n_samples                     AS sc_n_samples,
+           ax.dvth_scale,
+           ax.drds_scale,
+           ax.dbv_scale,
+           CASE WHEN ir.dvth IS NOT NULL AND sc.dvth IS NOT NULL
+                THEN 1 ELSE 0 END           AS has_dvth,
+           CASE WHEN ir.drds IS NOT NULL AND sc.drds IS NOT NULL
+                THEN 1 ELSE 0 END           AS has_drds,
+           CASE WHEN ir.dbv IS NOT NULL AND sc.dbv IS NOT NULL
+                THEN 1 ELSE 0 END           AS has_dbv,
+           CASE WHEN ir.dvth IS NOT NULL AND sc.dvth IS NOT NULL
+                THEN ABS(ir.dvth - sc.dvth) END
+                                                AS abs_delta_dvth,
+           CASE WHEN ir.drds IS NOT NULL AND sc.drds IS NOT NULL
+                THEN ABS(ir.drds - sc.drds) END
+                                                AS abs_delta_drds,
+           CASE WHEN ir.dbv IS NOT NULL AND sc.dbv IS NOT NULL
+                THEN ABS(ir.dbv - sc.dbv) END
+                                                AS abs_delta_dbv,
+           CASE WHEN ir.dvth IS NOT NULL AND sc.dvth IS NOT NULL THEN
+             SQRT(
+               (SQRT(GREATEST(COALESCE(ir.dvth_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(ir.dvth_iqr, 0.0))))
+               *
+               (SQRT(GREATEST(COALESCE(sc.dvth_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(sc.dvth_iqr, 0.0))))
+             )
+           END AS dvth_weight,
+           CASE WHEN ir.drds IS NOT NULL AND sc.drds IS NOT NULL THEN
+             SQRT(
+               (SQRT(GREATEST(COALESCE(ir.drds_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(ir.drds_iqr, 0.0))))
+               *
+               (SQRT(GREATEST(COALESCE(sc.drds_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(sc.drds_iqr, 0.0))))
+             )
+           END AS drds_weight,
+           CASE WHEN ir.dbv IS NOT NULL AND sc.dbv IS NOT NULL THEN
+             SQRT(
+               (SQRT(GREATEST(COALESCE(ir.dbv_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(ir.dbv_iqr, 0.0))))
+               *
+               (SQRT(GREATEST(COALESCE(sc.dbv_n, 1), 1)::double precision)
+                 / (1.0 + ABS(COALESCE(sc.dbv_iqr, 0.0))))
+             )
+           END AS dbv_weight
+    FROM fp ir
+    JOIN fp sc
+      ON sc.device_type = ir.device_type
+     AND sc.source = 'sc'
+    JOIN axis_scales ax
+      ON ax.device_type = ir.device_type
+    WHERE ir.source = 'irrad'
+),
+pairs AS (
+    SELECT pr.*,
+           (has_dvth + has_drds + has_dbv) AS comparable_axes,
+           CONCAT_WS(', ',
+             CASE WHEN has_dvth = 1 THEN 'ΔVth' END,
+             CASE WHEN has_drds = 1 THEN 'ΔRds(on)' END,
+             CASE WHEN has_dbv = 1 THEN 'ΔV(BR)DSS' END
+           ) AS comparable_axis_labels,
+           SQRT(
+             (
+               COALESCE(dvth_weight
+                 * POWER((irrad_dvth - sc_dvth) / dvth_scale, 2), 0.0)
+               + COALESCE(drds_weight
+                 * POWER((irrad_drds - sc_drds) / drds_scale, 2), 0.0)
+               + COALESCE(dbv_weight
+                 * POWER((irrad_dbv - sc_dbv) / dbv_scale, 2), 0.0)
+             )
+             / NULLIF(
+               COALESCE(dvth_weight, 0.0)
+               + COALESCE(drds_weight, 0.0)
+               + COALESCE(dbv_weight, 0.0),
+               0.0
+             )
+           ) AS nearest_distance
+    FROM pairs_raw pr
+),
+ranked AS (
+    SELECT p.*,
+           ROW_NUMBER() OVER (
+             PARTITION BY device_type, irrad_run_id
+             ORDER BY nearest_distance ASC NULLS LAST,
+                      comparable_axes DESC,
+                      sc_voltage_v ASC,
+                      sc_duration_us ASC
+           ) AS match_rank,
+           COUNT(*) OVER (
+             PARTITION BY device_type, irrad_run_id
+           ) AS sc_candidate_count
+    FROM pairs p
+    WHERE comparable_axes > 0
+)
+SELECT ranked.*,
+       CASE
+         WHEN comparable_axes >= 3 AND nearest_distance <= 0.75
+           THEN 'strong'
+         WHEN comparable_axes >= 2 AND nearest_distance <= 1.5
+           THEN 'usable'
+         WHEN nearest_distance <= 2.5
+           THEN 'weak'
+         ELSE 'inspect manually'
+       END AS comparability_status
+FROM ranked;
+
+CREATE VIEW damage_equivalence_coverage_view AS
+WITH fp_counts AS (
+    SELECT device_type,
+           COUNT(*) FILTER (WHERE source = 'sc')    AS n_sc_fingerprints,
+           COUNT(*) FILTER (WHERE source = 'irrad') AS n_irrad_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'sc' AND dvth IS NOT NULL
+           ) AS sc_dvth_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'irrad' AND dvth IS NOT NULL
+           ) AS irrad_dvth_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'sc' AND drds IS NOT NULL
+           ) AS sc_drds_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'irrad' AND drds IS NOT NULL
+           ) AS irrad_drds_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'sc' AND dbv IS NOT NULL
+           ) AS sc_dbv_fingerprints,
+           COUNT(*) FILTER (
+             WHERE source = 'irrad' AND dbv IS NOT NULL
+           ) AS irrad_dbv_fingerprints
+    FROM damage_equivalence_view
+    GROUP BY device_type
+),
+match_counts AS (
+    SELECT device_type,
+           COUNT(*)                         AS comparable_pair_count,
+           COUNT(DISTINCT irrad_run_id)     AS comparable_irrad_count,
+           MIN(nearest_distance)            AS best_distance,
+           COUNT(*) FILTER (
+             WHERE comparable_axes >= 2
+           ) AS pairs_with_2plus_axes
+    FROM damage_equivalence_match_view
+    GROUP BY device_type
+)
+SELECT fp.device_type,
+       fp.n_sc_fingerprints,
+       fp.n_irrad_fingerprints,
+       COALESCE(mc.comparable_pair_count, 0) AS comparable_pair_count,
+       COALESCE(mc.comparable_irrad_count, 0) AS comparable_irrad_count,
+       mc.best_distance,
+       CONCAT_WS(', ',
+         CASE WHEN fp.sc_dvth_fingerprints > 0
+                AND fp.irrad_dvth_fingerprints > 0
+              THEN 'ΔVth' END,
+         CASE WHEN fp.sc_drds_fingerprints > 0
+                AND fp.irrad_drds_fingerprints > 0
+              THEN 'ΔRds(on)' END,
+         CASE WHEN fp.sc_dbv_fingerprints > 0
+                AND fp.irrad_dbv_fingerprints > 0
+              THEN 'ΔV(BR)DSS' END
+       ) AS comparable_axis_labels,
+       fp.sc_dvth_fingerprints,
+       fp.irrad_dvth_fingerprints,
+       fp.sc_drds_fingerprints,
+       fp.irrad_drds_fingerprints,
+       fp.sc_dbv_fingerprints,
+       fp.irrad_dbv_fingerprints,
+       CASE
+         WHEN fp.n_sc_fingerprints = 0 OR fp.n_irrad_fingerprints = 0
+           THEN 'missing counterpart'
+         WHEN COALESCE(mc.comparable_pair_count, 0) = 0
+           THEN 'no shared damage axes'
+         WHEN mc.best_distance <= 0.75
+              AND COALESCE(mc.pairs_with_2plus_axes, 0) > 0
+           THEN 'strong matches available'
+         WHEN mc.best_distance <= 1.5
+              AND COALESCE(mc.pairs_with_2plus_axes, 0) > 0
+           THEN 'usable matches available'
+         ELSE 'weak/inspect manually'
+       END AS comparability_status
+FROM fp_counts fp
+LEFT JOIN match_counts mc USING (device_type);
 """
 
 

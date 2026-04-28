@@ -2,11 +2,12 @@
 """
 Avalanche waveform ingestion for APS database.
 
-Ingests Keysight HDF5 waveform captures from the Avalanche Measurements corpus
+Ingests Keysight HDF5 / MATLAB waveform captures from the Avalanche Measurements corpus
 into baselines_metadata (data_source='avalanche') and baselines_measurements.
 
 Key behaviours
 - Handles single-file captures and split _ch1/_ch2/_ch3 captures.
+- Extracts MATLAB oscilloscope exports (.mat) in both v5 and v7.3/HDF5 forms.
 - Extracts inductance (L) from folder/filename tokens; falls back to the
   avalanche_campaigns table populated via the Flask UI.
 - Outcome defaults to 'unknown'; overridden per-folder via avalanche_campaigns.
@@ -58,13 +59,21 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py"])
     import h5py
 
+try:
+    from scipy.io import loadmat
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scipy"])
+    from scipy.io import loadmat
+
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, NAS_ROOT
 from common import (compute_file_hash, load_device_library,
                     load_device_mapping_rules, match_device)
 
 
 AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
-VALID_EXTENSIONS = {".h5", ".hdf5"}
+VALID_EXTENSIONS = {".h5", ".hdf5", ".mat"}
+UNSUPPORTED_EXTENSIONS = {".wfm"}
 SKIP_FILES = {"Thumbs.db"}
 
 
@@ -114,7 +123,9 @@ SELECT
     md.experiment,
     md.device_id,
     md.device_type,
+    COALESCE(md.device_type, NULLIF(md.device_id, ''), 'unknown') AS device_label,
     md.manufacturer,
+    COALESCE(md.manufacturer, 'unknown') AS manufacturer_label,
     md.filename,
     md.csv_path,
     md.avalanche_family,
@@ -149,13 +160,31 @@ SELECT
     md.experiment,
     md.device_id,
     md.device_type,
+    COALESCE(md.device_type, NULLIF(md.device_id, ''), 'unknown') AS device_label,
     md.manufacturer,
+    COALESCE(md.manufacturer, 'unknown') AS manufacturer_label,
     md.sample_group,
     md.avalanche_family,
     md.avalanche_mode,
-    md.avalanche_energy_j,
-    md.avalanche_peak_current_a,
+    md.avalanche_energy_j                       AS avalanche_energy_j_raw,
+    COALESCE(
+        md.avalanche_peak_current_a,
+        MAX(ABS(m.i_drain))
+    )                                           AS avalanche_peak_current_a,
     md.avalanche_inductance_mh,
+    COALESCE(
+        md.avalanche_energy_j,
+        CASE
+            WHEN md.avalanche_inductance_mh IS NOT NULL
+             AND COALESCE(md.avalanche_peak_current_a,
+                          MAX(ABS(m.i_drain))) IS NOT NULL
+            THEN 0.5
+               * (md.avalanche_inductance_mh / 1000.0)
+               * POWER(COALESCE(md.avalanche_peak_current_a,
+                                MAX(ABS(m.i_drain))), 2)
+            ELSE NULL
+        END
+    )                                           AS avalanche_energy_j,
     md.avalanche_gate_bias_v,
     md.avalanche_gate_bias_raw,
     md.avalanche_shot_index,
@@ -185,11 +214,47 @@ GROUP BY md.id;
 def _decode_value(v):
     if isinstance(v, bytes):
         return v.decode("utf-8", errors="ignore")
-    if isinstance(v, np.ndarray) and v.shape == ():
+    if isinstance(v, np.ndarray) and v.size == 1:
         return v.item()
     if isinstance(v, np.generic):
         return v.item()
     return v
+
+
+def _decode_text_value(v):
+    """Decode byte strings and MATLAB uint16 char arrays into Python text."""
+    v = _decode_value(v)
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="ignore")
+    if isinstance(v, str):
+        return v
+    if isinstance(v, np.ndarray):
+        if v.dtype.kind in ("u", "i") and v.size:
+            try:
+                return "".join(chr(int(c)) for c in v.ravel() if int(c) != 0)
+            except (TypeError, ValueError):
+                return ""
+        if v.dtype.kind in ("S", "U") and v.size:
+            return "".join(str(x) for x in v.ravel())
+    return "" if v is None else str(v)
+
+
+def _hdf5_dataset_value(group, key, default=None):
+    if key not in group:
+        return default
+    try:
+        return _decode_value(group[key][()])
+    except Exception:
+        return default
+
+
+def _hdf5_dataset_text(group, key, default=""):
+    if key not in group:
+        return default
+    try:
+        return _decode_text_value(group[key][()])
+    except Exception:
+        return default
 
 
 def _safe_float(v):
@@ -208,6 +273,22 @@ def _safe_int(v):
 
 def _sanitize_experiment_token(s):
     return re.sub(r"[^A-Za-z0-9_]+", "_", s).strip("_") or "unknown"
+
+
+def _mat_struct_to_dict(obj):
+    fields = getattr(obj, "_fieldnames", None) or []
+    out = {}
+    for name in fields:
+        val = getattr(obj, name)
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                val = None
+            elif val.size == 1:
+                val = val.item()
+        if isinstance(val, np.generic):
+            val = val.item()
+        out[name] = val
+    return out
 
 
 # ── Campaign lookup ───────────────────────────────────────────────────────────
@@ -299,15 +380,28 @@ def parse_filename_metadata(base_stem):
     else:
         info["device_id"] = stem.split("_")[0] if "_" in stem else stem
 
-    # Peak current: e.g. 25A
-    m = re.search(r"(?:^|_)(\d+(?:\.\d+)?)A(?:_|$)", stem, re.IGNORECASE)
+    # Peak/commanded current: e.g. 25A, 0020A_0001, d3_41Vc_45A00001
+    m = re.search(
+        r"(?:^|_)(\d+(?:[p.]\d+)?)A(?:(\d{5,})|_|$)",
+        stem,
+        re.IGNORECASE,
+    )
     if m:
-        info["avalanche_peak_current_a"] = _safe_float(m.group(1))
+        info["avalanche_peak_current_a"] = _safe_float(m.group(1).replace("p", "."))
+        if m.group(2) and info["avalanche_shot_index"] is None:
+            info["avalanche_shot_index"] = _safe_int(m.group(2))
 
-    # Energy with explicit J suffix: e.g. 0.5J, 1.02J, 0.5J00002 (J may be followed by shot)
-    m = re.search(r"(?:^|_)(\d+(?:\.\d+)?)J", stem, re.IGNORECASE)
+    # Energy with explicit J suffix: e.g. 0.5J, 0p62J, 0.5J00002
+    m = re.search(r"(?:^|_)(\d+(?:[p.]\d+)?)J", stem, re.IGNORECASE)
     if m:
-        info["avalanche_energy_j"] = _safe_float(m.group(1))
+        info["avalanche_energy_j"] = _safe_float(m.group(1).replace("p", "."))
+
+    # MATLAB exports sometimes use mJ condition tokens: 0100mJ_0001 → 0.1 J
+    if info["avalanche_energy_j"] is None:
+        m = re.search(r"(?:^|_)(\d+(?:[p.]\d+)?)mJ(?:_|$)", stem, re.IGNORECASE)
+        if m:
+            mj = _safe_float(m.group(1).replace("p", "."))
+            info["avalanche_energy_j"] = mj / 1000.0 if mj is not None else None
 
     # Fallback: fused decimal + 5-digit shot with no unit letter
     # Matches e.g. 0.1200009 → energy=0.12, shot=9 (UIDSelam naming)
@@ -475,6 +569,18 @@ def collect_h5_groups(root_dir, limit_groups=0):
     return ordered
 
 
+def count_unsupported_files(root_dir):
+    counts = defaultdict(int)
+    for dirpath, _, files in os.walk(root_dir):
+        for fname in files:
+            if fname in SKIP_FILES:
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in UNSUPPORTED_EXTENSIONS:
+                counts[ext] += 1
+    return dict(counts)
+
+
 # ── HDF5 parsing ──────────────────────────────────────────────────────────────
 
 def read_frame_info(h5f):
@@ -489,6 +595,119 @@ def read_frame_info(h5f):
     except Exception:
         pass
     return frame
+
+
+def read_mat_hdf5_frame_info(h5f):
+    """Read top-level MATLAB v7.3 Frame group fields when present."""
+    frame = {}
+    if "Frame" not in h5f or not hasattr(h5f["Frame"], "keys"):
+        return frame
+    for key in h5f["Frame"].keys():
+        value = _hdf5_dataset_value(h5f["Frame"], key)
+        text = _hdf5_dataset_text(h5f["Frame"], key)
+        frame[key] = text if text and key.lower() in {"date", "model", "serial"} else value
+    return frame
+
+
+def _mat_hdf5_channel_descs(path, h5f):
+    descs = []
+    for ch_name in sorted(k for k in h5f.keys() if re.match(r"Channel[_ ]\d+$", k, re.I)):
+        g = h5f[ch_name]
+        if "Data" not in g:
+            continue
+        dset = g["Data"]
+        if len(dset.shape) == 0:
+            continue
+        descs.append({
+            "file_path":    path,
+            "dataset_path": dset.name,
+            "channel_name": ch_name.replace("_", " "),
+            "y_units":      _hdf5_dataset_text(g, "YUnits", ""),
+            "x_inc":        _safe_float(_hdf5_dataset_value(g, "XInc", 1.0)) or 1.0,
+            "x_org":        _safe_float(_hdf5_dataset_value(g, "XOrg", 0.0)) or 0.0,
+            "y_inc":        _safe_float(_hdf5_dataset_value(g, "YInc", 1.0)) or 1.0,
+            "y_org":        _safe_float(_hdf5_dataset_value(g, "YOrg", 0.0)) or 0.0,
+            "y_ref":        _safe_float(_hdf5_dataset_value(g, "YReference", 0.0)) or 0.0,
+            "num_points":   int(max(dset.shape)),
+            "data_format":  "mat_hdf5",
+        })
+    return descs
+
+
+def _mat_v5_channel_descs(path):
+    mat = loadmat(path, squeeze_me=True, struct_as_record=False)
+    descs = []
+    frame_info = _mat_struct_to_dict(mat.get("Frame")) if "Frame" in mat else {}
+    results_info = _mat_struct_to_dict(mat.get("Results")) if "Results" in mat else {}
+    # Legacy MATLAB oscilloscope exports have no unit field. In these files
+    # Channel 1 is high-side Vds, Channel 2 is low-side/gate voltage, and
+    # Channel 3 is the current probe/shunt-derived Id channel.
+    fallback_units = {"Channel_1": "Volt", "Channel_2": "Volt", "Channel_3": "Ampere"}
+
+    for ch_name in sorted(k for k in mat if re.match(r"Channel_\d+$", k, re.I)):
+        ch = mat[ch_name]
+        data = getattr(ch, "Data", None)
+        if data is None:
+            continue
+        raw = np.asarray(data, dtype=np.float64).ravel()
+        y_inc = _safe_float(getattr(ch, "YInc", 1.0)) or 1.0
+        y_org = _safe_float(getattr(ch, "YOrg", 0.0)) or 0.0
+        y_ref = _safe_float(getattr(ch, "YReference", 0.0)) or 0.0
+        scaled = (raw - y_ref) * y_inc + y_org
+        descs.append({
+            "file_path":      path,
+            "dataset_path":   ch_name,
+            "channel_name":   ch_name.replace("_", " "),
+            "y_units":        fallback_units.get(ch_name, ""),
+            "x_inc":          _safe_float(getattr(ch, "XInc", 1.0)) or 1.0,
+            "x_org":          _safe_float(getattr(ch, "XOrg", 0.0)) or 0.0,
+            "num_points":     int(scaled.shape[0]),
+            "data_format":    "mat_v5",
+            "preloaded_data": scaled,
+        })
+    return descs, frame_info, results_info
+
+
+def describe_waveform_file(path):
+    """
+    Return channel descriptors plus frame/results metadata for HDF5 and MAT
+    oscilloscope exports.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".mat":
+        try:
+            with h5py.File(path, "r") as h5f:
+                return (
+                    _mat_hdf5_channel_descs(path, h5f),
+                    read_mat_hdf5_frame_info(h5f),
+                    {},
+                )
+        except OSError:
+            return _mat_v5_channel_descs(path)
+
+    with h5py.File(path, "r") as h5f:
+        frame_info = read_frame_info(h5f)
+        descs = []
+        if "Waveforms" not in h5f:
+            return descs, frame_info, {}
+        for ch_name, g in h5f["Waveforms"].items():
+            data_sets = [k for k in g.keys() if k.lower().endswith("data")] or list(g.keys())
+            if not data_sets:
+                continue
+            dset = g[data_sets[0]]
+            if len(dset.shape) != 1:
+                continue
+            descs.append({
+                "file_path":    path,
+                "dataset_path": dset.name,
+                "channel_name": str(ch_name),
+                "y_units":      str(_decode_value(g.attrs.get("YUnits", ""))),
+                "x_inc":        _safe_float(_decode_value(g.attrs.get("XInc", 1.0))) or 1.0,
+                "x_org":        _safe_float(_decode_value(g.attrs.get("XOrg", 0.0))) or 0.0,
+                "num_points":   int(dset.shape[0]),
+                "data_format":  "hdf5",
+            })
+        return descs, frame_info, {}
 
 
 def _series_abs_max(arr):
@@ -539,29 +758,14 @@ def build_waveform(group_paths, max_points):
     # Pass 1: metadata only
     all_descs = []
     frame_info = {}
+    results_info = {}
     for p in sorted(group_paths):
-        with h5py.File(p, "r") as h5f:
-            fi = read_frame_info(h5f)
-            if fi:
-                frame_info = fi
-            if "Waveforms" not in h5f:
-                continue
-            for ch_name, g in h5f["Waveforms"].items():
-                data_sets = [k for k in g.keys() if k.lower().endswith("data")] or list(g.keys())
-                if not data_sets:
-                    continue
-                dset = g[data_sets[0]]
-                if len(dset.shape) != 1:
-                    continue
-                all_descs.append({
-                    "file_path":    p,
-                    "dataset_path": dset.name,
-                    "channel_name": str(ch_name),
-                    "y_units":      str(_decode_value(g.attrs.get("YUnits", ""))),
-                    "x_inc":        _safe_float(_decode_value(g.attrs.get("XInc", 1.0))) or 1.0,
-                    "x_org":        _safe_float(_decode_value(g.attrs.get("XOrg", 0.0))) or 0.0,
-                    "num_points":   int(dset.shape[0]),
-                })
+        descs, fi, ri = describe_waveform_file(p)
+        all_descs.extend(descs)
+        if fi:
+            frame_info = fi
+        if ri:
+            results_info = ri
 
     if not all_descs:
         raise ValueError("No channel datasets found")
@@ -580,11 +784,28 @@ def build_waveform(group_paths, max_points):
 
     data_cache = {}
     for p in sorted(by_file):
-        with h5py.File(p, "r") as h5f:
+        if any(d.get("data_format") == "mat_v5" for d in by_file[p]):
             for d in by_file[p]:
                 data_cache[(p, d["dataset_path"])] = np.asarray(
-                    h5f[d["dataset_path"]][:n_ref:stride], dtype=np.float64
+                    d["preloaded_data"][:n_ref:stride], dtype=np.float64
                 )
+            continue
+
+        with h5py.File(p, "r") as h5f:
+            for d in by_file[p]:
+                dset = h5f[d["dataset_path"]]
+                if len(dset.shape) == 1:
+                    raw = dset[:n_ref:stride]
+                elif dset.shape[0] == 1:
+                    raw = dset[0, :n_ref:stride]
+                elif dset.shape[1] == 1:
+                    raw = dset[:n_ref:stride, 0]
+                else:
+                    raw = np.asarray(dset).ravel()[:n_ref:stride]
+                raw = np.asarray(raw, dtype=np.float64).ravel()
+                if d.get("data_format") == "mat_hdf5":
+                    raw = (raw - d.get("y_ref", 0.0)) * d.get("y_inc", 1.0) + d.get("y_org", 0.0)
+                data_cache[(p, d["dataset_path"])] = raw
 
     sampled = []
     for d in all_descs:
@@ -609,6 +830,7 @@ def build_waveform(group_paths, max_points):
         "channel_count":     len(sampled),
         "channel_units":     [s["y_units"] for s in sampled],
         "frame_info":        frame_info,
+        "results_info":      results_info,
         "notes":             mapped.get("notes", []),
     }
     return time_val, mapped, meta
@@ -671,6 +893,11 @@ def main():
     if not os.path.isdir(args.root):
         print(f"ERROR: root not found: {args.root}")
         sys.exit(1)
+
+    unsupported_counts = count_unsupported_files(args.root)
+    if unsupported_counts:
+        pretty = ", ".join(f"{ext}={count}" for ext, count in sorted(unsupported_counts.items()))
+        print(f"Unsupported waveform files skipped: {pretty}")
 
     groups = collect_h5_groups(args.root, limit_groups=args.limit_groups)
     print(f"\nGrouped captures found: {len(groups)}")
@@ -795,9 +1022,40 @@ def main():
                 skipped += 1
                 continue
 
+            frame_meta = wf_meta.get("frame_info", {}) or {}
+            results_meta = wf_meta.get("results_info", {}) or {}
+
+            frame_device = frame_meta.get("DUTName") or frame_meta.get("dut_name")
+            if device_type is None and frame_device:
+                pn, mfr = match_device(str(frame_device), 'avalanche', rules, device_library)
+                device_type = pn or str(frame_device)
+                manufacturer = mfr or manufacturer
+
+            add_info = frame_meta.get("AddInfo")
+            if add_info and (
+                not file_info.get("device_id")
+                or re.fullmatch(r"\d+(?:mJ|A)?", str(file_info.get("device_id")), re.I)
+            ):
+                file_info["device_id"] = str(add_info)
+                file_info["sample_group"] = str(add_info)
+
+            if file_info.get("avalanche_peak_current_a") is None:
+                frame_test_value = _safe_float(frame_meta.get("test_value"))
+                if frame_test_value is not None:
+                    file_info["avalanche_peak_current_a"] = frame_test_value
+
+            if file_info.get("avalanche_energy_j") is None:
+                result_energy = _safe_float(results_meta.get("avalanche_energy"))
+                if result_energy is not None:
+                    file_info["avalanche_energy_j"] = abs(result_energy)
+
             # ── Derived metadata ──────────────────────────────────────────
             rel_path = os.path.relpath(paths[0], args.root)
             inductance_mh = parse_inductance_from_rel_path(rel_path, family, campaign_lookup)
+            if inductance_mh is None:
+                frame_l_h = _safe_float(frame_meta.get("L"))
+                if frame_l_h is not None:
+                    inductance_mh = frame_l_h * 1000.0
 
             campaign_meta = campaign_lookup.get(family, {})
             outcome = campaign_meta.get("outcome_default") or "unknown"
@@ -812,10 +1070,11 @@ def main():
                 device_type = campaign_meta["device_part_number"]
 
             # Measurement date from HDF5 Frame
-            raw_date = wf_meta.get("frame_info", {}).get("Date", "")
+            raw_date = frame_meta.get("Date") or frame_meta.get("date") or ""
             measured_at = None
             if raw_date:
-                for fmt in ("%d-%b-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                for fmt in ("%d-%b-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                            "%Y.%m.%d %H:%M:%S"):
                     try:
                         measured_at = datetime.strptime(str(raw_date).strip(), fmt)
                         break
@@ -842,6 +1101,7 @@ def main():
                 "sampled_points":    wf_meta["sampled_points"],
                 "channel_units":     wf_meta["channel_units"],
                 "frame_info":        wf_meta["frame_info"],
+                "results_info":      wf_meta.get("results_info", {}),
                 "notes":             wf_meta["notes"],
             }
 

@@ -266,6 +266,41 @@ def parse_keithley_txt(filepath):
     return headers, data_rows, header_meta
 
 
+def _normalise_header(header):
+    return header.lower().strip().replace(" ", "_")
+
+
+def _assign_mapped_value(result, header, val):
+    hl = _normalise_header(header)
+
+    if hl in ('vg', 'vgs'):
+        result['v_gate'] = val
+    elif hl in ('ig', 'igs'):
+        result['i_gate'] = val
+    elif hl in ('vd', 'vds'):
+        result['v_drain'] = val
+    elif hl in ('id', 'ids'):
+        result['i_drain'] = val
+    elif hl in ('time', 'time_val', 't'):
+        result['time_val'] = val
+    elif hl in ('fluence', 'fluence_cm2', 'fluence_per_cm2'):
+        result['fluence'] = val
+
+
+def _is_fluence_monitor_header(headers):
+    labels = [_normalise_header(h) for h in headers]
+    return (
+        len(labels) >= 7
+        and labels[0] in ('time', 'time_val', 't')
+        and labels[1] in ('vd', 'vds')
+        and labels[2] in ('id', 'ids')
+        and labels[3] in ('vg', 'vgs')
+        and labels[4] in ('ig', 'igs')
+        and labels[-2] in ('arduino_ms', 'arduinoms')
+        and labels[-1] in ('fluence', 'fluence_cm2', 'fluence_per_cm2')
+    )
+
+
 def map_irrad_columns(headers, row):
     """
     Map Keithley .txt columns to the standard measurement schema.
@@ -287,24 +322,21 @@ def map_irrad_columns(headers, row):
         'fluence': None,
     }
 
+    if _is_fluence_monitor_header(headers) and len(row) == 5:
+        # Some HIRFL/RADEF logs drop Vgs/Igs after the header and continue as:
+        # time, Vds, Ids, arduino_ms, fluence.
+        compact_headers = [
+            headers[0], headers[1], headers[2], headers[-2], headers[-1]
+        ]
+        for i, h in enumerate(compact_headers):
+            _assign_mapped_value(result, h, row[i])
+        return result
+
     for i, h in enumerate(headers):
         if i >= len(row):
             break
         val = row[i]
-        hl = h.lower().strip()
-
-        if hl in ('vg', 'vgs'):
-            result['v_gate'] = val
-        elif hl in ('ig', 'igs'):
-            result['i_gate'] = val
-        elif hl in ('vd', 'vds'):
-            result['v_drain'] = val
-        elif hl in ('id', 'ids'):
-            result['i_drain'] = val
-        elif hl in ('time', 'time_val', 't'):
-            result['time_val'] = val
-        elif hl in ('fluence', 'fluence_cm2', 'fluence_per_cm2'):
-            result['fluence'] = val
+        _assign_mapped_value(result, h, val)
 
     return result
 
@@ -593,6 +625,140 @@ def ingest_campaign(cur, conn, campaign, device_library, rules, dry_run=False):
     return files_loaded, files_skipped, files_error, total_points
 
 
+def backfill_existing_fluence(cur, conn, campaign_folder=None, dry_run=False):
+    """
+    Repair existing irradiation waveform rows from the source files.
+
+    This updates only columns affected by the mixed 7-column/5-column monitor
+    format: v_gate, i_gate, fluence, and metadata fluence_at_meas.
+    """
+    where_campaign = ""
+    params = []
+    if campaign_folder:
+        where_campaign = "AND ic.folder_name = %s"
+        params.append(campaign_folder)
+
+    cur.execute(f"""
+        SELECT md.id, md.filename, md.csv_path, md.num_points,
+               ic.campaign_name, ic.folder_name
+        FROM baselines_metadata md
+        JOIN irradiation_campaigns ic ON md.irrad_campaign_id = ic.id
+        WHERE md.measurement_category = 'Irradiation'
+          AND md.columns ILIKE '%%fluence%%'
+          {where_campaign}
+        ORDER BY ic.campaign_name, md.id
+    """, params)
+    records = cur.fetchall()
+
+    files_seen = len(records)
+    files_updated = 0
+    files_error = 0
+    rows_updated = 0
+    rows_with_fluence = 0
+    shortened_rows = 0
+
+    for idx, (meta_id, filename, csv_path, num_points,
+              campaign_name, _folder_name) in enumerate(records, start=1):
+        if not csv_path or not os.path.isfile(csv_path):
+            print(f"  ERROR: source file missing for metadata {meta_id}: "
+                  f"{csv_path}")
+            files_error += 1
+            continue
+
+        headers, data_rows, _header_meta = parse_keithley_txt(csv_path)
+        if not headers or not data_rows:
+            print(f"  ERROR: unable to parse metadata {meta_id}: {filename}")
+            files_error += 1
+            continue
+
+        cur.execute(
+            "SELECT COUNT(*) FROM baselines_measurements WHERE metadata_id = %s",
+            (meta_id,),
+        )
+        db_points = cur.fetchone()[0]
+        if db_points != len(data_rows):
+            print(f"  ERROR: point-count mismatch for metadata {meta_id} "
+                  f"({filename}): DB={db_points}, file={len(data_rows)}")
+            files_error += 1
+            continue
+
+        is_fluence_monitor = _is_fluence_monitor_header(headers)
+        file_shortened_rows = 0
+        file_rows_with_fluence = 0
+        max_fluence = None
+        updates = []
+
+        for point_idx, row in enumerate(data_rows):
+            if is_fluence_monitor and len(row) == 5:
+                file_shortened_rows += 1
+            mapped = map_irrad_columns(headers, row)
+            f = mapped['fluence']
+            if isinstance(f, (int, float)):
+                file_rows_with_fluence += 1
+                if max_fluence is None or f > max_fluence:
+                    max_fluence = f
+            updates.append((
+                meta_id, point_idx,
+                mapped['v_gate'], mapped['i_gate'], f,
+            ))
+
+        if dry_run:
+            files_updated += 1
+            rows_updated += len(updates)
+            rows_with_fluence += file_rows_with_fluence
+            shortened_rows += file_shortened_rows
+            continue
+
+        try:
+            execute_values(cur, """
+                UPDATE baselines_measurements AS bm
+                SET v_gate = data.v_gate,
+                    i_gate = data.i_gate,
+                    fluence = data.fluence
+                FROM (VALUES %s) AS data(
+                    metadata_id, point_index, v_gate, i_gate, fluence
+                )
+                WHERE bm.metadata_id = data.metadata_id
+                  AND bm.point_index = data.point_index
+            """, updates, template=(
+                "(%s::integer, %s::integer, %s::double precision, "
+                "%s::double precision, %s::double precision)"
+            ), page_size=5000)
+            cur.execute(
+                "UPDATE baselines_metadata "
+                "SET fluence_at_meas = %s WHERE id = %s",
+                (max_fluence, meta_id),
+            )
+        except Exception as e:
+            print(f"  ERROR: update failed for metadata {meta_id} "
+                  f"({filename}): {e}")
+            conn.rollback()
+            files_error += 1
+            continue
+
+        files_updated += 1
+        rows_updated += len(updates)
+        rows_with_fluence += file_rows_with_fluence
+        shortened_rows += file_shortened_rows
+
+        if files_updated % 25 == 0:
+            conn.commit()
+            print(f"  [{idx}/{files_seen}] repaired {files_updated} files "
+                  f"({campaign_name})")
+
+    if not dry_run:
+        conn.commit()
+
+    return {
+        'files_seen': files_seen,
+        'files_updated': files_updated,
+        'files_error': files_error,
+        'rows_updated': rows_updated,
+        'rows_with_fluence': rows_with_fluence,
+        'shortened_rows': shortened_rows,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Ingest irradiation measurement data from "
@@ -604,6 +770,9 @@ def main():
                         help="Delete all irradiation records and re-ingest")
     parser.add_argument("--campaign", type=str, default=None,
                         help="Only ingest a specific campaign folder name")
+    parser.add_argument("--backfill-fluence", action="store_true",
+                        help="Repair existing irradiation monitor fluence and "
+                             "mixed 7/5-column Vgs/Igs rows from source files")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -629,6 +798,36 @@ def main():
     if not args.dry_run:
         ensure_data_source_column(cur)
         conn.commit()
+
+    if args.backfill_fluence:
+        print("\nBackfilling existing irradiation fluence/waveform rows...")
+        if args.campaign:
+            print(f"Campaign folder filter: {args.campaign}")
+        t0 = perf_counter()
+        result = backfill_existing_fluence(
+            cur, conn, campaign_folder=args.campaign, dry_run=args.dry_run
+        )
+        elapsed = perf_counter() - t0
+
+        print(f"\n{'=' * 70}")
+        print("FLUENCE BACKFILL COMPLETE")
+        print(f"{'=' * 70}")
+        print(f"  Files scanned:        {result['files_seen']}")
+        print(f"  Files repaired:       {result['files_updated']}")
+        print(f"  Files errored:        {result['files_error']}")
+        print(f"  Rows updated:         {result['rows_updated']}")
+        print(f"  Rows with fluence:    {result['rows_with_fluence']}")
+        print(f"  Short 5-col rows:     {result['shortened_rows']}")
+        print(f"  Elapsed:              {elapsed:.1f}s")
+        cur.close()
+        conn.close()
+        print("=" * 70)
+        if args.dry_run:
+            print("DRY RUN complete — no changes were made.")
+        else:
+            print("Done!")
+        print("=" * 70)
+        return
 
     # Optionally rebuild
     if args.rebuild and not args.dry_run:

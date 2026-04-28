@@ -32,6 +32,7 @@ WTForms==3.0.1
 luaparser
 numpy
 h5py
+scipy
 openpyxl
 pandas
 psycopg2-binary

@@ -101,7 +101,7 @@ def build_dashboard_layout(tab_defs):
 
 def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
     mfr_fid  = "NATIVE_FILTER-avl-manufacturer"
-    dev_fid  = "NATIVE_FILTER-avl-device-type"
+    dev_fid  = "NATIVE_FILTER-avl-device"
     fam_fid  = "NATIVE_FILTER-avl-family"
     mode_fid = "NATIVE_FILTER-avl-mode"
     out_fid  = "NATIVE_FILTER-avl-outcome"
@@ -138,11 +138,11 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
         }
 
     return [
-        make_filter(mfr_fid,  "Manufacturer",     "manufacturer",
+        make_filter(mfr_fid,  "Manufacturer",     "manufacturer_label",
                     description="Filter by device manufacturer"),
-        make_filter(dev_fid,  "Device Type",       "device_type",
+        make_filter(dev_fid,  "Device",            "device_label",
                     cascade_from=mfr_fid,
-                    description="Filter by commercial part number"),
+                    description="Filter by part number or capture device ID"),
         make_filter(fam_fid,  "Avalanche Family",  "avalanche_family",
                     description="Top-level capture folder group"),
         make_filter(mode_fid, "Mode",              "avalanche_mode",
@@ -166,11 +166,17 @@ def waveform_params(y_col, y_label, y_title):
             "label": y_label,
         }],
         "groupby": [
-            "device_type", "device_id", "metadata_id",
+            "device_label", "device_id", "metadata_id",
             "avalanche_condition_label", "avalanche_outcome",
         ],
-        "adhoc_filters": [],
-        "row_limit": 100000,
+        "adhoc_filters": [
+            {
+                "expressionType": "SQL",
+                "sqlExpression": f"{y_col} IS NOT NULL",
+                "clause": "WHERE",
+            },
+        ],
+        "row_limit": 500000,
         "truncate_metric": True,
         "show_legend": True,
         "legendType": "scroll",
@@ -186,7 +192,7 @@ def waveform_params(y_col, y_label, y_title):
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
-        "series_limit": 20,
+        "series_limit": 100,
     }
 
 
@@ -201,8 +207,14 @@ def energy_scaling_params(x_col, x_title, y_col, y_label, y_title):
             "sqlExpression": f"AVG({y_col})",
             "label": y_label,
         }],
-        "groupby": ["device_type", "avalanche_outcome"],
-        "adhoc_filters": [],
+        "groupby": ["device_label", "avalanche_outcome"],
+        "adhoc_filters": [
+            {
+                "expressionType": "SQL",
+                "sqlExpression": f"{x_col} IS NOT NULL AND {y_col} IS NOT NULL",
+                "clause": "WHERE",
+            },
+        ],
         "row_limit": 50000,
         "truncate_metric": True,
         "show_legend": True,
@@ -219,7 +231,7 @@ def energy_scaling_params(x_col, x_title, y_col, y_label, y_title):
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": True,
-        "series_limit": 30,
+        "series_limit": 100,
     }
 
 
@@ -270,7 +282,7 @@ def main():
                 {
                     "query_mode": "aggregate",
                     "groupby": ["avalanche_family", "avalanche_mode",
-                                "device_type", "manufacturer",
+                                "device_label", "manufacturer_label",
                                 "avalanche_outcome"],
                     "metrics": [
                         {"expressionType": "SQL",
@@ -320,13 +332,13 @@ def main():
                 6, 50,
             ),
 
-            # 2 – Outcome Distribution per Device Type
+            # 2 – Outcome Distribution per Device
             (
-                "Avl – Outcome per Device Type",
+                "Avl – Outcome per Device",
                 summary_ds,
                 "echarts_timeseries_bar",
                 {
-                    "x_axis": "device_type",
+                    "x_axis": "device_label",
                     "time_grain_sqla": None,
                     "x_axis_sort_asc": True,
                     "metrics": [{"expressionType": "SQL",
@@ -388,6 +400,7 @@ def main():
                     "query_mode": "aggregate",
                     "groupby": [
                         "device_id", "device_type", "manufacturer",
+                        "device_label", "manufacturer_label",
                         "avalanche_family", "avalanche_mode",
                         "avalanche_energy_j", "avalanche_peak_current_a",
                         "avalanche_inductance_mh", "avalanche_gate_bias_v",
@@ -422,7 +435,7 @@ def main():
             (
                 "Avl – Peak Id vs Energy",
                 summary_ds,
-                "echarts_timeseries_line",
+                "echarts_timeseries_scatter",
                 energy_scaling_params(
                     x_col="avalanche_energy_j",
                     x_title="Energy (J)",
@@ -437,7 +450,7 @@ def main():
             (
                 "Avl – Max Vds vs Inductance",
                 summary_ds,
-                "echarts_timeseries_line",
+                "echarts_timeseries_scatter",
                 energy_scaling_params(
                     x_col="avalanche_inductance_mh",
                     x_title="Inductance (mH)",
@@ -508,7 +521,7 @@ def main():
         print(f"  Tabs: {tab_summary}")
         print("  Filters:")
         print("    1. Manufacturer        (optional)")
-        print("    2. Device Type         (cascades from Manufacturer)")
+        print("    2. Device              (part number or capture ID)")
         print("    3. Avalanche Family    (UIS_2018_botnk, Selam, …)")
         print("    4. Mode                (UIS / UID / RT / Avalanche)")
         print("    5. Outcome             (survived / failed / unknown)")
