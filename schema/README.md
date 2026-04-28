@@ -1,8 +1,8 @@
 # Schema migrations
 
-Idempotent SQL for tables that are the source of truth for human-input
+Idempotent SQL for core application tables and source-of-truth human-input
 parameters (datasheets, papers, logbooks).  Each file in this directory
-owns one logical table and is applied unconditionally on every
+owns one logical table (or closely related table group) and is applied unconditionally on every
 `server.py` startup and every ingestion run.
 
 ## Convention

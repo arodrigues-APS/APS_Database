@@ -59,7 +59,8 @@ except ImportError:
     import h5py
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, NAS_ROOT
-from common import compute_file_hash, load_device_library
+from common import (compute_file_hash, load_device_library,
+                    load_device_mapping_rules, match_device)
 
 
 AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
@@ -434,15 +435,6 @@ def parse_family_mode_experiment(file_path):
     return family, mode, experiment
 
 
-def map_device_type(paths, device_library):
-    joined = " ".join(paths).upper()
-    for entry in device_library:
-        pn = (entry.get("part_number") or "").upper()
-        if pn and pn in joined:
-            return entry.get("part_number"), entry.get("manufacturer")
-    return None, None
-
-
 # ── File collection ───────────────────────────────────────────────────────────
 
 def collect_h5_groups(root_dir, limit_groups=0):
@@ -709,7 +701,9 @@ def main():
         print(f"Campaign overrides loaded: {len(campaign_lookup)}")
 
         device_library = load_device_library(cur)
+        rules = load_device_mapping_rules(cur, 'avalanche')
         print(f"Device library entries:   {len(device_library)}")
+        print(f"Mapping rules loaded:     {len(rules)}")
 
         loaded = skipped = errors = invalid_files = 0
         total_points = 0
@@ -718,14 +712,36 @@ def main():
             paths = sorted(g["paths"])
             base_stem = g["base_stem"]
 
+            joined_paths = " ".join(paths)
+            device_type, manufacturer = match_device(
+                joined_paths, 'avalanche', rules, device_library
+            )
+
             # Fast-path duplicate check by csv_path (avoids MD5 on large files)
             csv_path = ";".join(paths)
             if not args.dry_run:
                 cur.execute(
-                    "SELECT id FROM baselines_metadata WHERE csv_path = %s AND data_source = 'avalanche'",
+                    """
+                    SELECT id, device_type, manufacturer
+                    FROM baselines_metadata
+                    WHERE csv_path = %s AND data_source = 'avalanche'
+                    """,
                     (csv_path,),
                 )
-                if cur.fetchone():
+                existing = cur.fetchone()
+                if existing:
+                    existing_id, old_device_type, old_manufacturer = existing
+                    if (old_device_type != device_type) or (old_manufacturer != manufacturer):
+                        cur.execute(
+                            """
+                            UPDATE baselines_metadata
+                            SET device_type = %s,
+                                manufacturer = %s
+                            WHERE id = %s
+                            """,
+                            (device_type, manufacturer, existing_id),
+                        )
+                        conn.commit()
                     skipped += 1
                     continue
 
@@ -738,8 +754,24 @@ def main():
                 continue
 
             if not args.dry_run:
-                cur.execute("SELECT id FROM baselines_metadata WHERE file_hash = %s", (file_hash,))
-                if cur.fetchone():
+                cur.execute(
+                    "SELECT id, device_type, manufacturer FROM baselines_metadata WHERE file_hash = %s",
+                    (file_hash,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    existing_id, old_device_type, old_manufacturer = existing
+                    if (old_device_type != device_type) or (old_manufacturer != manufacturer):
+                        cur.execute(
+                            """
+                            UPDATE baselines_metadata
+                            SET device_type = %s,
+                                manufacturer = %s
+                            WHERE id = %s
+                            """,
+                            (device_type, manufacturer, existing_id),
+                        )
+                        conn.commit()
                     skipped += 1
                     continue
 
@@ -776,7 +808,6 @@ def main():
                 else campaign_meta.get("temperature_c")
             )
 
-            device_type, manufacturer = map_device_type(paths, device_library)
             if device_type is None and campaign_meta.get("device_part_number"):
                 device_type = campaign_meta["device_part_number"]
 

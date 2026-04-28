@@ -435,10 +435,26 @@ def ingest_campaign(cur, conn, campaign, device_library, rules, dry_run=False):
         # File hash for dedup
         file_hash = compute_file_hash(fpath)
 
-        # Check if already loaded
-        cur.execute("SELECT id FROM baselines_metadata WHERE file_hash = %s",
-                    (file_hash,))
-        if cur.fetchone():
+        # Check if already loaded; if present, still refresh device mapping so
+        # Flask edits to device_mapping_rules propagate without full rebuild.
+        cur.execute(
+            "SELECT id, device_type, manufacturer FROM baselines_metadata WHERE file_hash = %s",
+            (file_hash,),
+        )
+        existing = cur.fetchone()
+        if existing:
+            existing_id, old_device_type, old_manufacturer = existing
+            if (old_device_type != device_type) or (old_manufacturer != manufacturer):
+                cur.execute(
+                    """
+                    UPDATE baselines_metadata
+                    SET device_type = %s,
+                        manufacturer = %s
+                    WHERE id = %s
+                    """,
+                    (device_type, manufacturer, existing_id),
+                )
+                conn.commit()
             files_skipped += 1
             continue
 

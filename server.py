@@ -89,14 +89,15 @@ def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
 	return get_connection()
 
-# Apply idempotent schema migrations (schema/*.sql).  Failure here is
-# non-fatal so the webserver can still boot when the DB is down.
+# Apply idempotent schema migrations (schema/*.sql).
+# This must succeed at boot so admin pages cannot come up against a partial
+# schema (which leads to confusing runtime errors).
 try:
 	_boot_conn = get_connection()
 	apply_schema(_boot_conn)
 	_boot_conn.close()
 except Exception as _e:
-	print(f"[warn] apply_schema skipped at boot: {_e}")
+	raise RuntimeError(f"Database schema bootstrap failed: {_e}") from _e
 
 # Allowed values for drop-down fields
 DEVICE_CATEGORIES = ["MOSFET", "Diode", "IGBT", "Other"]
@@ -654,9 +655,22 @@ def assign_run_to_measurements():
 	try:
 		conn = get_db()
 		cur = conn.cursor()
+		rid = int(run_id)
+		cid = int(campaign_id)
+		cur.execute("SELECT campaign_id FROM irradiation_runs WHERE id = %s",
+		            (rid,))
+		run_row = cur.fetchone()
+		if not run_row:
+			flash("Selected irradiation run does not exist.", "danger")
+			cur.close(); conn.close()
+			return redirect("/irradiation")
+		if run_row[0] != cid:
+			flash("Selected run does not belong to the selected campaign.", "danger")
+			cur.close(); conn.close()
+			return redirect("/irradiation")
 		# Build WHERE clause for filtering measurements
 		conditions = ["md.irrad_campaign_id = %s"]
-		params = [int(campaign_id)]
+		params = [cid]
 		if device_filter:
 			conditions.append("md.device_id ILIKE %s")
 			params.append(f"%{device_filter}%")
@@ -664,7 +678,6 @@ def assign_run_to_measurements():
 			conditions.append("md.filename ILIKE %s")
 			params.append(f"%{filename_pattern}%")
 		where = " AND ".join(conditions)
-		rid = int(run_id)
 		sql = f"""
 			UPDATE baselines_metadata md
 			SET irrad_run_id = %s

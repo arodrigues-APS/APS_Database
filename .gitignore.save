@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+._*
+.cscs-keygen.sh
+
+
+# Lab data files
+*.csv
+*.xls
+*.xlsx
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+py3/
+
+# Secrets / environment files
+.env
+
+# Superset Docker runtime (not your config)
+superset/docker/
+
+#too big
+out/fingerprints/
+schema/
+

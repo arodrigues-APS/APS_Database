@@ -35,14 +35,14 @@ from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 
 CAMPAIGNS = [
     ("GSI_March_2025",  "GSIMarch2025Au",
-     "GSI Darmstadt",   "broad_beam",
-     "Heavy-ion broad beam + microbeam, March 2025 at GSI"),
+     "GSI Darmstadt",   "micro_beam",
+     "Heavy-ion microbeam, March 2025 at GSI; local folder is Au 1162 MeV"),
     ("Padova_Proton",   None,
      "LNL Padova",      "broad_beam",
-     "Proton irradiation, Wolfspeed 2nd generation, Jan 2024"),
+     "1 MeV and 3 MeV proton irradiation at INFN-LNL Legnaro"),
     ("GSI_Ca_2022",     "2022_01_06_GSI_Ca",
-     "GSI Darmstadt",   "broad_beam",
-     "Calcium ions, January 2022 campaign at GSI"),
+     "GSI Darmstadt",   "micro_beam",
+     "Calcium UNILAC microbeam, January 2022 campaign at GSI"),
     ("D2019_Proton",    None,
      None,              None,
      "Proton irradiation test campaign, 2019"),
@@ -62,60 +62,86 @@ CAMPAIGNS = [
 
 
 # ── Known Runs (per-ion/energy within a campaign) ────────────────────────────
-# Source: Table I from both papers
+# Source: local PDFs under ~/APS_Database/relevant papers/0_Literature
 # (campaign_name, ion_species, beam_energy_mev, let_surface, let_bragg_peak,
 #  range_um, beam_type_override, notes)
 # let values in MeV·cm²/mg, range in µm
 # beam_type_override: if set, overrides campaign-level beam_type for this run
 
 RUNS = [
-    # ── UCL broad-beam (Paper 1, Table I — HIF facility, UCL Belgium) ───
-    ("UCL_Ions_2023", "N",  16.5,   1.5,   4.53,  None, None, None),
-    ("UCL_Ions_2023", "Ne", 10.65, 20.4,   6.6,   None, None, None),
-    ("UCL_Ions_2023", "Fe", None,   9.3,   None,  None, None, None),
-    ("UCL_Ions_2023", "Kr",  9.53, 32.4,  62.5,   None, None, None),
-    ("UCL_Ions_2023", "Xe", 14.53, 41.0,  65.6,   None, None, None),
-    # Ni confirmed in logbook (Trench_B4 sheet); LET/energy TBD
-    ("UCL_Ions_2023", "Ni", None,  None,  None,   None, None,
-     "Confirmed in LOGBOOK_09_03_2023.xlsx Trench_B4; LET/energy to be confirmed"),
+    # ── UCL / RADEF broad-beam (Martinella et al. 2024, Table I) ────────
+    # Paper reports MeV/amu; beam_energy_mev stores total kinetic energy.
+    ("UCL_Ions_2023", "Fe", 940.5, 14.53, None, 138.7, None,
+     "57Fe20+, 16.5 MeV/amu. Source: Martinella et al. 2024 Table I."),
+    ("UCL_Ions_2023", "Ni", 581.74, 20.4, None, 66.9, None,
+     "58Ni18+, 10.03 MeV/amu. UCL broad-beam frame ~2 x 2 cm2. Source: Martinella et al. 2024 Table I; Ba thesis."),
+    ("UCL_Ions_2023", "Kr", 764.4, 32.4, None, 60.9, None,
+     "84Kr25+, 9.1 MeV/amu. UCL broad-beam frame ~2 x 2 cm2. Source: Martinella et al. 2024 Table I; Ba thesis."),
+    ("UCL_Ions_2023", "Xe", 992.0, 62.5, None, 65.6, None,
+     "124Xe35+, 8.0 MeV/amu. UCL broad-beam frame ~2 x 2 cm2; thesis reports Xe fluxes of 1e3 and 1e4 cm-2s-1 at 350 V. Source: Martinella et al. 2024 Table I; Ba thesis."),
+    ("RADEF_2023", "Fe", 940.5, 14.53, None, 138.7, None,
+     "57Fe20+, 16.5 MeV/amu. Source: Martinella et al. 2024 Table I."),
+    ("RADEF_2023", "Ni", 581.74, 20.4, None, 66.9, None,
+     "58Ni18+, 10.03 MeV/amu. Source: Martinella et al. 2024 Table I."),
+    ("RADEF_2023", "Kr", 764.4, 32.4, None, 60.9, None,
+     "84Kr25+, 9.1 MeV/amu. Source: Martinella et al. 2024 Table I."),
+    ("RADEF_2023", "Xe", 992.0, 62.5, None, 65.6, None,
+     "124Xe35+, 8.0 MeV/amu. Source: Martinella et al. 2024 Table I."),
 
-    # ── RADEF broad-beam (Paper 1, Table I — "RADEF" facility) ──────────
-    ("RADEF_2023", "N",  16.5,   1.5,   4.53,  None, None, None),
-    ("RADEF_2023", "Ne", 10.65, 20.4,   6.6,   None, None, None),
-    ("RADEF_2023", "Fe", None,   9.3,   None,  None, None, None),
-    ("RADEF_2023", "Kr",  9.53, 32.4,  62.5,   None, None, None),
-    ("RADEF_2023", "Xe", 14.53, 41.0,  65.6,   None, None, None),
+    # ── ANSTO / GSI microbeam (Martinella et al. 2025, Table I) ─────────
+    ("ANSTO_Microbeam_2024", "C",   6.0,  5.56,  None,  3.79, None,
+     "Short-range C. Source: Martinella et al. 2025 Table I."),
+    ("ANSTO_Microbeam_2024", "C",  12.0,  4.85,  None,  7.38, None,
+     "Short-range C. Source: Martinella et al. 2025 Table I."),
+    ("ANSTO_Microbeam_2024", "C",  36.0,  3.124, None, 26.9,  None,
+     "Long-range C. Source: Martinella et al. 2025 Table I."),
+    ("ANSTO_Microbeam_2024", "Cl", 36.0, 19.23, None,  7.29, None,
+     "Short-range Cl. Source: Martinella et al. 2025 Table I."),
+    ("ANSTO_Microbeam_2024", "Ni", 62.0, 32.34, None,  9.65, None,
+     "Short-range Ni. Source: Martinella et al. 2025 Table I."),
 
-    # ── ANSTO microbeam (Martinella et al. 2025, Table I — SIRIUS, ANSTO) ─
-    ("ANSTO_Microbeam_2024", "C",  12.0,  4.83, None,  7.36, None, None),
-    ("ANSTO_Microbeam_2024", "C",   6.0,  8.12, None,  3.29, None,
-     "Short-range particle, does not cross full epitaxial layer"),
-    # C at 36 MeV confirmed in logbook (29_01_2024_commercial sheet)
-    ("ANSTO_Microbeam_2024", "C",  36.0,  None, None,  None, None,
-     "Confirmed in LOGBOOK_ANSTO_23_01_2024.xlsx; LET/range TBD from facility"),
-    ("ANSTO_Microbeam_2024", "Cl", 36.0, 13.5,  None, 23.9,  None, None),
-    ("ANSTO_Microbeam_2024", "Ni", 62.0, 27.4,  None, 22.9,  None, None),
+    # ── GSI March 2025 / GSI microbeam ─────────────────────────────────
+    ("GSI_March_2025", "Au", 1162.0, 97.1, None, 45.35, "micro_beam",
+     "Au25+, 5.9 MeV/amu. GSI microbeam; thesis reports ~500 nm focus, ~55 x 50 um2 planar scan frame, and ~1600 ions/run. Sources: GSI March 2025 page; Martinella et al. 2025 Table I; Ba thesis."),
+    ("GSI_March_2025", "Ar",  344.0, 11.07, None, 72.4, "micro_beam",
+     "Source: Martinella et al. 2025 Table I; verify local folder before assigning."),
 
-    # ── GSI March 2025 (Martinella et al. 2025, Table III) ─────────────
-    # Confirmed by logbook (Au 1162 MeV, 18-21 March 2025) and paper.
-    # Xe (12.1 MeV, UNILAC micro-probe) was seeded in error — removed.
-    ("GSI_March_2025", "Au", 1162.0, 67.1,  None, 45.55, None, None),
-    ("GSI_March_2025", "Ar",  344.0, 11.07, None, 62.4,  None, None),
-
-    # ── GSI Ca 2022 (Für et al. 2023, Table I — UNILAC microbeam) ───────
-    # Ca-40 at 8.6 MeV/amu = 344 MeV total; LET_surface=13.5; range=60 µm
-    ("GSI_Ca_2022", "Ca", 344.0, 13.5, None, 60.0, "micro_beam",
-     "UNILAC microbeam at GSI. 8.6 MeV/amu. Source: Für et al. 2023 Table I."),
+    # ── GSI Ca 2022 (Martinella et al. 2024, Table II) ─────────────────
+    # Ca-40 at 8.6 MeV/amu = 344 MeV total.
+    ("GSI_Ca_2022", "Ca", 344.0, 13.5, None, 60.4, "micro_beam",
+     "UNILAC microbeam at GSI. 8.6 MeV/amu; thesis reports ~500 nm focus, ~15 x 10 um2 trench scan frame, and ~1600 ions/run. Source: Martinella et al. 2024 Table II; Ba thesis."),
 
     # ── Proton campaigns ────────────────────────────────────────────────
-    # Padova: 3 MeV protons at CN accelerator, INFN-LNL Legnaro
-    # Confirmed: Martinella et al. 2025 (DD/TID paper) and Bonaldo et al. 2024 (ultrahigh doses)
-    ("Padova_Proton",   "proton", 3.0,  None, None, None, None,
-     "CN accelerator, INFN-LNL Legnaro. 3 MeV protons."),
+    # Padova: 1 and 3 MeV protons at CN accelerator, INFN-LNL Legnaro.
+    ("Padova_Proton",   "proton", 1.0,  None, None, 7.0, None,
+     "1 MeV protons at INFN-LNL CN accelerator. MOSFET range ~7 um after top metallization; wafer/DLTS pieces ~10.8 um. Flux 7.9e9 cm-2s-1; max MOSFET fluence 6e12 cm-2 (~20.9 Mrad); dose factor 3.49e-6 rad per cm-2. Source: NSREC2025_TNS_FINAL."),
+    ("Padova_Proton",   "proton", 3.0,  None, None, 57.0, None,
+     "3 MeV protons at INFN-LNL CN accelerator. MOSFET range ~57 um after top metallization; wafer/DLTS pieces ~62 um. Reported fluxes include 7.9e9, ~2e10, and 3.46e10 cm-2s-1 depending device/campaign; max fluence 6.72e13 cm-2 (planar/NSREC) or 2.7e13 cm-2 (trench); dose factor ~1.47e-6 to 1.49e-6 rad per cm-2."),
     ("D2019_Proton",    "proton", None, None, None, None, None, None),
-    # PSI: proton energy not confirmed from available papers
-    ("PSI_Proton_2022", "proton", None, None, None, None, None,
-     "PSI Villigen. Proton energy TBD — not in available papers."),
+    ("PSI_Proton_2022", "proton", 200.0, None, None, None, None,
+     "200 MeV protons at PSI/PIF; 5 cm diameter flatness area, normal incidence, target fluence 1e11 cm-2. Source: Martinella et al. 2023, DOI 10.1109/TNS.2023.3267144."),
+]
+
+
+# Historical bad rows seeded before the paper tables were rechecked.
+# Move referenced metadata onto the corrected canonical row before deleting
+# stale rows, so existing assignments survive the cleanup.
+LEGACY_RUN_ALIASES = [
+    ("UCL_Ions_2023", "Fe", None, "Fe", 940.5),
+    ("UCL_Ions_2023", "Ni", None, "Ni", 581.74),
+    ("UCL_Ions_2023", "Kr", 9.53, "Kr", 764.4),
+    ("UCL_Ions_2023", "Xe", 14.53, "Xe", 992.0),
+    ("RADEF_2023", "Fe", None, "Fe", 940.5),
+    ("RADEF_2023", "Kr", 9.53, "Kr", 764.4),
+    ("RADEF_2023", "Xe", 14.53, "Xe", 992.0),
+    ("PSI_Proton_2022", "proton", None, "proton", 200.0),
+]
+
+STALE_RUNS = [
+    ("UCL_Ions_2023", "N", 16.5),
+    ("UCL_Ions_2023", "Ne", 10.65),
+    ("RADEF_2023", "N", 16.5),
+    ("RADEF_2023", "Ne", 10.65),
 ]
 
 
@@ -210,6 +236,32 @@ END $$;
 
 DO $$ BEGIN
     ALTER TABLE baselines_metadata ADD COLUMN irrad_role TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE baselines_metadata ADD COLUMN fluence_at_meas DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'baselines_metadata'
+          AND column_name = 'fluence'
+    ) THEN
+        EXECUTE 'UPDATE baselines_metadata
+                 SET fluence_at_meas = fluence
+                 WHERE fluence_at_meas IS NULL
+                   AND fluence IS NOT NULL';
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE baselines_measurements ADD COLUMN fluence DOUBLE PRECISION;
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
@@ -424,6 +476,171 @@ WHERE md.experiment = ecm.experiment
 """
 
 
+DEDUP_RUNS_SQL = """
+WITH ranked AS (
+    SELECT
+        id,
+        MIN(id) OVER (
+            PARTITION BY campaign_id, lower(btrim(ion_species)), beam_energy_mev
+        ) AS keep_id
+    FROM irradiation_runs
+)
+UPDATE baselines_metadata md
+SET irrad_run_id = ranked.keep_id
+FROM ranked
+WHERE md.irrad_run_id = ranked.id
+  AND ranked.id <> ranked.keep_id;
+
+WITH ranked AS (
+    SELECT
+        id,
+        MIN(id) OVER (
+            PARTITION BY campaign_id, lower(btrim(ion_species)), beam_energy_mev
+        ) AS keep_id
+    FROM irradiation_runs
+)
+DELETE FROM irradiation_runs ir
+USING ranked
+WHERE ir.id = ranked.id
+  AND ranked.id <> ranked.keep_id;
+
+DO $$ BEGIN
+    ALTER TABLE irradiation_runs
+        ADD CONSTRAINT irradiation_run_ion_not_blank
+        CHECK (btrim(ion_species) <> '');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_irradiation_runs_energy_norm
+    ON irradiation_runs (campaign_id, lower(btrim(ion_species)), beam_energy_mev)
+    WHERE beam_energy_mev IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_irradiation_runs_null_energy_norm
+    ON irradiation_runs (campaign_id, lower(btrim(ion_species)))
+    WHERE beam_energy_mev IS NULL;
+"""
+
+
+def _campaign_id(cur, campaign_name):
+    cur.execute(
+        "SELECT id FROM irradiation_campaigns WHERE campaign_name = %s",
+        (campaign_name,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _find_run(cur, campaign_id, ion_species, beam_energy_mev):
+    cur.execute("""
+        SELECT id
+        FROM irradiation_runs
+        WHERE campaign_id = %s
+          AND lower(btrim(ion_species)) = lower(btrim(%s))
+          AND beam_energy_mev IS NOT DISTINCT FROM %s
+        ORDER BY id
+        LIMIT 1
+    """, (campaign_id, ion_species, beam_energy_mev))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _update_run(cur, run_id, ion_species, beam_energy_mev, let_surface,
+                let_bragg_peak, range_um, beam_type, notes):
+    cur.execute("""
+        UPDATE irradiation_runs
+        SET ion_species     = %s,
+            beam_energy_mev = %s,
+            let_surface     = %s,
+            let_bragg_peak  = %s,
+            range_um        = %s,
+            beam_type       = %s,
+            notes           = %s
+        WHERE id = %s
+    """, (ion_species, beam_energy_mev, let_surface, let_bragg_peak,
+          range_um, beam_type, notes, run_id))
+
+
+def _upsert_run(cur, campaign_id, ion_species, beam_energy_mev, let_surface,
+                let_bragg_peak, range_um, beam_type, notes):
+    run_id = _find_run(cur, campaign_id, ion_species, beam_energy_mev)
+    if run_id:
+        _update_run(cur, run_id, ion_species, beam_energy_mev, let_surface,
+                    let_bragg_peak, range_um, beam_type, notes)
+        return False
+
+    cur.execute("""
+        INSERT INTO irradiation_runs
+            (campaign_id, ion_species, beam_energy_mev,
+             let_surface, let_bragg_peak, range_um,
+             beam_type, notes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (campaign_id, ion_species, beam_energy_mev, let_surface,
+          let_bragg_peak, range_um, beam_type, notes))
+    return True
+
+
+def _move_legacy_run(cur, campaign_id, old_ion, old_energy,
+                     new_ion, new_energy):
+    old_id = _find_run(cur, campaign_id, old_ion, old_energy)
+    if not old_id:
+        return False
+
+    new_id = _find_run(cur, campaign_id, new_ion, new_energy)
+    if new_id and new_id != old_id:
+        cur.execute("""
+            UPDATE baselines_metadata
+            SET irrad_run_id = %s
+            WHERE irrad_run_id = %s
+        """, (new_id, old_id))
+        cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (old_id,))
+        return True
+
+    cur.execute("""
+        UPDATE irradiation_runs
+        SET ion_species = %s,
+            beam_energy_mev = %s
+        WHERE id = %s
+    """, (new_ion, new_energy, old_id))
+    return True
+
+
+def _delete_stale_run_if_unreferenced(cur, campaign_id, ion_species,
+                                      beam_energy_mev):
+    run_id = _find_run(cur, campaign_id, ion_species, beam_energy_mev)
+    if not run_id:
+        return False
+    cur.execute(
+        "SELECT COUNT(*) FROM baselines_metadata WHERE irrad_run_id = %s",
+        (run_id,),
+    )
+    n_refs = cur.fetchone()[0]
+    if n_refs:
+        print(
+            f"   WARNING: keeping stale run {ion_species} "
+            f"{beam_energy_mev} MeV because {n_refs} metadata rows use it"
+        )
+        return False
+    cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (run_id,))
+    return True
+
+
+def cleanup_legacy_runs(cur):
+    moved = 0
+    deleted = 0
+    for campaign_name, old_ion, old_energy, new_ion, new_energy in LEGACY_RUN_ALIASES:
+        campaign_id = _campaign_id(cur, campaign_name)
+        if campaign_id and _move_legacy_run(
+                cur, campaign_id, old_ion, old_energy, new_ion, new_energy):
+            moved += 1
+
+    for campaign_name, ion_species, beam_energy_mev in STALE_RUNS:
+        campaign_id = _campaign_id(cur, campaign_name)
+        if campaign_id and _delete_stale_run_if_unreferenced(
+                cur, campaign_id, ion_species, beam_energy_mev):
+            deleted += 1
+    return moved, deleted
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -442,6 +659,7 @@ def main():
     # 1. Create / migrate tables
     print("\n1. Creating tables and migrating schema...")
     cur.execute(CREATE_TABLES_SQL)
+    cur.execute(DEDUP_RUNS_SQL)
     conn.commit()
     print("   OK")
 
@@ -477,43 +695,26 @@ def main():
     conn.commit()
     print(f"   Inserted/updated: {inserted_c}, Skipped: {skipped_c}")
 
+    print("\n3. Cleaning legacy irradiation runs...")
+    moved, deleted = cleanup_legacy_runs(cur)
+    conn.commit()
+    print(f"   Corrected aliases: {moved}, Deleted stale rows: {deleted}")
+
     # 3. Seed irradiation runs
-    print("\n3. Seeding irradiation runs...")
+    print("\n4. Seeding irradiation runs...")
     inserted_r = 0
     skipped_r = 0
     for (campaign_name, ion_species, beam_energy_mev, let_surface,
          let_bragg_peak, range_um, beam_type_override, notes) in RUNS:
-        cur.execute(
-            "SELECT id FROM irradiation_campaigns WHERE campaign_name = %s",
-            (campaign_name,)
-        )
-        row = cur.fetchone()
-        if not row:
+        campaign_id = _campaign_id(cur, campaign_name)
+        if not campaign_id:
             print(f"   WARNING: campaign '{campaign_name}' not found, skipping")
             continue
-        campaign_id = row[0]
-        cur.execute("""
-            INSERT INTO irradiation_runs
-                (campaign_id, ion_species, beam_energy_mev,
-                 let_surface, let_bragg_peak, range_um,
-                 beam_type, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (campaign_id, ion_species, beam_energy_mev)
-            DO UPDATE SET let_surface    = COALESCE(EXCLUDED.let_surface,
-                                                    irradiation_runs.let_surface),
-                          let_bragg_peak = COALESCE(EXCLUDED.let_bragg_peak,
-                                                    irradiation_runs.let_bragg_peak),
-                          range_um       = COALESCE(EXCLUDED.range_um,
-                                                    irradiation_runs.range_um),
-                          beam_type      = COALESCE(EXCLUDED.beam_type,
-                                                    irradiation_runs.beam_type),
-                          notes          = COALESCE(EXCLUDED.notes,
-                                                    irradiation_runs.notes)
-        """, (campaign_id, ion_species, beam_energy_mev,
-              let_surface, let_bragg_peak, range_um,
-              beam_type_override, notes))
+        inserted = _upsert_run(cur, campaign_id, ion_species, beam_energy_mev,
+                               let_surface, let_bragg_peak, range_um,
+                               beam_type_override, notes)
         label = f"{ion_species} {beam_energy_mev or '?'} MeV"
-        if cur.statusmessage.endswith("1"):
+        if inserted:
             inserted_r += 1
             print(f"   + {campaign_name} / {label}")
         else:
@@ -523,7 +724,7 @@ def main():
     print(f"   Inserted/updated: {inserted_r}, Skipped: {skipped_r}")
 
     # 4. Seed experiment mappings
-    print("\n4. Seeding experiment -> campaign mappings...")
+    print("\n5. Seeding experiment -> campaign mappings...")
     inserted_m = 0
     skipped_m = 0
     for experiment, campaign_name, role in EXPERIMENT_MAPPINGS:
@@ -551,7 +752,7 @@ def main():
     print(f"   Inserted: {inserted_m}, Skipped: {skipped_m}")
 
     # 5. Backfill baselines_metadata
-    print("\n5. Backfilling baselines_metadata from experiment_campaign_map...")
+    print("\n6. Backfilling baselines_metadata from experiment_campaign_map...")
     cur.execute(BACKFILL_SQL)
     n_linked = cur.rowcount
     conn.commit()
@@ -591,7 +792,7 @@ def main():
             print(f"     {campaign_name}: {n_runs} runs ({ions})")
 
     # 7. Create views
-    print("\n6. Creating SQL views...")
+    print("\n7. Creating SQL views...")
     cur.execute(VIEWS_SQL)
     conn.commit()
     print("   Created: irradiation_view")

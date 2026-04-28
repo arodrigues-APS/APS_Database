@@ -953,17 +953,34 @@ def main():
             files_error += 1
             continue
 
-        # Check if already loaded
-        cur.execute("SELECT id FROM baselines_metadata WHERE file_hash = %s", (file_hash,))
-        if cur.fetchone():
-            files_skipped += 1
-            continue
-
         # Classify
         experiment = extract_experiment_name(fpath, root_dir)
         test_condition, sample_group = classify_test_condition(fpath, root_dir)
         sc_cond = parse_sc_condition(fpath)
         device_type, manufacturer = match_device(rel_path, 'sc', rules, device_library)
+
+        # Check if already loaded; if present, still refresh device mapping so
+        # Flask edits to device_mapping_rules propagate without full rebuild.
+        cur.execute(
+            "SELECT id, device_type, manufacturer FROM baselines_metadata WHERE file_hash = %s",
+            (file_hash,),
+        )
+        existing = cur.fetchone()
+        if existing:
+            existing_id, old_device_type, old_manufacturer = existing
+            if (old_device_type != device_type) or (old_manufacturer != manufacturer):
+                cur.execute(
+                    """
+                    UPDATE baselines_metadata
+                    SET device_type = %s,
+                        manufacturer = %s
+                    WHERE id = %s
+                    """,
+                    (device_type, manufacturer, existing_id),
+                )
+                conn.commit()
+            files_skipped += 1
+            continue
 
         # Detect SC waveform vs curve tracer CSV
         is_waveform = detect_sc_waveform(fpath)
