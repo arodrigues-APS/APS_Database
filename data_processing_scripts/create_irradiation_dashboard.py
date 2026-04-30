@@ -8,18 +8,22 @@ This dashboard visualises irradiation characterisation data:
   - Per-file individual runs with full metadata
   - Campaign overview summary tables and charts
 
-Datasets (SQL views created by seed_irradiation_campaigns.py):
+Datasets (SQL views created by seed_irradiation_campaigns.py and
+extract_single_event_effects.py):
   1. irradiation_view               – all IV curves linked to campaigns
   2. irradiation_degradation_summary – pre-aggregated per voltage bin
   3. irradiation_campaign_overview   – summary counts per campaign
+  4. irradiation_single_event_let_frequency_view
+                                     – SEB/SELCI/SELCII counts by LET
 
 Tabs:
   1. Campaign Overview       – summary tables and bar charts
   2. Pre/Post Comparison     – overlay pre_irrad vs post_irrad IV curves
-  3. Cross-Campaign          – compare degradation across ion species
-  4. Individual Runs         – per-file curves with full metadata
+  3. Waveform Viewer         – time-domain monitor traces
+  4. Cross-Campaign          – compare degradation across ion species
+  5. Individual Runs         – per-file curves with full metadata
 
-Filters (8 cascading):
+Filters (11 total; 8 cascading metadata filters + 3 waveform event filters):
   1. Ion Species             – proton / Au / Ca / etc.
   2. Beam Energy (MeV)       – cascades from Ion Species
   3. Beam Type               – broad_beam / micro_beam
@@ -28,6 +32,9 @@ Filters (8 cascading):
   6. Device Type             – cascades from Manufacturer
   7. Test Condition          – pre_irrad / post_irrad
   8. Measurement Category    – IdVg, IdVd, Blocking, etc.
+  9. SEB Detected            – Waveform Viewer only
+ 10. SELC-I Detected         – Waveform Viewer only
+ 11. SELC-II Detected        – Waveform Viewer only
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -112,8 +119,9 @@ def build_dashboard_layout(tab_defs):
 # ── Native Filters ───────────────────────────────────────────────────────────
 
 def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
-                         overview_ds_id=None, waveform_ds_id=None):
-    """Build 8 cascading native filters for the Irradiation dashboard."""
+                         overview_ds_id=None, waveform_ds_id=None,
+                         event_let_ds_id=None, waveform_chart_ids=None):
+    """Build native filters for the Irradiation dashboard."""
     ion_fid  = "NATIVE_FILTER-irrad-ion-species"
     nrg_fid  = "NATIVE_FILTER-irrad-beam-energy"
     bt_fid   = "NATIVE_FILTER-irrad-beam-type"
@@ -122,6 +130,9 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
     dev_fid  = "NATIVE_FILTER-irrad-device-type"
     tc_fid   = "NATIVE_FILTER-irrad-test-condition"
     cat_fid  = "NATIVE_FILTER-irrad-meas-category"
+    seb_fid  = "NATIVE_FILTER-irrad-seb-detected"
+    s1_fid   = "NATIVE_FILTER-irrad-selc-i-detected"
+    s2_fid   = "NATIVE_FILTER-irrad-selc-ii-detected"
 
     def multi_targets(col):
         targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
@@ -134,10 +145,20 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
         if waveform_ds_id:
             targets.append({"datasetId": waveform_ds_id,
                             "column": {"name": col}})
+        if event_let_ds_id and col in {
+            "ion_species",
+            "beam_energy_mev",
+            "beam_type",
+            "campaign_name",
+            "manufacturer",
+            "device_type",
+        }:
+            targets.append({"datasetId": event_let_ds_id,
+                            "column": {"name": col}})
         return targets
 
     def make_filter(fid, name, col, cascade_from=None, description="",
-                    targets=None):
+                    targets=None, chart_scope=None, tab_scope=None):
         return {
             "id": fid,
             "controlValues": {
@@ -156,8 +177,8 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
             "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
             "type": "NATIVE_FILTER",
             "description": description,
-            "chartsInScope": list(all_chart_ids),
-            "tabsInScope": [],
+            "chartsInScope": list(chart_scope or all_chart_ids),
+            "tabsInScope": list(tab_scope or []),
         }
 
     filters = [
@@ -205,6 +226,37 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                            if degrad_ds_id else [])
                     )),
     ]
+
+    if waveform_ds_id:
+        waveform_scope = waveform_chart_ids or all_chart_ids
+        waveform_tab = ["TAB-waveform"]
+        filters.extend([
+            make_filter(
+                seb_fid, "SEB Detected", "seb_detected",
+                description="Waveform files with at least one SEB detected",
+                targets=[{"datasetId": waveform_ds_id,
+                          "column": {"name": "seb_detected"}}],
+                chart_scope=waveform_scope,
+                tab_scope=waveform_tab,
+            ),
+            make_filter(
+                s1_fid, "SELC-I Detected", "selc_i_detected",
+                description="Waveform files with at least one SELC-I detected",
+                targets=[{"datasetId": waveform_ds_id,
+                          "column": {"name": "selc_i_detected"}}],
+                chart_scope=waveform_scope,
+                tab_scope=waveform_tab,
+            ),
+            make_filter(
+                s2_fid, "SELC-II Detected", "selc_ii_detected",
+                description="Waveform files with at least one SELC-II detected",
+                targets=[{"datasetId": waveform_ds_id,
+                          "column": {"name": "selc_ii_detected"}}],
+                chart_scope=waveform_scope,
+                tab_scope=waveform_tab,
+            ),
+        ])
+
     return filters
 
 
@@ -279,27 +331,28 @@ def irrad_curve_params(x_axis, cat, x_title, y_title,
     return params
 
 
-def irrad_waveform_params(y_col, y_label, y_title):
+def irrad_waveform_params(y_col, y_label, y_title, metric_expr=None,
+                          log_y=False, adhoc_filters=None):
     """Line-chart params for irradiation waveform time-domain plots.
 
     Groups by (device_type, device_id, irrad_condition_label) so each
     device / ion-run combination appears as a separate series.  Time axis
     is in seconds (Keithley SMU monitoring, not oscilloscope µs traces).
     """
-    return {
+    params = {
         "x_axis": "time_val",
         "time_grain_sqla": None,
         "x_axis_sort_asc": True,
         "metrics": [{
             "expressionType": "SQL",
-            "sqlExpression": f"AVG({y_col})",
+            "sqlExpression": metric_expr or f"AVG({y_col})",
             "label": y_label,
         }],
         "groupby": [
             "device_type", "device_id", "metadata_id",
             "irrad_condition_label",
         ],
-        "adhoc_filters": [],
+        "adhoc_filters": list(adhoc_filters or []),
         "row_limit": 50000,
         "truncate_metric": True,
         "show_legend": True,
@@ -317,6 +370,19 @@ def irrad_waveform_params(y_col, y_label, y_title):
         "sort_series_type": "max",
         "sort_series_ascending": False,
         "series_limit": 50,
+    }
+    if log_y:
+        params["logAxis"] = "y"
+        params["y_axis_bounds"] = [1e-12, None]
+    return params
+
+
+def non_null_filter(col):
+    """Adhoc WHERE filter for non-null waveform channels."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"{col} IS NOT NULL",
+        "clause": "WHERE",
     }
 
 
@@ -348,12 +414,15 @@ def main():
                                           "irradiation_campaign_overview")
     waveform_ds = find_or_create_dataset(session, db_id,
                                           "irradiation_waveform_view")
+    event_let_ds = find_or_create_dataset(
+        session, db_id, "irradiation_single_event_let_frequency_view"
+    )
     if not main_ds:
         print("  FATAL: Could not create irradiation_view dataset.")
         print("  Run seed_irradiation_campaigns.py first to create the views.")
         sys.exit(1)
 
-    for ds_id in [main_ds, degrad_ds, overview_ds, waveform_ds]:
+    for ds_id in [main_ds, degrad_ds, overview_ds, waveform_ds, event_let_ds]:
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -447,6 +516,50 @@ def main():
             6, 50,
         ),
     ]
+
+    if event_let_ds:
+        tab1_chart_defs.append(
+            # 3 – SEB/SELCI/SELCII events per LET (stacked by event type)
+            (
+                "Irrad – SE Events per LET",
+                event_let_ds,
+                "echarts_timeseries_bar",
+                {
+                    "x_axis": "let_mev_cm2_mg",
+                    "time_grain_sqla": None,
+                    "x_axis_sort_asc": True,
+                    "metrics": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": "SUM(n_events)",
+                        "label": "Events",
+                    }],
+                    "groupby": ["event_type"],
+                    "adhoc_filters": [
+                        {
+                            "expressionType": "SQL",
+                            "sqlExpression": (
+                                "event_type IN ('SEB', 'SELCI', 'SELCII')"
+                            ),
+                            "clause": "WHERE",
+                        },
+                        {
+                            "expressionType": "SQL",
+                            "sqlExpression": "let_mev_cm2_mg IS NOT NULL",
+                            "clause": "WHERE",
+                        },
+                    ],
+                    "row_limit": 1000,
+                    "show_legend": True,
+                    "rich_tooltip": True,
+                    "x_axis_title": "LET (MeV cm^2/mg)",
+                    "y_axis_title": "Events",
+                    "y_axis_format": "SMART_NUMBER",
+                    "stack": True,
+                    "order_desc": False,
+                },
+                12, 55,
+            )
+        )
 
     # ── Tab 2: Pre/Post Irradiation Comparison ───────────────────────────
     print("   Tab 2: Pre/Post Irradiation Comparison...")
@@ -594,6 +707,85 @@ def main():
                 "echarts_timeseries_line",
                 irrad_waveform_params("vgs", "Vgs (V)", "V_GS (V)"),
                 12, 60,
+            ),
+            # 3 – Igs vs Time (populated only for files with gate current)
+            (
+                "Irrad – Waveform: Igs vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "igs", "Igs (A)", "I_GS (A)",
+                    adhoc_filters=[non_null_filter("igs")],
+                ),
+                12, 60,
+            ),
+            # 4 – Absolute Id on log scale for leakage-step inspection
+            (
+                "Irrad – Waveform: |Id| vs Time (log)",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "id_drain", "|Id| (A)", "|I_D| (A)",
+                    metric_expr="AVG(NULLIF(ABS(id_drain), 0))",
+                    log_y=True,
+                    adhoc_filters=[non_null_filter("id_drain")],
+                ),
+                12, 60,
+            ),
+            # 5 – Absolute Igs on log scale for SELC-I gate leakage
+            (
+                "Irrad – Waveform: |Igs| vs Time (log)",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "igs", "|Igs| (A)", "|I_GS| (A)",
+                    metric_expr="AVG(NULLIF(ABS(igs), 0))",
+                    log_y=True,
+                    adhoc_filters=[non_null_filter("igs")],
+                ),
+                12, 60,
+            ),
+            # 6 – File-level event summary for the selected traces
+            (
+                "Irrad – Waveform Event Summary",
+                waveform_ds,
+                "table",
+                {
+                    "query_mode": "aggregate",
+                    "groupby": [
+                        "metadata_id", "device_type", "device_id",
+                        "filename", "irrad_condition_label",
+                        "single_event_status", "dominant_event_type",
+                        "seb_detected", "selc_i_detected",
+                        "selc_ii_detected",
+                    ],
+                    "metrics": [
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(event_count_total)",
+                         "label": "Events"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(seb_count)",
+                         "label": "SEB"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(selc_i_count)",
+                         "label": "SELC-I"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(selc_ii_count)",
+                         "label": "SELC-II"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(duration_s)",
+                         "label": "Duration (s)"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(fluence_span)",
+                         "label": "Fluence Span"},
+                    ],
+                    "all_columns": [],
+                    "order_by_cols": [],
+                    "row_limit": 1000,
+                    "include_time": False,
+                    "table_timestamp_format": "smart_date",
+                },
+                12, 55,
             ),
         ]
 
@@ -903,6 +1095,7 @@ def main():
     tab1_info = create_tab_charts(tab1_chart_defs)
     tab2_info = create_tab_charts(tab2_chart_defs)
     tab3_info = create_tab_charts(tab3_chart_defs)
+    waveform_chart_ids = [cid for cid, *_ in tab3_info if cid]
     tab4_info = create_tab_charts(tab4_chart_defs)
     tab5_info = create_tab_charts(tab5_chart_defs)
 
@@ -926,6 +1119,8 @@ def main():
         degrad_ds_id=degrad_ds,
         overview_ds_id=overview_ds,
         waveform_ds_id=waveform_ds,
+        event_let_ds_id=event_let_ds,
+        waveform_chart_ids=waveform_chart_ids,
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
 
@@ -965,6 +1160,9 @@ def main():
         print("    6. Device Type           (cascades from Manufacturer)")
         print("    7. Test Condition        (pre_irrad / post_irrad)")
         print("    8. Measurement Category  (IdVg, IdVd, Blocking, etc.)")
+        print("    9. SEB Detected          (Waveform Viewer)")
+        print("   10. SELC-I Detected       (Waveform Viewer)")
+        print("   11. SELC-II Detected      (Waveform Viewer)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

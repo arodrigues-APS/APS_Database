@@ -22,6 +22,7 @@ Filters (cascading):
   3. Avalanche Family   – top-level folder group (UIS_2018_botnk, Selam, …)
   4. Mode               – UIS / UID / RT / Avalanche
   5. Outcome            – survived / failed / unknown
+  6. Capture            – Waveform Viewer only, defaults to one capture
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -99,12 +100,14 @@ def build_dashboard_layout(tab_defs):
 
 # ── Native Filters ───────────────────────────────────────────────────────────
 
-def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
+def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
+                         waveform_chart_ids=None):
     mfr_fid  = "NATIVE_FILTER-avl-manufacturer"
     dev_fid  = "NATIVE_FILTER-avl-device"
     fam_fid  = "NATIVE_FILTER-avl-family"
     mode_fid = "NATIVE_FILTER-avl-mode"
     out_fid  = "NATIVE_FILTER-avl-outcome"
+    cap_fid  = "NATIVE_FILTER-avl-capture"
 
     def multi_targets(col):
         targets = []
@@ -114,13 +117,20 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
         return targets
 
     def make_filter(fid, name, col, cascade_from=None, description="",
-                    targets=None):
+                    targets=None, chart_scope=None, tab_scope=None,
+                    default_to_first_item=False, multi_select=True):
+        if cascade_from is None:
+            cascade_parent_ids = []
+        elif isinstance(cascade_from, (list, tuple)):
+            cascade_parent_ids = list(cascade_from)
+        else:
+            cascade_parent_ids = [cascade_from]
         return {
             "id": fid,
             "controlValues": {
                 "enableEmptyFilter": False,
-                "defaultToFirstItem": False,
-                "multiSelect": True,
+                "defaultToFirstItem": default_to_first_item,
+                "multiSelect": multi_select,
                 "searchAllOptions": True,
                 "inverseSelection": False,
             },
@@ -129,15 +139,15 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
             "targets": targets if targets is not None else multi_targets(col),
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
-            "cascadeParentIds": [cascade_from] if cascade_from else [],
+            "cascadeParentIds": cascade_parent_ids,
             "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
             "type": "NATIVE_FILTER",
             "description": description,
-            "chartsInScope": list(all_chart_ids),
-            "tabsInScope": [],
+            "chartsInScope": list(chart_scope or all_chart_ids),
+            "tabsInScope": list(tab_scope or []),
         }
 
-    return [
+    filters = [
         make_filter(mfr_fid,  "Manufacturer",     "manufacturer_label",
                     description="Filter by device manufacturer"),
         make_filter(dev_fid,  "Device",            "device_label",
@@ -150,6 +160,29 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id):
         make_filter(out_fid,  "Outcome",           "avalanche_outcome",
                     description="survived / failed / unknown"),
     ]
+
+    if waveform_ds_id:
+        waveform_scope = waveform_chart_ids or all_chart_ids
+        capture_targets = []
+        if summary_ds_id:
+            capture_targets.append({"datasetId": summary_ds_id,
+                                    "column": {"name": "capture_label"}})
+        capture_targets.append({"datasetId": waveform_ds_id,
+                                "column": {"name": "capture_label"}})
+        filters.append(
+            make_filter(
+                cap_fid, "Capture", "capture_label",
+                cascade_from=[dev_fid, fam_fid, mode_fid, out_fid],
+                description="Single capture for waveform plots",
+                targets=capture_targets,
+                chart_scope=waveform_scope,
+                tab_scope=["TAB-waveform"],
+                default_to_first_item=True,
+                multi_select=False,
+            )
+        )
+
+    return filters
 
 
 # ── Chart Helpers ────────────────────────────────────────────────────────────
@@ -165,10 +198,7 @@ def waveform_params(y_col, y_label, y_title):
             "sqlExpression": f"AVG({y_col})",
             "label": y_label,
         }],
-        "groupby": [
-            "device_label", "device_id", "metadata_id",
-            "avalanche_condition_label", "avalanche_outcome",
-        ],
+        "groupby": ["capture_label"],
         "adhoc_filters": [
             {
                 "expressionType": "SQL",
@@ -176,7 +206,7 @@ def waveform_params(y_col, y_label, y_title):
                 "clause": "WHERE",
             },
         ],
-        "row_limit": 500000,
+        "row_limit": 10000,
         "truncate_metric": True,
         "show_legend": True,
         "legendType": "scroll",
@@ -192,7 +222,7 @@ def waveform_params(y_col, y_label, y_title):
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
-        "series_limit": 100,
+        "series_limit": 10,
     }
 
 
@@ -479,6 +509,7 @@ def main():
     tab1_info = create_tab_charts(tab1_chart_defs)
     tab2_info = create_tab_charts(tab2_chart_defs)
     tab3_info = create_tab_charts(tab3_chart_defs)
+    waveform_chart_ids = [cid for cid, _, _, _, _ in tab2_info if cid]
 
     print("\n5. Building dashboard layout...")
 
@@ -490,7 +521,10 @@ def main():
     tab_defs = [td for td in tab_defs if td[2]]
 
     position_json = build_dashboard_layout(tab_defs)
-    native_filters = build_native_filters(all_chart_ids, waveform_ds, summary_ds)
+    native_filters = build_native_filters(
+        all_chart_ids, waveform_ds, summary_ds,
+        waveform_chart_ids=waveform_chart_ids,
+    )
     json_metadata  = build_json_metadata(all_chart_ids, native_filters)
 
     print("\n6. Creating dashboard...")
@@ -525,6 +559,7 @@ def main():
         print("    3. Avalanche Family    (UIS_2018_botnk, Selam, …)")
         print("    4. Mode                (UIS / UID / RT / Avalanche)")
         print("    5. Outcome             (survived / failed / unknown)")
+        print("    6. Capture             (Waveform Viewer, defaults to one)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

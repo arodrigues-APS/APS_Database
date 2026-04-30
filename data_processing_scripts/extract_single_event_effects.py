@@ -2,21 +2,24 @@
 """
 Extract SEB / SELC-I / SELC-II events from irradiation monitor waveforms.
 
-The detector is intentionally evidence-first:
+The detector is intentionally path-first:
   * it estimates per-file noise from robust current differences;
   * it extracts positive leakage-current steps or short ramps;
-  * it classifies each event from delta-|Id|, delta-|Ig|, their ratio,
-    mA-scale current, Vds collapse, and trace-abort evidence;
+  * it classifies the leakage path from coupled Id/Ig slopes and deltas;
+  * it only promotes an event to SEB when there is independent hard-failure
+    evidence beyond "the currents reached mA";
   * it stores both event rows and per-file rates so Superset can plot event
     frequency against LET.
 
 Definitions used here:
-  * SEB: hard-failure candidate. Large mA-scale drain jump with mA gate
-    current, Vds collapse, trace abort, or very high drain current.
-  * SELCI: drain-gate / gate-oxide path. Delta |Id| and Delta |Ig| rise
-    together with comparable magnitude.
-  * SELCII: drain-source path. Delta |Id| is much larger than Delta |Ig|, or
+  * SELCI: drain-gate / gate-oxide path. |Id| and |Ig| rise together with
+    comparable slope/delta.
+  * SELCII: drain-source path. |Id| rises far more strongly than |Ig|, or
     gate current is absent/flat.
+  * SEB: catastrophic hard-failure label. Requires a major drain jump plus
+    hard-failure evidence such as Vds collapse, trace abort, or 10 mA-scale
+    drain current. Gate-coupled SELC-I is preserved as SELC-I unless the hard
+    failure evidence is overwhelming; mA current alone is not SEB.
 
 Usage:
     python3 extract_single_event_effects.py --dry-run
@@ -47,7 +50,7 @@ from common import apply_schema
 from db_config import get_connection
 
 
-DETECTOR_VERSION = "single_event_detector_v1"
+DETECTOR_VERSION = "single_event_detector_v2_path_first"
 EVENT_TYPES = ("SEB", "SELCI", "SELCII", "MIXED", "UNKNOWN")
 
 
@@ -75,6 +78,7 @@ class DetectorConfig:
     vds_collapse_ratio: float = 0.5
     trace_abort_points: int = 5
     min_fluence_span_for_rate: float = 1.0
+    include_unknown: bool = False
 
 
 CREATE_VIEWS_SQL = """
@@ -84,6 +88,9 @@ SELECT
     e.metadata_id,
     e.event_index,
     e.event_type,
+    e.path_type,
+    e.severity,
+    e.is_catastrophic,
     e.confidence,
     e.point_index_start,
     e.point_index_peak,
@@ -109,7 +116,11 @@ SELECT
     e.id_slope_a_per_s,
     e.ig_slope_a_per_s,
     e.id_to_ig_delta_ratio,
+    e.id_to_ig_slope_ratio,
+    e.gate_delta_fraction,
     e.residual_id_minus_ig_a,
+    e.id_threshold_a,
+    e.ig_threshold_a,
     e.evidence,
     s.detector_version,
     s.analyzed_at,
@@ -360,16 +371,31 @@ def confidence_for_ratio(ratio, low, high):
     return max(0.55, min(0.95, 0.95 - 0.35 * center_distance / span))
 
 
-def classify_event(delta_id, delta_ig, id_after, ig_after, vds_before,
-                   vds_after, points_after_event, id_thr, ig_thr, cfg):
+def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
+                   vds_before, vds_after, points_after_event, id_thr, ig_thr,
+                   cfg):
     delta_id = max(0.0, delta_id or 0.0)
     delta_ig = max(0.0, delta_ig or 0.0)
     id_after = id_after or 0.0
     ig_after = ig_after or 0.0
 
-    id_signal = delta_id >= id_thr
-    ig_signal = delta_ig >= ig_thr
-    ratio = delta_id / delta_ig if delta_ig > 0 else None
+    drain_jump_ma = delta_id >= cfg.seb_id_delta_min_a
+    gate_jump_ma = delta_ig >= cfg.seb_ig_delta_min_a
+    id_signal = delta_id >= id_thr or drain_jump_ma
+    ig_signal = delta_ig >= ig_thr or gate_jump_ma
+    weak_ig_signal = ig_signal or delta_ig >= 0.5 * ig_thr
+    delta_ratio = delta_id / delta_ig if delta_ig > 0 else None
+    slope_ratio = (
+        id_slope / ig_slope
+        if id_slope is not None and ig_slope is not None and ig_slope > 0
+        else None
+    )
+    gate_delta_fraction = (
+        delta_ig / (delta_id + delta_ig)
+        if (delta_id + delta_ig) > 0 else None
+    )
+    primary_ratio = slope_ratio if slope_ratio is not None else delta_ratio
+    primary_ratio_kind = "slope" if slope_ratio is not None else "delta"
 
     vds_collapse = False
     if vds_before is not None and vds_after is not None:
@@ -383,58 +409,126 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, vds_before,
         )
 
     trace_abort = points_after_event <= cfg.trace_abort_points
-    drain_jump_ma = delta_id >= cfg.seb_id_delta_min_a
-    gate_jump_ma = delta_ig >= cfg.seb_ig_delta_min_a
+    drain_level_ma = id_after >= cfg.seb_id_abs_min_a
     gate_level_ma = ig_after >= cfg.seb_ig_abs_min_a
     hard_drain_level = id_after >= cfg.seb_hard_id_abs_min_a
     hard_drain_jump = delta_id >= cfg.seb_hard_id_abs_min_a
 
-    if ((drain_jump_ma and (gate_jump_ma or gate_level_ma or vds_collapse))
-            or (hard_drain_jump and (vds_collapse or trace_abort))
-            or (hard_drain_level and vds_collapse and drain_jump_ma)):
-        confidence = 0.90 if (gate_jump_ma or gate_level_ma) else 0.78
-        if vds_collapse:
-            confidence = min(0.98, confidence + 0.05)
-        return "SEB", confidence, ratio, {
-            "drain_jump_ma": drain_jump_ma,
-            "gate_jump_ma": gate_jump_ma,
-            "gate_level_ma": gate_level_ma,
-            "hard_drain_level": hard_drain_level,
-            "hard_drain_jump": hard_drain_jump,
-            "vds_collapse": vds_collapse,
-            "trace_abort": trace_abort,
-        }
-
-    if id_signal and ig_signal and ratio is not None:
-        if cfg.selc_i_ratio_min <= ratio <= cfg.selc_i_ratio_max:
-            return "SELCI", confidence_for_ratio(
-                ratio, cfg.selc_i_ratio_min, cfg.selc_i_ratio_max), ratio, {
-                    "id_signal": id_signal,
-                    "ig_signal": ig_signal,
-                    "ratio_band": "selc_i",
-                }
-        if ratio >= cfg.selc_ii_ratio_min:
-            return "SELCII", 0.82, ratio, {
-                "id_signal": id_signal,
-                "ig_signal": ig_signal,
-                "ratio_band": "selc_ii",
-            }
-        return "MIXED", 0.65, ratio, {
-            "id_signal": id_signal,
-            "ig_signal": ig_signal,
-            "ratio_band": "between_selc_i_and_selc_ii",
-        }
-
-    if id_signal:
-        return "SELCII", 0.76 if not ig_signal else 0.68, ratio, {
-            "id_signal": id_signal,
-            "ig_signal": ig_signal,
-            "gate_absent_or_flat": not ig_signal,
-        }
-
-    return "UNKNOWN", 0.50, ratio, {
+    path_type = "UNKNOWN"
+    confidence = 0.50
+    path_evidence = {
         "id_signal": id_signal,
         "ig_signal": ig_signal,
+        "weak_ig_signal": weak_ig_signal,
+        "delta_ratio": delta_ratio,
+        "slope_ratio": slope_ratio,
+        "primary_ratio": primary_ratio,
+        "primary_ratio_kind": primary_ratio_kind,
+        "gate_delta_fraction": gate_delta_fraction,
+    }
+    coupled_gate_signal = (
+        ig_signal
+        or (
+            weak_ig_signal
+            and gate_delta_fraction is not None
+            and gate_delta_fraction >= 0.25
+        )
+    )
+    path_evidence["coupled_gate_signal"] = coupled_gate_signal
+
+    if id_signal and coupled_gate_signal and primary_ratio is not None:
+        if cfg.selc_i_ratio_min <= primary_ratio <= cfg.selc_i_ratio_max:
+            path_type = "SELCI"
+            confidence = confidence_for_ratio(
+                primary_ratio, cfg.selc_i_ratio_min, cfg.selc_i_ratio_max)
+            if not ig_signal:
+                confidence = min(confidence, 0.72)
+                path_evidence["weak_gate_coupling"] = True
+            path_evidence["ratio_band"] = "selc_i"
+        elif primary_ratio >= cfg.selc_ii_ratio_min:
+            path_type = "SELCII"
+            confidence = 0.82
+            path_evidence["ratio_band"] = "selc_ii"
+        else:
+            path_type = "MIXED"
+            confidence = 0.65
+            path_evidence["ratio_band"] = "between_selc_i_and_selc_ii"
+    elif id_signal:
+        path_type = "SELCII"
+        confidence = 0.76
+        path_evidence["gate_absent_or_flat"] = True
+
+    catastrophic_score = sum((
+        1 if drain_jump_ma else 0,
+        1 if drain_level_ma else 0,
+        1 if gate_jump_ma or gate_level_ma else 0,
+        2 if hard_drain_jump or hard_drain_level else 0,
+        2 if vds_collapse else 0,
+        1 if trace_abort else 0,
+    ))
+    hard_failure_evidence = (
+        vds_collapse and (trace_abort or hard_drain_jump or hard_drain_level)
+    ) or (
+        trace_abort and (hard_drain_jump or hard_drain_level)
+    ) or (
+        hard_drain_jump and hard_drain_level
+    )
+    is_catastrophic = drain_jump_ma and hard_failure_evidence
+
+    # Current in the mA range is not enough to call SEB.  A gate-coupled
+    # SELC-I event is only promoted if it also has collapse, abort, and a
+    # 10 mA-scale drain signature.
+    selc_i_promotable_to_seb = (
+        path_type == "SELCI"
+        and vds_collapse
+        and trace_abort
+        and (hard_drain_jump or hard_drain_level)
+    )
+    event_type = path_type
+    if is_catastrophic and (path_type != "SELCI" or selc_i_promotable_to_seb):
+        event_type = "SEB"
+        confidence = 0.92 if hard_drain_jump or hard_drain_level else 0.82
+        if trace_abort:
+            confidence = min(0.98, confidence + 0.04)
+
+    if is_catastrophic:
+        severity = "catastrophic"
+    elif hard_drain_jump or hard_drain_level or drain_jump_ma or gate_jump_ma:
+        severity = "high"
+    elif delta_id >= 10 * id_thr or delta_ig >= 10 * ig_thr:
+        severity = "moderate"
+    else:
+        severity = "low"
+
+    evidence = {
+        **path_evidence,
+        "classification_order": "path_first_then_catastrophic_override",
+        "drain_jump_ma": drain_jump_ma,
+        "drain_level_ma": drain_level_ma,
+        "gate_jump_ma": gate_jump_ma,
+        "gate_level_ma": gate_level_ma,
+        "hard_drain_level": hard_drain_level,
+        "hard_drain_jump": hard_drain_jump,
+        "vds_collapse": vds_collapse,
+        "trace_abort": trace_abort,
+        "points_after_event": points_after_event,
+        "catastrophic_score": catastrophic_score,
+        "hard_failure_evidence": hard_failure_evidence,
+        "catastrophic_evidence": is_catastrophic,
+        "selc_i_promotable_to_seb": selc_i_promotable_to_seb,
+        "path_preserved_as_event_type": event_type == path_type,
+        "path_before_catastrophic_override": path_type,
+    }
+    return {
+        "event_type": event_type,
+        "path_type": path_type,
+        "severity": severity,
+        "is_catastrophic": is_catastrophic,
+        "confidence": confidence,
+        "delta_ratio": delta_ratio,
+        "slope_ratio": slope_ratio,
+        "gate_delta_fraction": gate_delta_fraction,
+        "evidence": evidence,
     }
 
 
@@ -505,9 +599,10 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
     id_slope = safe_div(max(0.0, delta_id or 0.0), dt)
     ig_slope = safe_div(max(0.0, delta_ig or 0.0), dt)
 
-    event_type, confidence, ratio, evidence = classify_event(
-        delta_id, delta_ig, id_after, ig_after, vds_before, vds_after,
-        n - end - 1, id_thr, ig_thr, cfg)
+    classification = classify_event(
+        delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
+        vds_before, vds_after, n - end - 1, id_thr, ig_thr, cfg)
+    evidence = classification["evidence"]
     evidence.update({
         "id_signal_peak_a": signals["id"][peak],
         "ig_signal_peak_a": signals["ig"][peak],
@@ -522,8 +617,11 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
         residual = delta_id - delta_ig
 
     return {
-        "event_type": event_type,
-        "confidence": confidence,
+        "event_type": classification["event_type"],
+        "path_type": classification["path_type"],
+        "severity": classification["severity"],
+        "is_catastrophic": classification["is_catastrophic"],
+        "confidence": classification["confidence"],
         "point_index_start": arrays["point_index"][start],
         "point_index_peak": arrays["point_index"][peak],
         "point_index_end": arrays["point_index"][end],
@@ -547,7 +645,9 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
         "delta_ig_signed_a": delta_ig_signed,
         "id_slope_a_per_s": id_slope,
         "ig_slope_a_per_s": ig_slope,
-        "id_to_ig_delta_ratio": ratio,
+        "id_to_ig_delta_ratio": classification["delta_ratio"],
+        "id_to_ig_slope_ratio": classification["slope_ratio"],
+        "gate_delta_fraction": classification["gate_delta_fraction"],
         "residual_id_minus_ig_a": residual,
         "id_threshold_a": id_thr,
         "ig_threshold_a": ig_thr,
@@ -611,8 +711,11 @@ def detect_events_for_file(points, cfg):
     events = []
     for cluster in cluster_indices(candidates, cfg.merge_gap_points):
         event = build_event(cluster, arrays, signals, (id_thr, ig_thr), cfg)
-        if event is not None:
-            events.append(event)
+        if event is None:
+            continue
+        if event["event_type"] == "UNKNOWN" and not cfg.include_unknown:
+            continue
+        events.append(event)
 
     counts = {event_type: 0 for event_type in EVENT_TYPES}
     for event in events:
@@ -697,6 +800,11 @@ def detect_events_for_file(points, cfg):
 
 
 def ensure_views(cur):
+    cur.execute("""
+        DROP VIEW IF EXISTS irradiation_single_event_let_frequency_view;
+        DROP VIEW IF EXISTS irradiation_single_event_file_frequency_view;
+        DROP VIEW IF EXISTS irradiation_single_event_view;
+    """)
     cur.execute(CREATE_VIEWS_SQL)
 
 
@@ -775,13 +883,15 @@ SUMMARY_COLUMNS = (
 
 EVENT_COLUMNS = (
     "metadata_id", "event_index", "event_type", "confidence",
-    "point_index_start", "point_index_peak", "point_index_end",
-    "cluster_width_points", "time_start", "time_peak", "time_end",
-    "fluence_start", "fluence_peak", "fluence_end", "vds_before_v",
-    "vds_after_v", "vds_delta_v", "id_before_a", "id_after_a",
-    "ig_before_a", "ig_after_a", "delta_id_abs_a", "delta_ig_abs_a",
+    "path_type", "severity", "is_catastrophic", "point_index_start",
+    "point_index_peak", "point_index_end", "cluster_width_points",
+    "time_start", "time_peak", "time_end", "fluence_start",
+    "fluence_peak", "fluence_end", "vds_before_v", "vds_after_v",
+    "vds_delta_v", "id_before_a", "id_after_a", "ig_before_a",
+    "ig_after_a", "delta_id_abs_a", "delta_ig_abs_a",
     "delta_id_signed_a", "delta_ig_signed_a", "id_slope_a_per_s",
     "ig_slope_a_per_s", "id_to_ig_delta_ratio",
+    "id_to_ig_slope_ratio", "gate_delta_fraction",
     "residual_id_minus_ig_a", "id_threshold_a", "ig_threshold_a",
     "evidence",
 )
@@ -834,18 +944,39 @@ def main():
                     default=DetectorConfig.id_step_floor_a)
     ap.add_argument("--ig-step-floor-a", type=float,
                     default=DetectorConfig.ig_step_floor_a)
+    ap.add_argument("--selc-i-ratio-min", type=float,
+                    default=DetectorConfig.selc_i_ratio_min)
+    ap.add_argument("--selc-i-ratio-max", type=float,
+                    default=DetectorConfig.selc_i_ratio_max)
+    ap.add_argument("--selc-ii-ratio-min", type=float,
+                    default=DetectorConfig.selc_ii_ratio_min)
     ap.add_argument("--seb-id-abs-min-a", type=float,
                     default=DetectorConfig.seb_id_abs_min_a)
+    ap.add_argument("--seb-id-delta-min-a", type=float,
+                    default=DetectorConfig.seb_id_delta_min_a)
     ap.add_argument("--seb-ig-abs-min-a", type=float,
                     default=DetectorConfig.seb_ig_abs_min_a)
+    ap.add_argument("--seb-ig-delta-min-a", type=float,
+                    default=DetectorConfig.seb_ig_delta_min_a)
+    ap.add_argument("--seb-hard-id-abs-min-a", type=float,
+                    default=DetectorConfig.seb_hard_id_abs_min_a)
+    ap.add_argument("--include-unknown", action="store_true",
+                    help="Persist UNKNOWN diagnostic events in addition to named classes")
     args = ap.parse_args()
 
     cfg = DetectorConfig(
         noise_sigma_factor=args.noise_sigma_factor,
         id_step_floor_a=args.id_step_floor_a,
         ig_step_floor_a=args.ig_step_floor_a,
+        selc_i_ratio_min=args.selc_i_ratio_min,
+        selc_i_ratio_max=args.selc_i_ratio_max,
+        selc_ii_ratio_min=args.selc_ii_ratio_min,
         seb_id_abs_min_a=args.seb_id_abs_min_a,
+        seb_id_delta_min_a=args.seb_id_delta_min_a,
         seb_ig_abs_min_a=args.seb_ig_abs_min_a,
+        seb_ig_delta_min_a=args.seb_ig_delta_min_a,
+        seb_hard_id_abs_min_a=args.seb_hard_id_abs_min_a,
+        include_unknown=args.include_unknown,
     )
 
     t0 = perf_counter()

@@ -22,6 +22,8 @@ What it does:
          distance, and comparability status for the dashboard.
        * `damage_equivalence_coverage_view` summarizes which device types
          have enough SC/irradiation overlap to compare.
+       * `damage_equivalence_match_segment_view` expands rank-1 usable
+         matches into two endpoints so Superset can draw focused links.
   2. In Python: builds a per-device-type damage-space nearest-neighbor
      retriever. The distance metric is a reliability-weighted Euclidean
      score over available axes (ΔVth, ΔRds, ΔBV), normalized by per-axis
@@ -76,6 +78,7 @@ from db_config import get_connection
 # — every device with post_sc or post_irrad data also has explicit pristine
 # or pre_irrad rows.
 DAMAGE_VIEW_SQL = """
+DROP VIEW IF EXISTS damage_equivalence_match_segment_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_match_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_coverage_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_view CASCADE;
@@ -506,6 +509,61 @@ SELECT fp.device_type,
        END AS comparability_status
 FROM fp_counts fp
 LEFT JOIN match_counts mc USING (device_type);
+
+CREATE VIEW damage_equivalence_match_segment_view AS
+SELECT m.device_type,
+       m.irrad_run_id,
+       m.irrad_label,
+       m.ion_species,
+       m.beam_energy_mev,
+       m.let_surface,
+       m.sc_label,
+       m.sc_voltage_v,
+       m.sc_duration_us,
+       m.match_rank,
+       m.nearest_distance,
+       m.comparable_axes,
+       m.comparable_axis_labels,
+       m.comparability_status,
+       m.device_type || ' | run ' || m.irrad_run_id::text
+         || ': ' || m.irrad_label || ' <-> ' || m.sc_label AS match_label,
+       'irrad'::text AS endpoint_source,
+       m.irrad_label AS endpoint_label,
+       1 AS endpoint_order,
+       m.irrad_dvth AS dvth,
+       m.irrad_drds AS drds,
+       m.irrad_dbv AS dbv,
+       m.irrad_n_samples AS n_samples
+FROM damage_equivalence_match_view m
+WHERE m.match_rank = 1
+  AND m.comparability_status IN ('strong', 'usable')
+UNION ALL
+SELECT m.device_type,
+       m.irrad_run_id,
+       m.irrad_label,
+       m.ion_species,
+       m.beam_energy_mev,
+       m.let_surface,
+       m.sc_label,
+       m.sc_voltage_v,
+       m.sc_duration_us,
+       m.match_rank,
+       m.nearest_distance,
+       m.comparable_axes,
+       m.comparable_axis_labels,
+       m.comparability_status,
+       m.device_type || ' | run ' || m.irrad_run_id::text
+         || ': ' || m.irrad_label || ' <-> ' || m.sc_label AS match_label,
+       'sc'::text AS endpoint_source,
+       m.sc_label AS endpoint_label,
+       2 AS endpoint_order,
+       m.sc_dvth AS dvth,
+       m.sc_drds AS drds,
+       m.sc_dbv AS dbv,
+       m.sc_n_samples AS n_samples
+FROM damage_equivalence_match_view m
+WHERE m.match_rank = 1
+  AND m.comparability_status IN ('strong', 'usable');
 """
 
 
@@ -513,6 +571,10 @@ LEFT JOIN match_counts mc USING (device_type);
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "out" / "sc_irrad_equivalence"
 DAMAGE_AXES = ("dvth", "drds", "dbv")
+SOURCE_PLOT_COLORS = {
+    "sc": "#1f77b4",
+    "irrad": "#d55e00",
+}
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -714,11 +776,8 @@ def plot_pair(fps, x_key, y_key, x_label, y_label, path):
         return
 
     fig, ax = plt.subplots(figsize=(11, 7))
-    palette = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
-    dev_colors = {d: palette[i % len(palette)] for i, d in enumerate(sorted(keep))}
-
     for fp in sc:
-        c = dev_colors[fp["device_type"]]
+        c = SOURCE_PLOT_COLORS["sc"]
         ax.scatter(fp[x_key], fp[y_key], marker="o",
                    s=40 + 8 * (fp["n_samples"] or 1), c=c, alpha=0.55,
                    edgecolors="k", linewidths=0.4)
@@ -726,7 +785,7 @@ def plot_pair(fps, x_key, y_key, x_label, y_label, path):
                     (fp[x_key], fp[y_key]), fontsize=6.5, alpha=0.75,
                     xytext=(5, 3), textcoords="offset points")
     for fp in ir:
-        c = dev_colors[fp["device_type"]]
+        c = SOURCE_PLOT_COLORS["irrad"]
         ax.scatter(fp[x_key], fp[y_key], marker="^",
                    s=80 + 14 * (fp["n_samples"] or 1), c=c,
                    edgecolors="k", linewidths=0.7)
@@ -740,11 +799,10 @@ def plot_pair(fps, x_key, y_key, x_label, y_label, path):
     ax.axvline(0, color="k", lw=0.5, alpha=0.3)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_title(f"{x_label} vs {y_label}: SC (•) vs Irradiation (▲)")
-    for d, c in dev_colors.items():
-        ax.scatter([], [], marker="o", c=c, label=f"SC {d}")
-    for d, c in dev_colors.items():
-        ax.scatter([], [], marker="^", c=c, label=f"Irrad {d}")
+    ax.set_title(f"{x_label} vs {y_label}: SC vs Irradiation")
+    ax.scatter([], [], marker="o", c=SOURCE_PLOT_COLORS["sc"], label="SC")
+    ax.scatter([], [], marker="^", c=SOURCE_PLOT_COLORS["irrad"],
+               label="Irradiation")
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)

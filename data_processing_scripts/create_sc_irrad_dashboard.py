@@ -6,6 +6,7 @@ Uses the views built by ml_sc_irrad_equivalence.py:
   * `damage_equivalence_view` for raw SC/irradiation fingerprints
   * `damage_equivalence_match_view` for ranked SC equivalents
   * `damage_equivalence_coverage_view` for device-level comparability
+  * `damage_equivalence_match_segment_view` for focused usable-match links
 Each row of the fingerprint view is one short-circuit test condition
 (device_type, sc_voltage_v, sc_duration_us) or one irradiation run
 (device_type, ion_species, beam_energy_mev, let_surface), with median
@@ -13,10 +14,11 @@ Each row of the fingerprint view is one short-circuit test condition
 
 Dashboard contents:
   1. Table   — Device comparability coverage
-  2. Scatter — ΔVth vs ΔV(BR)DSS  (comparable device types only)
-  3. Scatter — ΔVth vs ΔRds(on)   (comparable device types only)
-  4. Table   — Ranked nearest SC equivalents with distance/axis overlap
-  5. Table   — Raw fingerprint summary with full columns (sortable)
+  2. Scatter — ΔVth vs ΔV(BR)DSS, source-colored SC vs irradiation
+  3. Scatter — ΔVth vs ΔRds(on), source-colored SC vs irradiation
+  4. Line    — Rank-1 strong/usable equivalent links in each damage plane
+  5. Table   — Ranked nearest SC equivalents with distance/axis overlap
+  6. Table   — Raw fingerprint summary with full columns (sortable)
 
 Filter:
   - Device Type (cascades across all charts).
@@ -46,10 +48,19 @@ DASHBOARD_SLUG = "sc-irrad-equivalence"
 VIEW_NAME = "damage_equivalence_view"
 MATCH_VIEW_NAME = "damage_equivalence_match_view"
 COVERAGE_VIEW_NAME = "damage_equivalence_coverage_view"
+MATCH_SEGMENT_VIEW_NAME = "damage_equivalence_match_segment_view"
+
+SOURCE_COLORS = {
+    "sc": "#1f77b4",
+    "irrad": "#d55e00",
+}
 
 
 def ensure_view_exists():
-    required = [VIEW_NAME, MATCH_VIEW_NAME, COVERAGE_VIEW_NAME]
+    required = [
+        VIEW_NAME, MATCH_VIEW_NAME, COVERAGE_VIEW_NAME,
+        MATCH_SEGMENT_VIEW_NAME,
+    ]
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -80,8 +91,8 @@ def build_dashboard_layout(chart_tuples):
         "GRID_ID": {
             "type": "GRID", "id": "GRID_ID",
             "children": [
-                "ROW-coverage", "ROW-scatter", "ROW-matches",
-                "ROW-fingerprints",
+                "ROW-coverage", "ROW-scatter", "ROW-links",
+                "ROW-matches", "ROW-fingerprints",
             ],
             "parents": ["ROOT_ID"],
         },
@@ -98,6 +109,12 @@ def build_dashboard_layout(chart_tuples):
         "ROW-scatter": {
             "type": "ROW", "id": "ROW-scatter",
             "children": ["CHART-scatter-bv", "CHART-scatter-rds"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
+        "ROW-links": {
+            "type": "ROW", "id": "ROW-links",
+            "children": ["CHART-link-bv", "CHART-link-rds"],
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         },
@@ -118,6 +135,8 @@ def build_dashboard_layout(chart_tuples):
         "coverage":     ("CHART-coverage", "ROW-coverage"),
         "bv":           ("CHART-scatter-bv", "ROW-scatter"),
         "rds":          ("CHART-scatter-rds", "ROW-scatter"),
+        "link_bv":      ("CHART-link-bv", "ROW-links"),
+        "link_rds":     ("CHART-link-rds", "ROW-links"),
         "matches":      ("CHART-matches", "ROW-matches"),
         "fingerprints": ("CHART-fingerprints", "ROW-fingerprints"),
     }
@@ -135,7 +154,7 @@ def build_dashboard_layout(chart_tuples):
 
 
 def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
-                         match_chart_ids, coverage_chart_ids):
+                         segment_ds_id, match_chart_ids, coverage_chart_ids):
     dev_fid = "NATIVE_FILTER-scirrad-device-type"
     status_fid = "NATIVE_FILTER-scirrad-comparability-status"
     ion_fid = "NATIVE_FILTER-scirrad-ion-species"
@@ -155,6 +174,7 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
                 {"datasetId": fp_ds_id, "column": {"name": "device_type"}},
                 {"datasetId": match_ds_id, "column": {"name": "device_type"}},
                 {"datasetId": coverage_ds_id, "column": {"name": "device_type"}},
+                {"datasetId": segment_ds_id, "column": {"name": "device_type"}},
             ],
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
@@ -185,6 +205,10 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
                     "datasetId": coverage_ds_id,
                     "column": {"name": "comparability_status"},
                 },
+                {
+                    "datasetId": segment_ds_id,
+                    "column": {"name": "comparability_status"},
+                },
             ],
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
@@ -208,6 +232,7 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
             "filterType": "filter_select",
             "targets": [
                 {"datasetId": match_ds_id, "column": {"name": "ion_species"}},
+                {"datasetId": segment_ds_id, "column": {"name": "ion_species"}},
             ],
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
@@ -221,11 +246,39 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
     ]
 
 
-def scatter_params(x_col, y_col, x_label, y_label):
+def source_series_label(source, label, device_type):
+    """Return Superset's display label for the fingerprint scatter series."""
+    return ", ".join(str(part) for part in (source, label, device_type))
+
+
+def load_source_label_colors():
+    """Force per-fingerprint scatter series into two stable source colors."""
+    colors = {
+        "sc": SOURCE_COLORS["sc"],
+        "irrad": SOURCE_COLORS["irrad"],
+    }
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source, label, device_type
+            FROM damage_equivalence_view
+            WHERE device_pair_status = 'SC + irradiation'
+            ORDER BY source, label, device_type
+            """
+        )
+        for source, label, device_type in cur.fetchall():
+            color = SOURCE_COLORS.get(source)
+            if color:
+                colors[source_series_label(source, label, device_type)] = color
+    return colors
+
+
+def scatter_params(x_col, y_col, x_label, y_label, label_colors):
     """Scatter-chart params for `echarts_timeseries_scatter`.
 
-    The x-axis is a numeric column; groupby=['source', 'label'] makes
-    each fingerprint a distinct series, which echarts renders as dots.
+    The x-axis is numeric.  The series remain one-per-fingerprint so points
+    are not averaged together, but dashboard label colors force them into
+    the two source colors: SC and irradiation.
     """
     return {
         "x_axis": x_col,
@@ -239,7 +292,7 @@ def scatter_params(x_col, y_col, x_label, y_label):
         "groupby": ["source", "label", "device_type"],
         "row_limit": 10000,
         "truncate_metric": True,
-        "show_legend": True,
+        "show_legend": False,
         "legendType": "scroll",
         "rich_tooltip": True,
         "x_axis_title": x_label,
@@ -250,6 +303,7 @@ def scatter_params(x_col, y_col, x_label, y_label):
         "markerEnabled": True,
         "markerSize": 8,
         "zoomable": True,
+        "label_colors": label_colors,
         "adhoc_filters": [
             {
                 "expressionType": "SQL",
@@ -259,6 +313,43 @@ def scatter_params(x_col, y_col, x_label, y_label):
             {
                 "expressionType": "SQL",
                 "sqlExpression": "device_pair_status = 'SC + irradiation'",
+                "clause": "WHERE",
+            },
+        ],
+    }
+
+
+def match_link_params(x_col, y_col, x_label, y_label):
+    """Line-chart params for rank-1 strong/usable match endpoints."""
+    return {
+        "x_axis": x_col,
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": f"AVG({y_col})",
+            "label": y_label,
+        }],
+        "groupby": ["match_label"],
+        "row_limit": 20000,
+        "series_limit": 200,
+        "truncate_metric": True,
+        "show_legend": False,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": x_label,
+        "y_axis_title": y_label,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "markerEnabled": True,
+        "markerSize": 6,
+        "connectNulls": False,
+        "zoomable": True,
+        "adhoc_filters": [
+            {
+                "expressionType": "SQL",
+                "sqlExpression": f"{x_col} IS NOT NULL AND {y_col} IS NOT NULL",
                 "clause": "WHERE",
             },
         ],
@@ -374,13 +465,17 @@ def main():
     fp_ds_id = find_or_create_dataset(session, db_id, VIEW_NAME)
     match_ds_id = find_or_create_dataset(session, db_id, MATCH_VIEW_NAME)
     coverage_ds_id = find_or_create_dataset(session, db_id, COVERAGE_VIEW_NAME)
-    if not all([fp_ds_id, match_ds_id, coverage_ds_id]):
+    segment_ds_id = find_or_create_dataset(
+        session, db_id, MATCH_SEGMENT_VIEW_NAME
+    )
+    if not all([fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id]):
         sys.exit("   ERROR: dataset registration failed")
-    for ds_id in (fp_ds_id, match_ds_id, coverage_ds_id):
+    for ds_id in (fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id):
         refresh_dataset_columns(session, ds_id)
 
     print("\n5. Creating charts …")
     charts = {}
+    source_label_colors = load_source_label_colors()
 
     cid, cuuid = create_chart(
         session, "Comparable Device Coverage", coverage_ds_id,
@@ -390,18 +485,52 @@ def main():
     charts["coverage"] = (cid, cuuid, "Comparable Device Coverage", 12, 28)
 
     cid, cuuid = create_chart(
-        session, "Damage: ΔVth vs ΔV(BR)DSS", fp_ds_id,
+        session, "Damage: ΔVth vs ΔV(BR)DSS (SC blue / irrad orange)",
+        fp_ds_id,
         "echarts_timeseries_scatter",
-        scatter_params("dvth", "dbv", "ΔVth (V)", "ΔV(BR)DSS (V)"),
+        scatter_params(
+            "dvth", "dbv", "ΔVth (V)", "ΔV(BR)DSS (V)",
+            source_label_colors,
+        ),
     )
-    charts["bv"] = (cid, cuuid, "Damage: ΔVth vs ΔV(BR)DSS", 6, 50)
+    charts["bv"] = (
+        cid, cuuid,
+        "Damage: ΔVth vs ΔV(BR)DSS (SC blue / irrad orange)",
+        6, 50,
+    )
 
     cid, cuuid = create_chart(
-        session, "Damage: ΔVth vs ΔRds(on)", fp_ds_id,
+        session, "Damage: ΔVth vs ΔRds(on) (SC blue / irrad orange)",
+        fp_ds_id,
         "echarts_timeseries_scatter",
-        scatter_params("dvth", "drds", "ΔVth (V)", "ΔRds(on) (mΩ)"),
+        scatter_params(
+            "dvth", "drds", "ΔVth (V)", "ΔRds(on) (mΩ)",
+            source_label_colors,
+        ),
     )
-    charts["rds"] = (cid, cuuid, "Damage: ΔVth vs ΔRds(on)", 6, 50)
+    charts["rds"] = (
+        cid, cuuid,
+        "Damage: ΔVth vs ΔRds(on) (SC blue / irrad orange)",
+        6, 50,
+    )
+
+    cid, cuuid = create_chart(
+        session, "Usable Match Links: ΔVth vs ΔV(BR)DSS", segment_ds_id,
+        "echarts_timeseries_line",
+        match_link_params("dvth", "dbv", "ΔVth (V)", "ΔV(BR)DSS (V)"),
+    )
+    charts["link_bv"] = (
+        cid, cuuid, "Usable Match Links: ΔVth vs ΔV(BR)DSS", 6, 45
+    )
+
+    cid, cuuid = create_chart(
+        session, "Usable Match Links: ΔVth vs ΔRds(on)", segment_ds_id,
+        "echarts_timeseries_line",
+        match_link_params("dvth", "drds", "ΔVth (V)", "ΔRds(on) (mΩ)"),
+    )
+    charts["link_rds"] = (
+        cid, cuuid, "Usable Match Links: ΔVth vs ΔRds(on)", 6, 45
+    )
 
     cid, cuuid = create_chart(
         session, "Nearest SC Equivalents", match_ds_id,
@@ -425,15 +554,20 @@ def main():
     position_json = build_dashboard_layout(charts)
     match_chart_ids = [
         charts["matches"][0],
-    ] if charts["matches"][0] is not None else []
+        charts["link_bv"][0],
+        charts["link_rds"][0],
+    ]
+    match_chart_ids = [cid for cid in match_chart_ids if cid is not None]
     coverage_chart_ids = [
         charts["coverage"][0],
     ] if charts["coverage"][0] is not None else []
     native_filters = build_native_filters(
-        chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
+        chart_ids, fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id,
         match_chart_ids, coverage_chart_ids,
     )
     json_metadata = build_json_metadata(chart_ids, native_filters)
+    json_metadata["label_colors"] = source_label_colors
+    json_metadata["shared_label_colors"] = source_label_colors
 
     dash_id = create_or_update_dashboard(
         session, DASHBOARD_TITLE, position_json, json_metadata,

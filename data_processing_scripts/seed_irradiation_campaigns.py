@@ -449,6 +449,35 @@ SELECT
     COALESCE(ir.ion_species, '?') || ' ' ||
         COALESCE(ir.beam_energy_mev::text, '?') || ' MeV ' ||
         COALESCE(ir.beam_type, ic.beam_type, '') AS irrad_condition_label,
+    COALESCE(se.status, 'not_analyzed') AS single_event_status,
+    se.skip_reason AS single_event_skip_reason,
+    COALESCE(se.event_count_total, 0) AS event_count_total,
+    COALESCE(se.seb_count, 0) AS seb_count,
+    COALESCE(se.selc_i_count, 0) AS selc_i_count,
+    COALESCE(se.selc_ii_count, 0) AS selc_ii_count,
+    se.dominant_event_type,
+    se.duration_s,
+    se.fluence_span,
+    se.event_rate_per_s,
+    se.event_rate_per_1e5_fluence,
+    CASE
+        WHEN se.status IS NULL THEN 'Not analyzed'
+        WHEN se.status <> 'analyzed' THEN INITCAP(se.status)
+        WHEN COALESCE(se.seb_count, 0) > 0 THEN 'Yes'
+        ELSE 'No'
+    END AS seb_detected,
+    CASE
+        WHEN se.status IS NULL THEN 'Not analyzed'
+        WHEN se.status <> 'analyzed' THEN INITCAP(se.status)
+        WHEN COALESCE(se.selc_i_count, 0) > 0 THEN 'Yes'
+        ELSE 'No'
+    END AS selc_i_detected,
+    CASE
+        WHEN se.status IS NULL THEN 'Not analyzed'
+        WHEN se.status <> 'analyzed' THEN INITCAP(se.status)
+        WHEN COALESCE(se.selc_ii_count, 0) > 0 THEN 'Yes'
+        ELSE 'No'
+    END AS selc_ii_detected,
     -- Round to 1-second bins so Superset aggregates ~1600 time steps
     -- instead of the ~335 K near-unique raw timestamps.
     FLOOR(m.time_val)::double precision AS time_val,
@@ -467,6 +496,7 @@ FROM baselines_measurements m
 JOIN baselines_metadata     md ON m.metadata_id         = md.id
 JOIN irradiation_campaigns  ic ON md.irrad_campaign_id  = ic.id
 LEFT JOIN irradiation_runs  ir ON md.irrad_run_id       = ir.id
+LEFT JOIN irradiation_single_event_file_summary se ON se.metadata_id = md.id
 WHERE md.irrad_campaign_id IS NOT NULL
   AND md.measurement_category = 'Irradiation'
   AND m.time_val IS NOT NULL;

@@ -11,9 +11,11 @@ This note documents the SEB / SELC-I / SELC-II extraction implemented in
   span, and per-file rates.
 
 - `irradiation_single_events`
-  One row per detected event. Stores event type, confidence, point/time/fluence
-  location, before/after Vds, before/after Id/Ig, delta Id/Ig, ratio, slopes,
-  thresholds, and JSON evidence flags.
+  One row per detected event. Stores the plot label (`event_type`), the
+  leakage-path label (`path_type`), severity, catastrophic flag, confidence,
+  point/time/fluence location, before/after Vds, before/after Id/Ig, delta
+  Id/Ig, slope and delta ratios, gate-current fraction, thresholds, and JSON
+  evidence flags.
 
 ## Plotting Views
 
@@ -67,18 +69,17 @@ For each irradiation waveform file:
    - `vds_before_v`, `vds_after_v`, `vds_delta_v`
    - current slopes in A/s
    - fluence and time location
-9. Classify the event.
+9. Classify the leakage path first, then evaluate whether the event has
+   independent catastrophic evidence.
 
 ## Classification Rules
 
-- `SEB`
-  Requires the event itself to have a mA-scale drain jump. It is promoted to
-  SEB when the jump is accompanied by a mA-scale gate jump/level, Vds collapse,
-  trace abort, or a hard 10 mA-scale drain jump.
-
 - `SELCI`
-  Id and Ig rise together. Default ratio band:
+  Id and Ig rise together. The default ratio band is:
   `0.33 <= delta |Id| / delta |Ig| <= 3.0`.
+  If the gate signal is just below the adaptive noise threshold, it can still
+  count as weak gate coupling when it is at least half threshold and the gate
+  fraction is SELC-I-like (`delta Ig / (delta Id + delta Ig) >= 0.25`).
 
 - `SELCII`
   Id rises and Ig is absent/flat, or Id rises far more strongly than Ig.
@@ -89,9 +90,20 @@ For each irradiation waveform file:
   Both Id and Ig rise, but the ratio falls between the SELC-I and SELC-II
   bands.
 
+- `SEB`
+  SEB is a catastrophic label on top of the path classification. It requires
+  a mA-scale drain jump plus hard-failure evidence such as Vds collapse with
+  trace abort or 10 mA-scale drain current. mA current alone is not enough.
+  Gate-coupled SELC-I is preserved as `SELCI` unless it also has Vds collapse,
+  trace abort, and a 10 mA-scale drain signature.
+
 - `UNKNOWN`
-  Low-confidence diagnostic events. These are logged for audit but should be
-  excluded from primary SEB/SELC plots.
+  Low-confidence diagnostic events. These are not stored by default; pass
+  `--include-unknown` when auditing detector thresholds.
+
+The event row keeps both `event_type` and `path_type`. For example, a true
+burnout can have `event_type = 'SEB'` and `path_type = 'SELCII'`, while a
+severe but gate-coupled leakage event remains `event_type = 'SELCI'`.
 
 ## Rate Caveats
 
@@ -117,3 +129,6 @@ python3 data_processing_scripts/extract_single_event_effects.py --metadata-id 11
 
 Thresholds can be overridden from the CLI. The detector stores the full settings
 JSON in `irradiation_single_event_file_summary.settings` for reproducibility.
+
+The current default rebuild analyzed 516 irradiation files and stored 1,811
+named events: 32 SEB, 177 SELC-I, 1,564 SELC-II, 38 MIXED, and 0 UNKNOWN.

@@ -128,6 +128,13 @@ SELECT
     COALESCE(md.manufacturer, 'unknown') AS manufacturer_label,
     md.filename,
     md.csv_path,
+    CONCAT_WS(
+        ' | ',
+        md.id::text,
+        COALESCE(md.device_type, NULLIF(md.device_id, ''), 'unknown'),
+        COALESCE(md.avalanche_condition_label, md.filename),
+        COALESCE(md.avalanche_outcome, 'unknown')
+    ) AS capture_label,
     md.avalanche_family,
     md.avalanche_mode,
     md.avalanche_energy_j,
@@ -164,6 +171,13 @@ SELECT
     md.manufacturer,
     COALESCE(md.manufacturer, 'unknown') AS manufacturer_label,
     md.sample_group,
+    CONCAT_WS(
+        ' | ',
+        md.id::text,
+        COALESCE(md.device_type, NULLIF(md.device_id, ''), 'unknown'),
+        COALESCE(md.avalanche_condition_label, md.filename),
+        COALESCE(md.avalanche_outcome, 'unknown')
+    ) AS capture_label,
     md.avalanche_family,
     md.avalanche_mode,
     md.avalanche_energy_j                       AS avalanche_energy_j_raw,

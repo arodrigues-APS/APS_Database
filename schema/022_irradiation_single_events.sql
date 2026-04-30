@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS irradiation_single_events (
                                 ON DELETE CASCADE,
     event_index                 INTEGER NOT NULL,
     event_type                  TEXT NOT NULL,
+    path_type                   TEXT,
+    severity                    TEXT,
+    is_catastrophic             BOOLEAN DEFAULT FALSE,
     confidence                  DOUBLE PRECISION,
 
     point_index_start           INTEGER,
@@ -96,6 +99,8 @@ CREATE TABLE IF NOT EXISTS irradiation_single_events (
     id_slope_a_per_s            DOUBLE PRECISION,
     ig_slope_a_per_s            DOUBLE PRECISION,
     id_to_ig_delta_ratio        DOUBLE PRECISION,
+    id_to_ig_slope_ratio        DOUBLE PRECISION,
+    gate_delta_fraction         DOUBLE PRECISION,
     residual_id_minus_ig_a      DOUBLE PRECISION,
 
     id_threshold_a              DOUBLE PRECISION,
@@ -106,10 +111,21 @@ CREATE TABLE IF NOT EXISTS irradiation_single_events (
     UNIQUE (metadata_id, event_index)
 );
 
+ALTER TABLE irradiation_single_events
+    ADD COLUMN IF NOT EXISTS path_type TEXT,
+    ADD COLUMN IF NOT EXISTS severity TEXT,
+    ADD COLUMN IF NOT EXISTS is_catastrophic BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS id_to_ig_slope_ratio DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS gate_delta_fraction DOUBLE PRECISION;
+
 CREATE INDEX IF NOT EXISTS idx_irr_single_events_metadata
     ON irradiation_single_events(metadata_id);
 CREATE INDEX IF NOT EXISTS idx_irr_single_events_type
     ON irradiation_single_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_irr_single_events_path_type
+    ON irradiation_single_events(path_type);
+CREATE INDEX IF NOT EXISTS idx_irr_single_events_catastrophic
+    ON irradiation_single_events(is_catastrophic);
 CREATE INDEX IF NOT EXISTS idx_irr_single_events_time
     ON irradiation_single_events(time_peak);
 CREATE INDEX IF NOT EXISTS idx_irr_single_events_fluence
