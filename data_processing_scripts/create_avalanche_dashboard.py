@@ -22,7 +22,8 @@ Filters (cascading):
   3. Avalanche Family   – top-level folder group (UIS_2018_botnk, Selam, …)
   4. Mode               – UIS / UID / RT / Avalanche
   5. Outcome            – survived / failed / unknown
-  6. Capture            – Waveform Viewer only, defaults to one capture
+  6. Gate Bias (V)      – range slider; all charts, cascades from Device
+  7. Capture            – Waveform Viewer only, defaults to one capture
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -107,6 +108,7 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
     fam_fid  = "NATIVE_FILTER-avl-family"
     mode_fid = "NATIVE_FILTER-avl-mode"
     out_fid  = "NATIVE_FILTER-avl-outcome"
+    gbias_fid = "NATIVE_FILTER-avl-gate-bias"
     cap_fid  = "NATIVE_FILTER-avl-capture"
 
     def multi_targets(col):
@@ -160,6 +162,31 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
         make_filter(out_fid,  "Outcome",           "avalanche_outcome",
                     description="survived / failed / unknown"),
     ]
+
+    # Gate Bias range slider — targets both datasets; cascades from Device
+    gate_bias_targets = []
+    if summary_ds_id:
+        gate_bias_targets.append({"datasetId": summary_ds_id,
+                                   "column": {"name": "avalanche_gate_bias_v"}})
+    if waveform_ds_id:
+        gate_bias_targets.append({"datasetId": waveform_ds_id,
+                                   "column": {"name": "avalanche_gate_bias_v"}})
+    if gate_bias_targets:
+        filters.append({
+            "id": gbias_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "Gate Bias (V)",
+            "filterType": "filter_range",
+            "targets": gate_bias_targets,
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict to shots with gate bias in this range (V)",
+            "chartsInScope": list(all_chart_ids),
+            "tabsInScope": [],
+        })
 
     if waveform_ds_id:
         waveform_scope = waveform_chart_ids or all_chart_ids
@@ -559,7 +586,8 @@ def main():
         print("    3. Avalanche Family    (UIS_2018_botnk, Selam, …)")
         print("    4. Mode                (UIS / UID / RT / Avalanche)")
         print("    5. Outcome             (survived / failed / unknown)")
-        print("    6. Capture             (Waveform Viewer, defaults to one)")
+        print("    6. Gate Bias (V)       (range slider; cascades from Device)")
+        print("    7. Capture             (Waveform Viewer, defaults to one)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS iv_prediction_batches (
     target_ion_species TEXT,
     target_beam_energy_mev DOUBLE PRECISION,
     target_let_surface DOUBLE PRECISION,
+    target_let_bragg_peak DOUBLE PRECISION,
+    target_range_um DOUBLE PRECISION,
     target_beam_type TEXT,
     target_fluence_at_meas DOUBLE PRECISION,
     target_sc_voltage_v DOUBLE PRECISION,
@@ -88,6 +90,15 @@ CREATE TABLE IF NOT EXISTS iv_prediction_batches (
     filters JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_batches ADD COLUMN target_let_bragg_peak DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_batches ADD COLUMN target_range_um DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_iv_prediction_batches_model
     ON iv_prediction_batches(model_run_id);
@@ -118,6 +129,9 @@ CREATE TABLE IF NOT EXISTS iv_prediction_points (
     predicted_post_i_drain DOUBLE PRECISION,
     predicted_post_i_drain_p10 DOUBLE PRECISION,
     predicted_post_i_drain_p90 DOUBLE PRECISION,
+    raw_predicted_post_i_drain DOUBLE PRECISION,
+    raw_predicted_post_i_drain_p10 DOUBLE PRECISION,
+    raw_predicted_post_i_drain_p90 DOUBLE PRECISION,
     predicted_delta_slog_i_drain DOUBLE PRECISION,
     target_stress_type TEXT NOT NULL CHECK (target_stress_type IN ('sc', 'irradiation')),
     target_condition_label TEXT,
@@ -125,15 +139,73 @@ CREATE TABLE IF NOT EXISTS iv_prediction_points (
     target_ion_species TEXT,
     target_beam_energy_mev DOUBLE PRECISION,
     target_let_surface DOUBLE PRECISION,
+    target_let_bragg_peak DOUBLE PRECISION,
+    target_range_um DOUBLE PRECISION,
     target_beam_type TEXT,
     target_fluence_at_meas DOUBLE PRECISION,
     target_sc_voltage_v DOUBLE PRECISION,
     target_sc_duration_us DOUBLE PRECISION,
     target_sc_condition_label TEXT,
+    donor_pair_keys TEXT[],
+    donor_count INTEGER,
+    donor_distance DOUBLE PRECISION,
+    support_status TEXT,
+    support_fraction DOUBLE PRECISION,
+    donor_shape_distance DOUBLE PRECISION,
+    uncertainty_reason TEXT,
     prediction_status TEXT NOT NULL DEFAULT 'ok',
     physics_flags TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN target_let_bragg_peak DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN target_range_um DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN donor_pair_keys TEXT[];
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN donor_count INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN donor_distance DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN raw_predicted_post_i_drain DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN raw_predicted_post_i_drain_p10 DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN raw_predicted_post_i_drain_p90 DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN support_status TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN support_fraction DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN donor_shape_distance DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_prediction_points ADD COLUMN uncertainty_reason TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_iv_prediction_points_batch
     ON iv_prediction_points(batch_id);
@@ -143,6 +215,8 @@ CREATE INDEX IF NOT EXISTS idx_iv_prediction_points_device
     ON iv_prediction_points(device_type, device_id);
 CREATE INDEX IF NOT EXISTS idx_iv_prediction_points_category
     ON iv_prediction_points(measurement_category);
+CREATE INDEX IF NOT EXISTS idx_iv_prediction_points_target
+    ON iv_prediction_points(target_stress_type, target_condition_label);
 
 CREATE TABLE IF NOT EXISTS iv_prediction_validation_residuals (
     id BIGSERIAL PRIMARY KEY,

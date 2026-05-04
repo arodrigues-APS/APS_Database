@@ -964,13 +964,91 @@ GROUP BY
         ELSE NULL
     END;
 
+-- Shared pristine pool: per-device binned measurements across all pristine sources.
+-- Covers standalone baselines, irradiation pre-measurements (irrad_role='pre_irrad'),
+-- and SC/avalanche pre-stress rows (test_condition='pristine').
+-- is_likely_irradiated enforced here so all downstream consumers get clean data.
+-- Source columns are NOT in GROUP BY: multiple pristine sources for the same
+-- device+bin merge into one averaged row, preventing double-counting in box plots.
+CREATE VIEW pristine_per_device AS
+SELECT
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_category,
+    STRING_AGG(DISTINCT md.data_source, ',') AS sources,
+    CASE
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+    END AS v_gate_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)::double precision
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
+        ELSE NULL
+    END AS v_drain_bin,
+    AVG(m.i_drain)               AS dev_avg_i_drain,
+    AVG(m.i_gate)                AS dev_avg_i_gate,
+    AVG(ABS(m.i_drain))          AS dev_avg_abs_i_drain,
+    AVG(ABS(m.i_gate))           AS dev_avg_abs_i_gate,
+    COUNT(*)                     AS dev_n_points,
+    COUNT(DISTINCT md.id)        AS dev_n_runs
+FROM baselines_measurements m
+JOIN baselines_metadata md ON m.metadata_id = md.id
+LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
+WHERE md.device_type IS NOT NULL
+  AND NOT md.is_likely_irradiated
+  AND (
+        ((md.data_source IS NULL OR md.data_source = 'baselines')
+         AND md.irrad_role IS NULL
+         AND md.test_condition IS NULL)
+     OR md.irrad_role = 'pre_irrad'
+     OR md.test_condition = 'pristine'
+  )
+  AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
+  AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
+  AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
+  AND (m.i_gate IS NULL OR ABS(m.i_gate) < 1e30)
+  AND (m.i_drain IS NULL
+       OR rmc.max_abs_i_drain IS NULL
+       OR ABS(m.i_drain) < 0.99 * rmc.max_abs_i_drain)
+GROUP BY
+    md.device_id,
+    md.device_type,
+    md.manufacturer,
+    md.measurement_category,
+    CASE
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+    END,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 1)::double precision
+        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+        THEN ROUND(m.v_drain::numeric, 2)::double precision
+        ELSE NULL
+    END;
+
 -- Averaged device performance view: pre-aggregated per voltage bin.
 -- Used by the "Baselines Device Library" dashboard to show mean ± spread
 -- for each device_type / measurement_category, averaged across all runs.
 --
--- Reads from baselines_per_device (Stage 1) and averages across devices
+-- Reads from pristine_per_device (Stage 1) and averages across devices
 -- (Stage 2).  Without this two-stage aggregation, multi-file devices are
 -- over-represented and distort the group mean.
+-- is_likely_irradiated is omitted: pristine_per_device enforces NOT
+-- is_likely_irradiated in its WHERE clause, so all rows here are pristine.
 CREATE VIEW baselines_device_averages AS
 SELECT
     sub.*,
@@ -993,7 +1071,6 @@ FROM (
         device_type,
         manufacturer,
         measurement_category,
-        is_likely_irradiated,
         v_gate_bin,
         v_drain_bin,
         AVG(dev_avg_i_drain)               AS avg_i_drain,
@@ -1009,12 +1086,11 @@ FROM (
         SUM(dev_n_points)                  AS n_points,
         COUNT(*)                           AS n_devices,
         SUM(dev_n_runs)                    AS n_runs
-    FROM baselines_per_device
+    FROM pristine_per_device
     GROUP BY
         device_type,
         manufacturer,
         measurement_category,
-        is_likely_irradiated,
         v_gate_bin,
         v_drain_bin
 ) sub;
@@ -1045,6 +1121,7 @@ def main():
     if REBUILD:
         print("Dropping existing baseline tables...")
         cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
+        cur.execute("DROP VIEW IF EXISTS pristine_per_device CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")
@@ -1055,6 +1132,7 @@ def main():
 
     # Drop views before (re)creating – views are derived and safe to recreate
     cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
+    cur.execute("DROP VIEW IF EXISTS pristine_per_device CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")

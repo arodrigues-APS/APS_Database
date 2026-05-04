@@ -23,7 +23,7 @@ Tabs:
   4. Cross-Campaign          – compare degradation across ion species
   5. Individual Runs         – per-file curves with full metadata
 
-Filters (11 total; 8 cascading metadata filters + 3 waveform event filters):
+Filters (13 total; 10 metadata/IV filters + 3 waveform event filters):
   1. Ion Species             – proton / Au / Ca / etc.
   2. Beam Energy (MeV)       – cascades from Ion Species
   3. Beam Type               – broad_beam / micro_beam
@@ -32,9 +32,11 @@ Filters (11 total; 8 cascading metadata filters + 3 waveform event filters):
   6. Device Type             – cascades from Manufacturer
   7. Test Condition          – pre_irrad / post_irrad
   8. Measurement Category    – IdVg, IdVd, Blocking, etc.
-  9. SEB Detected            – Waveform Viewer only
- 10. SELC-I Detected         – Waveform Viewer only
- 11. SELC-II Detected        – Waveform Viewer only
+  9. V_Drain Bias (V)        – range slider; IdVg / Subthreshold charts only
+ 10. V_Gate Bias (V)         – range slider; IdVd / Blocking charts only
+ 11. SEB Detected            – Waveform Viewer only
+ 12. SELC-I Detected         – Waveform Viewer only
+ 13. SELC-II Detected        – Waveform Viewer only
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -120,8 +122,15 @@ def build_dashboard_layout(tab_defs):
 
 def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                          overview_ds_id=None, waveform_ds_id=None,
-                         event_let_ds_id=None, waveform_chart_ids=None):
-    """Build native filters for the Irradiation dashboard."""
+                         event_let_ds_id=None, waveform_chart_ids=None,
+                         v_drain_chart_ids=None, v_gate_chart_ids=None):
+    """Build native filters for the Irradiation dashboard.
+
+    *v_drain_chart_ids* — charts where v_drain_plot_bin is the BIAS (IdVg /
+    Subthreshold / Vth).  These are scoped to the V_Drain Bias range slider.
+    *v_gate_chart_ids*  — charts where v_gate_plot_bin is the BIAS (IdVd /
+    Blocking).  Scoped to the V_Gate Bias range slider.
+    """
     ion_fid  = "NATIVE_FILTER-irrad-ion-species"
     nrg_fid  = "NATIVE_FILTER-irrad-beam-energy"
     bt_fid   = "NATIVE_FILTER-irrad-beam-type"
@@ -130,9 +139,24 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
     dev_fid  = "NATIVE_FILTER-irrad-device-type"
     tc_fid   = "NATIVE_FILTER-irrad-test-condition"
     cat_fid  = "NATIVE_FILTER-irrad-meas-category"
+    vd_fid   = "NATIVE_FILTER-irrad-v-drain-bias"
+    vg_fid   = "NATIVE_FILTER-irrad-v-gate-bias"
     seb_fid  = "NATIVE_FILTER-irrad-seb-detected"
     s1_fid   = "NATIVE_FILTER-irrad-selc-i-detected"
     s2_fid   = "NATIVE_FILTER-irrad-selc-ii-detected"
+
+    v_drain_chart_ids = v_drain_chart_ids or []
+    v_gate_chart_ids  = v_gate_chart_ids  or []
+    vd_excluded = [c for c in all_chart_ids if c not in v_drain_chart_ids]
+    vg_excluded = [c for c in all_chart_ids if c not in v_gate_chart_ids]
+
+    # Bias range filters target IV datasets only (not overview / waveform)
+    def bias_targets(col):
+        targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
+        if degrad_ds_id:
+            targets.append({"datasetId": degrad_ds_id,
+                            "column": {"name": col}})
+        return targets
 
     def multi_targets(col):
         targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
@@ -225,6 +249,54 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                              "column": {"name": "measurement_category"}}]
                            if degrad_ds_id else [])
                     )),
+
+        # 9. V_Drain Bias — range slider for IdVg / Subthreshold / Vth charts
+        {
+            "id": vd_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Drain Bias (V) → IdVg, Subthreshold",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_drain_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vd_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVg / Subthreshold charts to a specific "
+                           "drain bias range (V)",
+            "chartsInScope": v_drain_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN ('IdVg', 'Vth', 'Subthreshold')",
+                "clause": "WHERE",
+            }],
+        },
+
+        # 10. V_Gate Bias — range slider for IdVd / Blocking charts
+        {
+            "id": vg_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Gate Bias (V) → IdVd, Blocking",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_gate_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vg_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVd / Blocking charts to a specific "
+                           "gate bias range (V)",
+            "chartsInScope": v_gate_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN ('IdVd', 'Blocking')",
+                "clause": "WHERE",
+            }],
+        },
     ]
 
     if waveform_ds_id:
@@ -1099,6 +1171,24 @@ def main():
     tab4_info = create_tab_charts(tab4_chart_defs)
     tab5_info = create_tab_charts(tab5_chart_defs)
 
+    # Resolve bias-filter chart scopes by chart name (robust to reordering)
+    def named_cid(info, name):
+        return next((c[0] for c in info if c[2] == name), None)
+
+    v_drain_chart_ids = list(filter(None, [
+        named_cid(tab2_info, "Irrad – IdVg Transfer Curves"),
+        named_cid(tab2_info, "Irrad – Subthreshold Curves"),
+        named_cid(tab4_info, "Irrad – IdVg Shift by Ion Species"),
+        named_cid(tab5_info, "Irrad – IdVg (Individual Runs)"),
+    ]))
+    v_gate_chart_ids = list(filter(None, [
+        named_cid(tab2_info, "Irrad – IdVd Output Curves"),
+        named_cid(tab2_info, "Irrad – Blocking Characteristics"),
+        named_cid(tab4_info, "Irrad – Blocking by Ion Species"),
+        named_cid(tab5_info, "Irrad – IdVd (Individual Runs)"),
+        named_cid(tab5_info, "Irrad – Blocking (Individual Runs)"),
+    ]))
+
     # 5. Build dashboard
     print("\n5. Building dashboard layout...")
 
@@ -1121,6 +1211,8 @@ def main():
         waveform_ds_id=waveform_ds,
         event_let_ds_id=event_let_ds,
         waveform_chart_ids=waveform_chart_ids,
+        v_drain_chart_ids=v_drain_chart_ids,
+        v_gate_chart_ids=v_gate_chart_ids,
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
 
@@ -1160,9 +1252,11 @@ def main():
         print("    6. Device Type           (cascades from Manufacturer)")
         print("    7. Test Condition        (pre_irrad / post_irrad)")
         print("    8. Measurement Category  (IdVg, IdVd, Blocking, etc.)")
-        print("    9. SEB Detected          (Waveform Viewer)")
-        print("   10. SELC-I Detected       (Waveform Viewer)")
-        print("   11. SELC-II Detected      (Waveform Viewer)")
+        print(f"   9. V_Drain Bias (V)      (range; {len(v_drain_chart_ids)} charts)")
+        print(f"  10. V_Gate Bias (V)       (range; {len(v_gate_chart_ids)} charts)")
+        print("   11. SEB Detected          (Waveform Viewer)")
+        print("   12. SELC-I Detected       (Waveform Viewer)")
+        print("   13. SELC-II Detected      (Waveform Viewer)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

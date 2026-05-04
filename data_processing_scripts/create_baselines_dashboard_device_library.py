@@ -80,8 +80,8 @@ CALCULATED_PARAMS_SQL = """WITH
    This avoids artefacts caused by computing parameters on group-averaged
    curves where the device population can change between voltage bins.
 
-   NOTE: All CTEs filter on NOT is_likely_irradiated so that calculated
-   parameters reflect pristine device characteristics only.
+   NOTE: pristine_per_device enforces NOT is_likely_irradiated in its
+   WHERE clause, so all CTEs here operate on pristine devices only.
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── STEP 1: Discover per-device test conditions ─────────────────────── */
@@ -91,11 +91,9 @@ idvd_dev_bias AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_gate_bin)  AS max_vgs,
            MAX(v_drain_bin) AS max_vds
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'IdVd'
-      AND dev_avg_i_drain > 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain > 0    GROUP BY device_id, device_type, manufacturer
 ),
 
 -- Highest Vds and Vgs per device in IdVg sweep (for gfs, Id_on)
@@ -103,11 +101,9 @@ idvg_dev_bias AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_drain_bin) AS max_vds,
            MAX(v_gate_bin)  AS max_vgs
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'IdVg'
-      AND dev_avg_i_drain > 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain > 0    GROUP BY device_id, device_type, manufacturer
 ),
 
 -- Anchor Vgs for body-diode Vsd extraction: LEAST negative Vgs bin
@@ -116,21 +112,17 @@ idvg_dev_bias AS (
 q3_dev_anchor AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_gate_bin) AS anchor_vgs
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = '3rd_Quadrant'
-      AND dev_avg_i_drain < 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain < 0    GROUP BY device_id, device_type, manufacturer
 ),
 
 -- Highest Vgs per device in Igss sweep (for Igss)
 igss_dev_bias AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_gate_bin) AS max_vgs
-    FROM baselines_per_device
-    WHERE measurement_category = 'Igss'
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+    FROM pristine_per_device
+    WHERE measurement_category = 'Igss'    GROUP BY device_id, device_type, manufacturer
 ),
 
 /* ── STEP 2: Calculate each parameter per device ─────────────────────── */
@@ -145,23 +137,19 @@ igss_dev_bias AS (
 vth_dev_peak AS (
     SELECT device_id, device_type, manufacturer,
            GREATEST(0.005, MAX(dev_avg_i_drain) * 0.01) AS i_thresh
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Vth'
-      AND dev_avg_i_drain > 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain > 0    GROUP BY device_id, device_type, manufacturer
 ),
 vth_dev_crossing AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            b.v_drain_bin,
            MIN(b.v_gate_bin) AS vth_v,
            t.i_thresh
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN vth_dev_peak t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'Vth'
-      AND b.dev_avg_i_drain >= t.i_thresh
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer,
+      AND b.dev_avg_i_drain >= t.i_thresh    GROUP BY b.device_id, b.device_type, b.manufacturer,
              b.v_drain_bin, t.i_thresh
 ),
 vth_dev_min_vds AS (
@@ -205,15 +193,13 @@ rdson_per_device AS (
                NULLIF(SUM(b.v_drain_bin * b.dev_avg_i_drain), 0)
                * 1000.0 AS rdson_mohm,
            m.max_vgs     AS rdson_test_vgs
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN idvd_dev_bias m USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'IdVd'
       AND b.v_gate_bin  BETWEEN m.max_vgs - 1.0 AND m.max_vgs + 1.0
       AND b.v_drain_bin >  0.0
       AND b.v_drain_bin <= LEAST(m.max_vds * 0.15, 2.0)
-      AND b.dev_avg_i_drain > 0.0
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer, m.max_vgs
+      AND b.dev_avg_i_drain > 0.0    GROUP BY b.device_id, b.device_type, b.manufacturer, m.max_vgs
 ),
 rdson_vals AS (
     SELECT device_type, manufacturer,
@@ -238,12 +224,10 @@ igss_per_device AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            MAX(b.dev_avg_abs_i_gate) * 1.0e9 AS igss_max_na,
            m.max_vgs                          AS igss_test_vgs
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN igss_dev_bias m USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'Igss'
-      AND b.v_gate_bin >= m.max_vgs - 1.0
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer, m.max_vgs
+      AND b.v_gate_bin >= m.max_vgs - 1.0    GROUP BY b.device_id, b.device_type, b.manufacturer, m.max_vgs
 ),
 igss_vals AS (
     SELECT device_type, manufacturer,
@@ -274,12 +258,10 @@ vsd_dev_target AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            a.anchor_vgs,
            MIN(b.dev_avg_i_drain) * 0.1 AS target_id
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN q3_dev_anchor a USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
-      AND b.dev_avg_i_drain < 0
-      AND NOT b.is_likely_irradiated
-      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
+      AND b.dev_avg_i_drain < 0      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
     GROUP BY b.device_id, b.device_type, b.manufacturer, a.anchor_vgs
     HAVING ABS(MIN(b.dev_avg_i_drain)) >= 0.010
 ),
@@ -292,13 +274,11 @@ vsd_dev_ranked AS (
                PARTITION BY b.device_id, b.device_type, b.manufacturer
                ORDER BY ABS(b.dev_avg_i_drain - t.target_id) ASC
            ) AS rn
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN vsd_dev_target t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
       AND b.v_gate_bin BETWEEN t.anchor_vgs - 0.5 AND t.anchor_vgs + 0.5
-      AND b.dev_avg_i_drain < 0
-      AND NOT b.is_likely_irradiated
-),
+      AND b.dev_avg_i_drain < 0),
 vsd_per_device AS (
     SELECT device_id, device_type, manufacturer,
            vsd_v, vsd_test_vgs, vsd_ref_id_a
@@ -343,12 +323,10 @@ gfs_dev_pts AS (
                  ),
                0
            ) AS gfs_point
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN idvg_dev_bias m USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'IdVg'
-      AND b.v_drain_bin BETWEEN m.max_vds - 1.0 AND m.max_vds + 1.0
-      AND NOT b.is_likely_irradiated
-),
+      AND b.v_drain_bin BETWEEN m.max_vds - 1.0 AND m.max_vds + 1.0),
 gfs_dev_ranked AS (
     SELECT device_id, device_type, manufacturer,
            v_gate_bin, gfs_test_vds, gfs_point,
@@ -402,11 +380,9 @@ ss_dev_pts AS (
                PARTITION BY device_id, device_type, manufacturer
                ORDER BY v_gate_bin
            )                                    AS lag_vgs
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Vth'
-      AND dev_avg_abs_i_drain BETWEEN 1e-9 AND 1e-3
-      AND NOT is_likely_irradiated
-),
+      AND dev_avg_abs_i_drain BETWEEN 1e-9 AND 1e-3),
 ss_per_device AS (
     SELECT device_id, device_type, manufacturer,
            MIN(
@@ -445,13 +421,11 @@ idon_per_device AS (
            MAX(b.dev_avg_i_drain) AS id_on_a,
            m.max_vds              AS id_on_test_vds,
            m.max_vgs              AS id_on_test_vgs
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN idvg_dev_bias m USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'IdVg'
       AND b.v_drain_bin BETWEEN m.max_vds - 1.0 AND m.max_vds + 1.0
-      AND b.v_gate_bin  BETWEEN m.max_vgs - 0.5 AND m.max_vgs + 0.5
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer,
+      AND b.v_gate_bin  BETWEEN m.max_vgs - 0.5 AND m.max_vgs + 0.5    GROUP BY b.device_id, b.device_type, b.manufacturer,
              m.max_vds, m.max_vgs
 ),
 idon_vals AS (
@@ -480,22 +454,18 @@ bvdss_dev_crossed AS (
     SELECT device_id, device_type, manufacturer,
            MIN(v_drain_bin)  AS bvdss_v,
            'breakdown'       AS bvdss_flag
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Blocking'
       AND v_gate_bin BETWEEN -1.0 AND 1.0
-      AND dev_avg_abs_i_drain >= 100e-6
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_abs_i_drain >= 100e-6    GROUP BY device_id, device_type, manufacturer
 ),
 bvdss_dev_held AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_drain_bin)          AS bvdss_v,
            'held (>= max tested)'   AS bvdss_flag
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Blocking'
-      AND v_gate_bin BETWEEN -1.0 AND 1.0
-      AND NOT is_likely_irradiated
-      AND (device_id, device_type, manufacturer) NOT IN (
+      AND v_gate_bin BETWEEN -1.0 AND 1.0      AND (device_id, device_type, manufacturer) NOT IN (
           SELECT device_id, device_type, manufacturer
           FROM bvdss_dev_crossed
       )
@@ -546,11 +516,9 @@ idss_dev_pts AS (
            MAX(v_drain_bin) OVER (
                PARTITION BY device_id, device_type, manufacturer
            ) AS max_vd
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Blocking'
-      AND v_gate_bin BETWEEN -1.0 AND 1.0
-      AND NOT is_likely_irradiated
-),
+      AND v_gate_bin BETWEEN -1.0 AND 1.0),
 idss_per_device AS (
     SELECT device_id, device_type, manufacturer,
            AVG(dev_avg_abs_i_drain) * 1.0e6 AS idss_ua,
@@ -680,44 +648,36 @@ idvd_dev_bias AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_gate_bin)  AS max_vgs,
            MAX(v_drain_bin) AS max_vds
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'IdVd'
-      AND dev_avg_i_drain > 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain > 0    GROUP BY device_id, device_type, manufacturer
 ),
 q3_dev_anchor AS (
     -- Body-diode VGS anchor: least-negative bin where Id<0.  See
     -- device_calculated_params for full reasoning.
     SELECT device_id, device_type, manufacturer,
            MAX(v_gate_bin) AS anchor_vgs
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = '3rd_Quadrant'
-      AND dev_avg_i_drain < 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain < 0    GROUP BY device_id, device_type, manufacturer
 ),
 
 /* ── Vth per device ────────────────────────────────────────────────────── */
 vth_dev_peak AS (
     SELECT device_id, device_type, manufacturer,
            GREATEST(0.005, MAX(dev_avg_i_drain) * 0.01) AS i_thresh
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Vth'
-      AND dev_avg_i_drain > 0
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_i_drain > 0    GROUP BY device_id, device_type, manufacturer
 ),
 vth_dev_crossing AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            b.v_drain_bin,
            MIN(b.v_gate_bin) AS vth_v
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN vth_dev_peak t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'Vth'
-      AND b.dev_avg_i_drain >= t.i_thresh
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer, b.v_drain_bin
+      AND b.dev_avg_i_drain >= t.i_thresh    GROUP BY b.device_id, b.device_type, b.manufacturer, b.v_drain_bin
 ),
 vth_dev_min_vds AS (
     SELECT device_id, device_type, manufacturer,
@@ -739,15 +699,13 @@ rdson_per_device AS (
            SUM(b.v_drain_bin * b.v_drain_bin) /
                NULLIF(SUM(b.v_drain_bin * b.dev_avg_i_drain), 0)
                * 1000.0 AS rdson_mohm
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN idvd_dev_bias m USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = 'IdVd'
       AND b.v_gate_bin  BETWEEN m.max_vgs - 1.0 AND m.max_vgs + 1.0
       AND b.v_drain_bin >  0.0
       AND b.v_drain_bin <= LEAST(m.max_vds * 0.15, 2.0)
-      AND b.dev_avg_i_drain > 0.0
-      AND NOT b.is_likely_irradiated
-    GROUP BY b.device_id, b.device_type, b.manufacturer
+      AND b.dev_avg_i_drain > 0.0    GROUP BY b.device_id, b.device_type, b.manufacturer
 ),
 
 /* ── Vsd (body diode forward voltage) per device ───────────────────────── */
@@ -757,12 +715,10 @@ vsd_dev_target AS (
     SELECT b.device_id, b.device_type, b.manufacturer,
            a.anchor_vgs,
            MIN(b.dev_avg_i_drain) * 0.1 AS target_id
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN q3_dev_anchor a USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
-      AND b.dev_avg_i_drain < 0
-      AND NOT b.is_likely_irradiated
-      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
+      AND b.dev_avg_i_drain < 0      AND b.v_gate_bin BETWEEN a.anchor_vgs - 0.5 AND a.anchor_vgs + 0.5
     GROUP BY b.device_id, b.device_type, b.manufacturer, a.anchor_vgs
     HAVING ABS(MIN(b.dev_avg_i_drain)) >= 0.010
 ),
@@ -773,13 +729,11 @@ vsd_dev_ranked AS (
                PARTITION BY b.device_id, b.device_type, b.manufacturer
                ORDER BY ABS(b.dev_avg_i_drain - t.target_id) ASC
            ) AS rn
-    FROM baselines_per_device b
+    FROM pristine_per_device b
     JOIN vsd_dev_target t USING (device_id, device_type, manufacturer)
     WHERE b.measurement_category = '3rd_Quadrant'
       AND b.v_gate_bin BETWEEN t.anchor_vgs - 0.5 AND t.anchor_vgs + 0.5
-      AND b.dev_avg_i_drain < 0
-      AND NOT b.is_likely_irradiated
-),
+      AND b.dev_avg_i_drain < 0),
 vsd_per_device AS (
     SELECT device_id, device_type, manufacturer, vsd_v
     FROM vsd_dev_ranked WHERE rn = 1
@@ -789,21 +743,17 @@ vsd_per_device AS (
 bvdss_dev_crossed AS (
     SELECT device_id, device_type, manufacturer,
            MIN(v_drain_bin) AS bvdss_v
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Blocking'
       AND v_gate_bin BETWEEN -1.0 AND 1.0
-      AND dev_avg_abs_i_drain >= 100e-6
-      AND NOT is_likely_irradiated
-    GROUP BY device_id, device_type, manufacturer
+      AND dev_avg_abs_i_drain >= 100e-6    GROUP BY device_id, device_type, manufacturer
 ),
 bvdss_dev_held AS (
     SELECT device_id, device_type, manufacturer,
            MAX(v_drain_bin) AS bvdss_v
-    FROM baselines_per_device
+    FROM pristine_per_device
     WHERE measurement_category = 'Blocking'
-      AND v_gate_bin BETWEEN -1.0 AND 1.0
-      AND NOT is_likely_irradiated
-      AND (device_id, device_type, manufacturer) NOT IN (
+      AND v_gate_bin BETWEEN -1.0 AND 1.0      AND (device_id, device_type, manufacturer) NOT IN (
           SELECT device_id, device_type, manufacturer
           FROM bvdss_dev_crossed
       )
@@ -1159,11 +1109,9 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
             },
             "name": "Likely Irradiated",
             "filterType": "filter_select",
-            "targets": [{"datasetId": avg_ds_id,
-                         "column": {"name": "is_likely_irradiated"}}]
-                       + ([{"datasetId": indiv_ds_id,
-                            "column": {"name": "is_likely_irradiated"}}]
-                          if indiv_ds_id else [])
+            "targets": ([{"datasetId": indiv_ds_id,
+                          "column": {"name": "is_likely_irradiated"}}]
+                        if indiv_ds_id else [])
                        + ([{"datasetId": meta_ds_id,
                             "column": {"name": "is_likely_irradiated"}}]
                           if meta_ds_id else []),
@@ -2082,8 +2030,8 @@ def main():
     # always_excluded: charts with no device_type/manufacturer columns
     # (excluded from Manufacturer + Device Type filters)
     always_excluded = [c for c in [devlib_chart_id, calc_chart_id] if c]
-    # irrad_excluded: additionally includes box plots whose virtual dataset
-    # has no is_likely_irradiated column (already pristine-only by SQL)
+    # irrad_excluded: additionally includes box plots and avg charts whose
+    # datasets have no is_likely_irradiated column (enforced by pristine_per_device)
     irrad_excluded = [c for c in [devlib_chart_id, calc_chart_id]
                       + boxplot_chart_ids if c]
 
