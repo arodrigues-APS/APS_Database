@@ -26,6 +26,8 @@ Filters (cascading):
   5. SC Condition Label       – optional multi-select
   6. Measurement Category     – optional multi-select
   7. SC Degraded              – boolean filter
+  8. V_Drain Bias (V)         – range slider; IdVg / Subthreshold charts only
+  9. V_Gate Bias (V)          – range slider; IdVd / Blocking charts only
 
 Usage:
     source /tmp/aps_venv/bin/activate
@@ -110,8 +112,15 @@ def build_dashboard_layout(tab_defs):
 # ── Native Filters ───────────────────────────────────────────────────────────
 
 def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
-                         degradation_ds_id=None):
-    """Build 7 cascading native filters for the SC dashboard."""
+                         degradation_ds_id=None,
+                         v_drain_chart_ids=None, v_gate_chart_ids=None):
+    """Build 9 cascading native filters for the SC dashboard.
+
+    *v_drain_chart_ids* — charts where v_drain_plot_bin is the BIAS (IdVg /
+    Subthreshold).  Scoped to the V_Drain Bias range slider.
+    *v_gate_chart_ids*  — charts where v_gate_plot_bin is the BIAS (IdVd /
+    Blocking / 3rd Quadrant / Body Diode).  Scoped to the V_Gate Bias slider.
+    """
     mfr_fid = "NATIVE_FILTER-sc-manufacturer"
     dev_fid = "NATIVE_FILTER-sc-device-type"
     sg_fid  = "NATIVE_FILTER-sc-sample-group"
@@ -119,6 +128,21 @@ def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
     scl_fid = "NATIVE_FILTER-sc-condition-label"
     cat_fid = "NATIVE_FILTER-sc-meas-category"
     deg_fid = "NATIVE_FILTER-sc-degraded"
+    vd_fid  = "NATIVE_FILTER-sc-v-drain-bias"
+    vg_fid  = "NATIVE_FILTER-sc-v-gate-bias"
+
+    v_drain_chart_ids = v_drain_chart_ids or []
+    v_gate_chart_ids  = v_gate_chart_ids  or []
+    vd_excluded = [c for c in all_chart_ids if c not in v_drain_chart_ids]
+    vg_excluded = [c for c in all_chart_ids if c not in v_gate_chart_ids]
+
+    # Bias range filters target IV datasets only (not waveform)
+    def bias_targets(col):
+        targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
+        if degradation_ds_id:
+            targets.append({"datasetId": degradation_ds_id,
+                            "column": {"name": col}})
+        return targets
 
     # Build targets for filters that span multiple datasets
     def multi_targets(col):
@@ -296,6 +320,55 @@ def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
             "chartsInScope": list(all_chart_ids),
             "tabsInScope": [],
         },
+
+        # 8. V_Drain Bias — range slider for IdVg / Subthreshold charts
+        {
+            "id": vd_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Drain Bias (V) → IdVg, Subthreshold",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_drain_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vd_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVg / Subthreshold charts to a specific "
+                           "drain bias range (V)",
+            "chartsInScope": v_drain_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN ('IdVg', 'Vth', 'Subthreshold')",
+                "clause": "WHERE",
+            }],
+        },
+
+        # 9. V_Gate Bias — range slider for IdVd / Blocking charts
+        {
+            "id": vg_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Gate Bias (V) → IdVd, Blocking",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_gate_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vg_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVd / Blocking / 3rd Quadrant charts to "
+                           "a specific gate bias range (V)",
+            "chartsInScope": v_gate_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN "
+                    "('IdVd', 'Blocking', '3rd_Quadrant', 'Bodydiode')",
+                "clause": "WHERE",
+            }],
+        },
     ]
     return filters
 
@@ -320,15 +393,18 @@ def sc_curve_params(x_axis, cat, x_title, y_title,
                     log_y=False, series_limit=50,
                     extra_groupby=None, extra_filters=None,
                     bias_col=None):
-    """Line-chart params for SC IV curves.
+    """Line-chart params for mean SC IV curves (Pre/Post tab).
 
-    Groups by the SC condition plus metadata_id / step_index so separate
-    physical sweeps are not stitched into one line.  If bias_col is given,
-    adds it as an additional groupby for multi-step sweeps.
+    Groups by device_type × sample_group × test_condition × sc_condition,
+    averaging all files of the same sample/condition together.  One mean
+    curve per sample × condition × bias level.  Individual Runs tab uses
+    its own inlined params that include device_id, metadata_id, and
+    step_index.  If bias_col is given, adds it as an additional groupby
+    to separate multi-step sweeps.
     """
     groupby = [
         "device_type", "sample_group", "test_condition",
-        "sc_condition_label", "metadata_id", "step_index",
+        "sc_condition_label",
     ]
     if bias_col:
         groupby.append({
@@ -953,6 +1029,26 @@ def main():
     tab3_info = create_tab_charts(tab3_chart_defs)
     tab4_info = create_tab_charts(tab4_chart_defs)
 
+    # Resolve bias-filter chart scopes by chart name (robust to reordering)
+    def named_cid(info, name):
+        return next((c[0] for c in info if c[2] == name), None)
+
+    v_drain_chart_ids = list(filter(None, [
+        named_cid(tab1_info, "SC – IdVg Transfer Curves"),
+        named_cid(tab1_info, "SC – Subthreshold Curves"),
+        named_cid(tab3_info, "SC – IdVg (Individual Runs)"),
+        named_cid(tab4_info, "SC – Avg |Id| by SC Condition (IdVg)"),
+    ]))
+    v_gate_chart_ids = list(filter(None, [
+        named_cid(tab1_info, "SC – IdVd Output Curves"),
+        named_cid(tab1_info, "SC – Blocking Characteristics"),
+        named_cid(tab1_info, "SC – 3rd Quadrant (Body Diode)"),
+        named_cid(tab1_info, "SC – Body Diode Curves"),
+        named_cid(tab3_info, "SC – IdVd (Individual Runs)"),
+        named_cid(tab3_info, "SC – Blocking (Individual Runs)"),
+        named_cid(tab4_info, "SC – Avg Id by SC Condition (IdVd)"),
+    ]))
+
     # 5. Build dashboard
     print("\n5. Building dashboard layout...")
 
@@ -971,6 +1067,8 @@ def main():
         all_chart_ids, main_ds,
         waveform_ds_id=waveform_ds,
         degradation_ds_id=degrad_ds,
+        v_drain_chart_ids=v_drain_chart_ids,
+        v_gate_chart_ids=v_gate_chart_ids,
     )
     json_metadata = build_json_metadata(all_chart_ids, native_filters)
 
@@ -1009,6 +1107,8 @@ def main():
         print("    5. SC Condition          (e.g. 600V_3us_Vgs15_minus4V)")
         print("    6. Measurement Category  (IdVg, IdVd, Blocking, etc.)")
         print("    7. SC Degraded           (boolean flag)")
+        print(f"   8. V_Drain Bias (V)      (range; {len(v_drain_chart_ids)} charts)")
+        print(f"   9. V_Gate Bias (V)       (range; {len(v_gate_chart_ids)} charts)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

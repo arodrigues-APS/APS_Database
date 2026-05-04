@@ -348,14 +348,15 @@ def irrad_curve_params(x_axis, cat, x_title, y_title,
                        metric_label="I_Drain (A)",
                        log_y=False, series_limit=50,
                        bias_col=None):
-    """Line-chart params for irradiation IV curves.
+    """Line-chart params for mean irradiation IV curves (Pre/Post tab).
 
-    Groups by the irradiation condition plus metadata_id / step_index so
-    separate physical sweeps are not stitched into one line.  If bias_col is
-    given, adds it as an additional groupby for multi-step sweeps.
+    Groups by device_type × test_condition × irrad_condition, averaging
+    across all devices and files.  One mean curve per condition/bias level.
+    Individual Runs tab uses its own inlined params that include device_id,
+    metadata_id, and step_index.  If bias_col is given, adds it as an
+    additional groupby to separate multi-step sweeps.
     """
-    groupby = ["device_type", "device_id", "test_condition",
-               "irrad_condition_label", "metadata_id", "step_index"]
+    groupby = ["device_type", "test_condition", "irrad_condition_label"]
     if bias_col:
         groupby.append({
             "expressionType": "SQL",
