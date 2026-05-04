@@ -27,7 +27,7 @@ Filters (cascading):
   6. Measurement Category     – optional multi-select
   7. SC Degraded              – boolean filter
   8. V_Drain Bias (V)         – range slider; IdVg / Subthreshold charts only
-  9. V_Gate Bias (V)          – range slider; IdVd / Blocking charts only
+  9. V_Gate Bias (V)          – range slider; IdVd / 3rd Quadrant / Bodydiode charts only
 
 Usage:
     source /tmp/aps_venv/bin/activate
@@ -119,7 +119,7 @@ def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
     *v_drain_chart_ids* — charts where v_drain_plot_bin is the BIAS (IdVg /
     Subthreshold).  Scoped to the V_Drain Bias range slider.
     *v_gate_chart_ids*  — charts where v_gate_plot_bin is the BIAS (IdVd /
-    Blocking / 3rd Quadrant / Body Diode).  Scoped to the V_Gate Bias slider.
+    3rd Quadrant / Body Diode).  Scoped to the V_Gate Bias slider.
     """
     mfr_fid = "NATIVE_FILTER-sc-manufacturer"
     dev_fid = "NATIVE_FILTER-sc-device-type"
@@ -345,11 +345,11 @@ def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
             }],
         },
 
-        # 9. V_Gate Bias — range slider for IdVd / Blocking charts
+        # 9. V_Gate Bias — range slider for IdVd / 3rd Quadrant charts
         {
             "id": vg_fid,
             "controlValues": {"enableEmptyFilter": False},
-            "name": "V_Gate Bias (V) → IdVd, Blocking",
+            "name": "V_Gate Bias (V) → IdVd, 3rd Quadrant",
             "filterType": "filter_range",
             "targets": bias_targets("v_gate_plot_bin"),
             "defaultDataMask": {"extraFormData": {},
@@ -357,15 +357,15 @@ def build_native_filters(all_chart_ids, main_ds_id, waveform_ds_id=None,
             "cascadeParentIds": [dev_fid],
             "scope": {"rootPath": ["ROOT_ID"], "excluded": vg_excluded},
             "type": "NATIVE_FILTER",
-            "description": "Restrict IdVd / Blocking / 3rd Quadrant charts to "
-                           "a specific gate bias range (V)",
+            "description": "Restrict IdVd / 3rd Quadrant / Body Diode charts to "
+                            "a specific gate bias range (V)",
             "chartsInScope": v_gate_chart_ids,
             "tabsInScope": [],
             "adhoc_filters": [{
                 "expressionType": "SQL",
                 "sqlExpression":
                     "measurement_category IN "
-                    "('IdVd', 'Blocking', '3rd_Quadrant', 'Bodydiode')",
+                    "('IdVd', '3rd_Quadrant', 'Bodydiode')",
                 "clause": "WHERE",
             }],
         },
@@ -595,24 +595,7 @@ def main():
             12, 60,
         ),
 
-        # 3 – Blocking Characteristics
-        (
-            "SC – Blocking Characteristics",
-            main_ds,
-            "echarts_timeseries_line",
-            sc_curve_params(
-                x_axis="v_drain_plot_bin",
-                cat="Blocking",
-                x_title="V_Drain (V)",
-                y_title="|I_Drain| (A)",
-                metric_expr="AVG(ABS(i_drain))",
-                metric_label="|I_Drain| (A)",
-                log_y=True,
-            ),
-            12, 60,
-        ),
-
-        # 4 – 3rd Quadrant
+        # 3 – 3rd Quadrant
         (
             "SC – 3rd Quadrant (Body Diode)",
             main_ds,
@@ -627,7 +610,7 @@ def main():
             12, 60,
         ),
 
-        # 5 – Gate Leakage (Igss) — log Y
+        # 4 – Gate Leakage (Igss) — log Y
         (
             "SC – Gate Leakage (Igss)",
             main_ds,
@@ -644,7 +627,7 @@ def main():
             12, 60,
         ),
 
-        # 6 – Subthreshold Curves (log Y)
+        # 5 – Subthreshold Curves (log Y)
         (
             "SC – Subthreshold Curves",
             main_ds,
@@ -662,7 +645,7 @@ def main():
             12, 60,
         ),
 
-        # 7 – Body Diode Curves
+        # 6 – Body Diode Curves
         (
             "SC – Body Diode Curves",
             main_ds,
@@ -832,48 +815,6 @@ def main():
             12, 60,
         ),
 
-        # 3 – Individual Blocking curves
-        (
-            "SC – Blocking (Individual Runs)",
-            main_ds,
-            "echarts_timeseries_line",
-            {
-                "x_axis": "v_drain_plot_bin",
-                "time_grain_sqla": None,
-                "x_axis_sort_asc": True,
-                "metrics": [{
-                    "expressionType": "SQL",
-                    "sqlExpression": "AVG(ABS(i_drain))",
-                    "label": "|I_Drain| (A)",
-                }],
-                "groupby": ["device_id", "measurement_type", "metadata_id",
-                            "step_index", "test_condition",
-                            "sc_condition_label"],
-                "adhoc_filters": [cat_filter("Blocking")],
-                "row_limit": 100000,
-                "truncate_metric": True,
-                "show_legend": True,
-                "legendType": "scroll",
-                "rich_tooltip": True,
-                "x_axis_title": "V_Drain (V)",
-                "y_axis_title": "|I_Drain| (A)",
-                "y_axis_format": "SMART_NUMBER",
-                "truncateYAxis": False,
-                "y_axis_bounds": [None, None],
-                "tooltipTimeFormat": "smart_date",
-                "markerEnabled": False,
-                "connectNulls": True,
-                "zoomable": True,
-                "logAxis": "y",
-                "series_limit": 50,
-                "series_limit_metric": {
-                    "expressionType": "SQL",
-                    "sqlExpression": "COUNT(DISTINCT v_drain_plot_bin)",
-                    "label": "_rank_by_sweep_range",
-                },
-            },
-            12, 60,
-        ),
     ]
 
     # ── Tab 4: Degradation Tracking ──────────────────────────────────────
@@ -1041,11 +982,9 @@ def main():
     ]))
     v_gate_chart_ids = list(filter(None, [
         named_cid(tab1_info, "SC – IdVd Output Curves"),
-        named_cid(tab1_info, "SC – Blocking Characteristics"),
         named_cid(tab1_info, "SC – 3rd Quadrant (Body Diode)"),
         named_cid(tab1_info, "SC – Body Diode Curves"),
         named_cid(tab3_info, "SC – IdVd (Individual Runs)"),
-        named_cid(tab3_info, "SC – Blocking (Individual Runs)"),
         named_cid(tab4_info, "SC – Avg Id by SC Condition (IdVd)"),
     ]))
 
