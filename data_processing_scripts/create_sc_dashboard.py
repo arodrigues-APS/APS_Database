@@ -387,6 +387,15 @@ def cat_filter(cat):
     }
 
 
+def source_rows_only_filter():
+    """Exclude synthetic shared-reference rows from individual-run charts."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": "COALESCE(is_shared_reference, FALSE) = FALSE",
+        "clause": "WHERE",
+    }
+
+
 def sc_curve_params(x_axis, cat, x_title, y_title,
                     metric_expr="AVG(i_drain)",
                     metric_label="I_Drain (A)",
@@ -724,6 +733,7 @@ def main():
                 ],
                 "all_columns": [],
                 "order_by_cols": [],
+                "adhoc_filters": [source_rows_only_filter()],
                 "row_limit": 10000,
                 "include_time": False,
                 "table_timestamp_format": "smart_date",
@@ -748,7 +758,10 @@ def main():
                 "groupby": ["device_id", "measurement_type", "metadata_id",
                             "step_index", "test_condition",
                             "sc_condition_label"],
-                "adhoc_filters": [cat_filter("IdVg")],
+                "adhoc_filters": [
+                    cat_filter("IdVg"),
+                    source_rows_only_filter(),
+                ],
                 "row_limit": 100000,
                 "truncate_metric": True,
                 "show_legend": True,
@@ -790,7 +803,10 @@ def main():
                 "groupby": ["device_id", "measurement_type", "metadata_id",
                             "step_index", "test_condition",
                             "sc_condition_label"],
-                "adhoc_filters": [cat_filter("IdVd")],
+                "adhoc_filters": [
+                    cat_filter("IdVd"),
+                    source_rows_only_filter(),
+                ],
                 "row_limit": 100000,
                 "truncate_metric": True,
                 "show_legend": True,

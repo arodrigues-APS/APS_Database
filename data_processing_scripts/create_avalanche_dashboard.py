@@ -362,6 +362,14 @@ def non_null_filter(col):
     }
 
 
+def source_rows_only_filter():
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": "COALESCE(is_shared_reference, FALSE) = FALSE",
+        "clause": "WHERE",
+    }
+
+
 def prepost_curve_params(x_axis, cat, x_title, y_title, bias_col=None):
     groupby = ["device_type", "sample_group", "test_condition"]
     if bias_col:
@@ -380,7 +388,11 @@ def prepost_curve_params(x_axis, cat, x_title, y_title, bias_col=None):
             "label": "I_Drain (A)",
         }],
         "groupby": groupby,
-        "adhoc_filters": [cat_filter(cat), non_null_filter(x_axis), non_null_filter("i_drain")],
+        "adhoc_filters": [
+            cat_filter(cat),
+            non_null_filter(x_axis),
+            non_null_filter("i_drain"),
+        ],
         "row_limit": 100000,
         "truncate_metric": True,
         "show_legend": True,
@@ -418,7 +430,12 @@ def individual_curve_params(x_axis, cat, x_title, y_title):
         }],
         "groupby": ["device_id", "measurement_type", "metadata_id",
                     "step_index", "test_condition", "sample_group"],
-        "adhoc_filters": [cat_filter(cat), non_null_filter(x_axis), non_null_filter("i_drain")],
+        "adhoc_filters": [
+            cat_filter(cat),
+            non_null_filter(x_axis),
+            non_null_filter("i_drain"),
+            source_rows_only_filter(),
+        ],
         "row_limit": 100000,
         "truncate_metric": True,
         "show_legend": True,

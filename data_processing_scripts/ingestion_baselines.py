@@ -970,87 +970,123 @@ GROUP BY
         ELSE NULL
     END;
 
--- Device-library pool: per-device binned measurements across every source the
--- dashboard is meant to show.  It includes standalone/promoted baselines
--- regardless of their campaign labels, plus explicit pre-stress rows from
--- irradiation / SC / avalanche datasets.  The likely-irradiated flag remains
--- in the grouping so Superset can switch between false, true, and all data.
+-- Device-library pool: per-reference-device binned measurements across every
+-- source the dashboard is meant to show.  The reference_device_key keeps
+-- source/campaign/sample context in the physical-device identity, so reused
+-- bench labels such as "DUT1" from different campaigns are never averaged
+-- together by accident.  The likely-irradiated flag remains in the grouping so
+-- Superset can switch between false, true, and all data.
 CREATE VIEW device_library_per_device AS
+WITH eligible AS (
+    SELECT
+        md.id AS metadata_id,
+        md.device_id AS raw_device_id,
+        md.device_type,
+        md.manufacturer,
+        md.measurement_category,
+        md.is_likely_irradiated,
+        md.drain_bias_value,
+        m.v_gate,
+        m.v_drain,
+        m.i_drain,
+        m.i_gate,
+        rmc.max_abs_i_drain,
+        COALESCE(NULLIF(md.data_source, ''), 'baselines') AS reference_source,
+        NULLIF(md.device_id, '') AS source_device_id,
+        CONCAT_WS(
+            ':',
+            COALESCE(NULLIF(md.data_source, ''), 'baselines'),
+            COALESCE(md.irrad_campaign_id::text, NULLIF(md.experiment, ''), 'no-context'),
+            COALESCE(NULLIF(md.sample_group, ''), NULLIF(md.device_id, ''), 'metadata-' || md.id::text)
+        ) AS reference_device_key,
+        CONCAT_WS(
+            ' / ',
+            COALESCE(NULLIF(md.data_source, ''), 'baselines'),
+            COALESCE(md.irrad_campaign_id::text, NULLIF(md.experiment, ''), 'no-context')
+        ) AS reference_context
+    FROM baselines_measurements m
+    JOIN baselines_metadata md ON m.metadata_id = md.id
+    LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
+    WHERE md.device_type IS NOT NULL
+      AND (
+            (md.data_source IS NULL OR md.data_source = 'baselines')
+         OR md.irrad_role = 'pre_irrad'
+         OR md.test_condition IN ('pristine', 'pre_avalanche')
+      )
+      AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
+      AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
+      AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
+      AND (m.i_gate IS NULL OR ABS(m.i_gate) < 1e30)
+      AND (m.i_drain IS NULL
+           OR rmc.max_abs_i_drain IS NULL
+           OR ABS(m.i_drain) < 0.99 * rmc.max_abs_i_drain)
+)
 SELECT
-    md.device_id,
-    md.device_type,
-    md.manufacturer,
-    md.measurement_category,
-    STRING_AGG(DISTINCT md.data_source, ',') AS sources,
-    md.is_likely_irradiated,
+    reference_device_key AS device_id,
+    MIN(source_device_id) AS source_device_id,
+    reference_device_key,
+    reference_context,
+    device_type,
+    manufacturer,
+    measurement_category,
+    STRING_AGG(DISTINCT reference_source, ',') AS sources,
+    is_likely_irradiated,
     CASE
-        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
-        THEN ROUND(m.v_gate::numeric, 0)::double precision
-        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(v_gate::numeric, 0)::double precision
+        ELSE ROUND(v_gate::numeric, 2)::double precision
     END AS v_gate_bin,
     CASE
-        WHEN md.measurement_category IN ('IdVg', 'Vth')
-             AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
-        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
-             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 1)::double precision
-        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVg', 'Vth')
+             AND drain_bias_value IS NOT NULL
+        THEN ROUND(drain_bias_value::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND v_drain IS NOT NULL AND ABS(v_drain) < 1e30
+        THEN ROUND(v_drain::numeric, 1)::double precision
+        WHEN v_drain IS NOT NULL AND ABS(v_drain) < 1e30
+        THEN ROUND(v_drain::numeric, 2)::double precision
         ELSE NULL
     END AS v_drain_bin,
-    AVG(m.i_drain)               AS dev_avg_i_drain,
-    AVG(m.i_gate)                AS dev_avg_i_gate,
-    AVG(ABS(m.i_drain))          AS dev_avg_abs_i_drain,
-    AVG(ABS(m.i_gate))           AS dev_avg_abs_i_gate,
+    AVG(i_drain)                 AS dev_avg_i_drain,
+    AVG(i_gate)                  AS dev_avg_i_gate,
+    AVG(ABS(i_drain))            AS dev_avg_abs_i_drain,
+    AVG(ABS(i_gate))             AS dev_avg_abs_i_gate,
     COUNT(*)                     AS dev_n_points,
-    COUNT(DISTINCT md.id)        AS dev_n_runs
-FROM baselines_measurements m
-JOIN baselines_metadata md ON m.metadata_id = md.id
-LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
-WHERE md.device_type IS NOT NULL
-  AND (
-        (md.data_source IS NULL OR md.data_source = 'baselines')
-     OR md.irrad_role = 'pre_irrad'
-     OR md.test_condition IN ('pristine', 'pre_avalanche')
-  )
-  AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
-  AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
-  AND (m.i_drain IS NULL OR ABS(m.i_drain) < 1e30)
-  AND (m.i_gate IS NULL OR ABS(m.i_gate) < 1e30)
-  AND (m.i_drain IS NULL
-       OR rmc.max_abs_i_drain IS NULL
-       OR ABS(m.i_drain) < 0.99 * rmc.max_abs_i_drain)
+    COUNT(DISTINCT metadata_id)  AS dev_n_runs
+FROM eligible
 GROUP BY
-    md.device_id,
-    md.device_type,
-    md.manufacturer,
-    md.measurement_category,
-    md.is_likely_irradiated,
+    reference_device_key,
+    reference_context,
+    device_type,
+    manufacturer,
+    measurement_category,
+    is_likely_irradiated,
     CASE
-        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
-        THEN ROUND(m.v_gate::numeric, 0)::double precision
-        ELSE ROUND(m.v_gate::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVd', '3rd_Quadrant')
+        THEN ROUND(v_gate::numeric, 0)::double precision
+        ELSE ROUND(v_gate::numeric, 2)::double precision
     END,
     CASE
-        WHEN md.measurement_category IN ('IdVg', 'Vth')
-             AND md.drain_bias_value IS NOT NULL
-        THEN ROUND(md.drain_bias_value::numeric, 2)::double precision
-        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
-             AND m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 1)::double precision
-        WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-        THEN ROUND(m.v_drain::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVg', 'Vth')
+             AND drain_bias_value IS NOT NULL
+        THEN ROUND(drain_bias_value::numeric, 2)::double precision
+        WHEN measurement_category IN ('IdVd', '3rd_Quadrant')
+             AND v_drain IS NOT NULL AND ABS(v_drain) < 1e30
+        THEN ROUND(v_drain::numeric, 1)::double precision
+        WHEN v_drain IS NOT NULL AND ABS(v_drain) < 1e30
+        THEN ROUND(v_drain::numeric, 2)::double precision
         ELSE NULL
     END;
 
 -- Shared pristine pool: non-irradiated subset of the device-library pool.
--- Source columns are NOT in GROUP BY upstream: multiple pristine sources for
--- the same device+bin merge into one averaged row, preventing double-counting
--- in box plots and calculated parameter extraction.
+-- device_id is the source-aware reference_device_key from upstream; raw bench
+-- labels remain available as source_device_id for diagnostics.
 CREATE VIEW pristine_per_device AS
 SELECT
     device_id,
+    source_device_id,
+    reference_device_key,
+    reference_context,
     device_type,
     manufacturer,
     measurement_category,

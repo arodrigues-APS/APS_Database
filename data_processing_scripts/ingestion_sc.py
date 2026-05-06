@@ -165,10 +165,65 @@ SELECT
         THEN ROUND(m.v_drain::numeric, 0)::double precision
         ELSE ROUND(m.v_drain::numeric, 1)::double precision
     END AS v_drain_plot_bin,
-    m.rds, m.bv, m.time_val
+    m.rds, m.bv, m.time_val,
+    FALSE AS is_shared_reference
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
-WHERE md.sample_group IS NOT NULL;
+WHERE md.sample_group IS NOT NULL
+UNION ALL
+SELECT
+    NULL::bigint AS measurement_id,
+    NULL::integer AS metadata_id,
+    'shared_pristine_reference'::text AS experiment,
+    p.device_id,
+    p.device_type,
+    p.manufacturer,
+    'Shared Pristine Reference'::text AS measurement_type,
+    p.measurement_category,
+    NULL::text AS filename,
+    'reference_pristine'::text AS test_condition,
+    NULL::double precision AS sc_voltage_v,
+    NULL::double precision AS sc_duration_us,
+    NULL::double precision AS sc_vgs_on_v,
+    NULL::double precision AS sc_vgs_off_v,
+    'Shared pristine reference'::text AS sc_condition_label,
+    NULL::integer AS sc_sequence_num,
+    'shared_pristine_reference'::text AS sample_group,
+    FALSE AS is_sc_degraded,
+    NULL::double precision AS sweep_start,
+    NULL::double precision AS sweep_stop,
+    NULL::integer AS sweep_points,
+    NULL::double precision AS bias_value,
+    CASE WHEN p.measurement_category IN ('IdVg', 'Vth', 'Subthreshold')
+         THEN p.v_drain_bin ELSE NULL END AS drain_bias_value,
+    NULL::integer AS point_index,
+    NULL::integer AS step_index,
+    p.v_gate_bin AS v_gate,
+    p.dev_avg_i_gate AS i_gate,
+    p.v_drain_bin AS v_drain,
+    p.dev_avg_i_drain AS i_drain,
+    p.v_gate_bin AS v_gate_r,
+    p.v_drain_bin AS v_drain_r,
+    p.v_gate_bin,
+    p.v_drain_bin,
+    CASE
+        WHEN p.v_gate_bin IS NULL THEN NULL
+        WHEN p.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+        THEN ROUND(p.v_gate_bin::numeric, 0)::double precision
+        ELSE ROUND(p.v_gate_bin::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN p.v_drain_bin IS NULL THEN NULL
+        WHEN p.measurement_category = 'Blocking'
+        THEN ROUND(p.v_drain_bin::numeric, 0)::double precision
+        ELSE ROUND(p.v_drain_bin::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
+    NULL::double precision AS rds,
+    NULL::double precision AS bv,
+    NULL::double precision AS time_val,
+    TRUE AS is_shared_reference
+FROM pristine_per_device p
+WHERE p.measurement_category <> 'SC_Waveform';
 
 -- SC waveform view (time-domain oscilloscope captures)
 DROP VIEW IF EXISTS sc_waveform_view CASCADE;

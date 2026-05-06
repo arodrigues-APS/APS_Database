@@ -261,10 +261,47 @@ SELECT
         WHEN md.measurement_category = 'Blocking'
         THEN ROUND(m.v_drain::numeric, 0)::double precision
         ELSE ROUND(m.v_drain::numeric, 1)::double precision
-    END AS v_drain_plot_bin
+    END AS v_drain_plot_bin,
+    FALSE AS is_shared_reference
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
-WHERE md.data_source = 'curve_tracer_avalanche_iv';
+WHERE md.data_source = 'curve_tracer_avalanche_iv'
+UNION ALL
+SELECT
+    NULL::bigint AS measurement_id,
+    NULL::integer AS metadata_id,
+    'shared_pristine_reference'::text AS experiment,
+    p.device_id,
+    p.device_type,
+    COALESCE(p.device_type, p.device_id, 'unknown') AS device_label,
+    p.manufacturer,
+    COALESCE(p.manufacturer, 'unknown') AS manufacturer_label,
+    'Shared Pristine Reference'::text AS measurement_type,
+    p.measurement_category,
+    NULL::text AS filename,
+    'reference_pristine'::text AS test_condition,
+    'shared_pristine_reference'::text AS sample_group,
+    NULL::integer AS point_index,
+    NULL::integer AS step_index,
+    p.v_gate_bin AS v_gate,
+    p.dev_avg_i_gate AS i_gate,
+    p.v_drain_bin AS v_drain,
+    p.dev_avg_i_drain AS i_drain,
+    CASE
+        WHEN p.v_gate_bin IS NULL THEN NULL
+        WHEN p.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+        THEN ROUND(p.v_gate_bin::numeric, 0)::double precision
+        ELSE ROUND(p.v_gate_bin::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN p.v_drain_bin IS NULL THEN NULL
+        WHEN p.measurement_category = 'Blocking'
+        THEN ROUND(p.v_drain_bin::numeric, 0)::double precision
+        ELSE ROUND(p.v_drain_bin::numeric, 1)::double precision
+    END AS v_drain_plot_bin,
+    TRUE AS is_shared_reference
+FROM pristine_per_device p
+WHERE p.measurement_category IN ('IdVg', 'IdVd', 'Vth', 'Subthreshold');
 """
 
 

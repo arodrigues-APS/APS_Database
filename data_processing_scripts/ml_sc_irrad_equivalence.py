@@ -60,20 +60,10 @@ from db_config import get_connection
 
 
 # ── SQL view ────────────────────────────────────────────────────────────────
-# Pristine baseline: median Vth/Rds/BV per device_type, computed ONLY over
-# files explicitly labeled pristine pre-stress:
-#   * irrad_role = 'pre_irrad'     (irradiation pre-stress IV)
-#   * test_condition = 'pristine'  (SC pre-stress IV)
-#
-# data_source='baselines' is deliberately excluded. That pool was built for
-# the device-library workflow and contains mixed Idss/leakage measurements
-# from pre-/post-irrad experiment pairs — its BV/Vth values don't represent
-# clean device characterisation and previously dragged C2M0080120D BV median
-# from 1089 V down to 811 V (~280 V bias).
-#
-# Verified: no device_type loses baseline coverage under this stricter filter
-# — every device with post_sc or post_irrad data also has explicit pristine
-# or pre_irrad rows.
+# Pristine baseline: median Vth/Rds/BV per device_type, computed over the same
+# source-aware reference population used by the device-library views.  The
+# reference_device_key keeps campaign/source/sample context in the physical
+# device identity before the final device_type median is taken.
 DAMAGE_VIEW_SQL = """
 DROP VIEW IF EXISTS damage_equivalence_match_segment_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_match_view CASCADE;
@@ -82,21 +72,41 @@ DROP VIEW IF EXISTS damage_equivalence_view CASCADE;
 
 CREATE VIEW damage_equivalence_view AS
 WITH pristine_pool AS (
-    SELECT device_type,
+    SELECT CONCAT_WS(
+               ':',
+               COALESCE(NULLIF(data_source, ''), 'baselines'),
+               COALESCE(irrad_campaign_id::text, NULLIF(experiment, ''), 'no-context'),
+               COALESCE(NULLIF(sample_group, ''), NULLIF(device_id, ''), 'metadata-' || id::text)
+           ) AS reference_device_key,
+           device_type,
            (gate_params->>'vth_v')::double precision      AS vth,
            (gate_params->>'rdson_mohm')::double precision AS rds,
            (gate_params->>'bvdss_v')::double precision    AS bv
     FROM baselines_metadata
     WHERE device_type IS NOT NULL
       AND gate_params IS NOT NULL
-      AND (irrad_role = 'pre_irrad' OR test_condition = 'pristine')
+      AND NOT is_likely_irradiated
+      AND (
+            (data_source IS NULL OR data_source = 'baselines')
+         OR irrad_role = 'pre_irrad'
+         OR test_condition IN ('pristine', 'pre_avalanche')
+      )
+),
+pristine_devices AS (
+    SELECT reference_device_key,
+           device_type,
+           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vth) AS vth,
+           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rds) AS rds,
+           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bv)  AS bv
+    FROM pristine_pool
+    GROUP BY reference_device_key, device_type
 ),
 pristine_stats AS (
     SELECT device_type,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vth) AS pristine_vth,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rds) AS pristine_rds,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bv)  AS pristine_bv
-    FROM pristine_pool
+    FROM pristine_devices
     GROUP BY device_type
 ),
 sc_per_file AS (
