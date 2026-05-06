@@ -782,7 +782,9 @@ SELECT
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id;
 
--- Device-library view: includes device_type and manufacturer columns
+-- Device-library view: includes every row that can contribute to the
+-- Baselines Device Library dashboard.  This keeps standalone/promoted
+-- baselines plus clean pre-stress rows from other campaigns in one place.
 DROP VIEW IF EXISTS baselines_view_device_library;
 CREATE VIEW baselines_view_device_library AS
 SELECT
@@ -863,7 +865,9 @@ SELECT
     md.is_likely_irradiated
 FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
-WHERE md.data_source IS NULL OR md.data_source = 'baselines';
+WHERE (md.data_source IS NULL OR md.data_source = 'baselines')
+   OR md.irrad_role = 'pre_irrad'
+   OR md.test_condition IN ('pristine', 'pre_avalanche');
 
 -- Per-run max |i_drain|, used to detect compliance-limited points.
 -- A point is considered compliance-limited when |i_drain| >= 99% of the
@@ -876,7 +880,9 @@ FROM baselines_measurements
 WHERE i_drain IS NOT NULL AND ABS(i_drain) < 1e30
 GROUP BY metadata_id;
 
--- Per-device view: averaged per device_id at each voltage bin.
+-- Per-device view: averaged per device_id at each voltage bin for standalone
+-- baselines only.  Retained for promotion / audit workflows that specifically
+-- need the raw baselines source population.
 -- A device measured in multiple files (e.g. Vth + Vth_append1) contributes
 -- exactly one value per bin.  Points at >=99% of a run's max |i_drain| are
 -- excluded so compliance-clamped data does not distort the mean.
@@ -964,19 +970,19 @@ GROUP BY
         ELSE NULL
     END;
 
--- Shared pristine pool: per-device binned measurements across all pristine sources.
--- Covers standalone baselines, irradiation pre-measurements (irrad_role='pre_irrad'),
--- and SC/avalanche pre-stress rows (test_condition='pristine').
--- is_likely_irradiated enforced here so all downstream consumers get clean data.
--- Source columns are NOT in GROUP BY: multiple pristine sources for the same
--- device+bin merge into one averaged row, preventing double-counting in box plots.
-CREATE VIEW pristine_per_device AS
+-- Device-library pool: per-device binned measurements across every source the
+-- dashboard is meant to show.  It includes standalone/promoted baselines
+-- regardless of their campaign labels, plus explicit pre-stress rows from
+-- irradiation / SC / avalanche datasets.  The likely-irradiated flag remains
+-- in the grouping so Superset can switch between false, true, and all data.
+CREATE VIEW device_library_per_device AS
 SELECT
     md.device_id,
     md.device_type,
     md.manufacturer,
     md.measurement_category,
     STRING_AGG(DISTINCT md.data_source, ',') AS sources,
+    md.is_likely_irradiated,
     CASE
         WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
         THEN ROUND(m.v_gate::numeric, 0)::double precision
@@ -1003,13 +1009,10 @@ FROM baselines_measurements m
 JOIN baselines_metadata md ON m.metadata_id = md.id
 LEFT JOIN baselines_run_max_current rmc ON rmc.metadata_id = md.id
 WHERE md.device_type IS NOT NULL
-  AND NOT md.is_likely_irradiated
   AND (
-        ((md.data_source IS NULL OR md.data_source = 'baselines')
-         AND md.irrad_role IS NULL
-         AND md.test_condition IS NULL)
+        (md.data_source IS NULL OR md.data_source = 'baselines')
      OR md.irrad_role = 'pre_irrad'
-     OR md.test_condition = 'pristine'
+     OR md.test_condition IN ('pristine', 'pre_avalanche')
   )
   AND (m.v_gate IS NULL OR ABS(m.v_gate) < 1e30)
   AND (m.v_drain IS NULL OR ABS(m.v_drain) < 1e30)
@@ -1023,6 +1026,7 @@ GROUP BY
     md.device_type,
     md.manufacturer,
     md.measurement_category,
+    md.is_likely_irradiated,
     CASE
         WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant')
         THEN ROUND(m.v_gate::numeric, 0)::double precision
@@ -1040,15 +1044,36 @@ GROUP BY
         ELSE NULL
     END;
 
+-- Shared pristine pool: non-irradiated subset of the device-library pool.
+-- Source columns are NOT in GROUP BY upstream: multiple pristine sources for
+-- the same device+bin merge into one averaged row, preventing double-counting
+-- in box plots and calculated parameter extraction.
+CREATE VIEW pristine_per_device AS
+SELECT
+    device_id,
+    device_type,
+    manufacturer,
+    measurement_category,
+    sources,
+    v_gate_bin,
+    v_drain_bin,
+    dev_avg_i_drain,
+    dev_avg_i_gate,
+    dev_avg_abs_i_drain,
+    dev_avg_abs_i_gate,
+    dev_n_points,
+    dev_n_runs
+FROM device_library_per_device
+WHERE NOT is_likely_irradiated;
+
 -- Averaged device performance view: pre-aggregated per voltage bin.
 -- Used by the "Baselines Device Library" dashboard to show mean ± spread
 -- for each device_type / measurement_category, averaged across all runs.
 --
--- Reads from pristine_per_device (Stage 1) and averages across devices
+-- Reads from device_library_per_device (Stage 1) and averages across devices
 -- (Stage 2).  Without this two-stage aggregation, multi-file devices are
--- over-represented and distort the group mean.
--- is_likely_irradiated is omitted: pristine_per_device enforces NOT
--- is_likely_irradiated in its WHERE clause, so all rows here are pristine.
+-- over-represented and distort the group mean.  is_likely_irradiated is kept
+-- so the dashboard filter can show pristine-only, irradiated-only, or all.
 CREATE VIEW baselines_device_averages AS
 SELECT
     sub.*,
@@ -1071,6 +1096,7 @@ FROM (
         device_type,
         manufacturer,
         measurement_category,
+        is_likely_irradiated,
         v_gate_bin,
         v_drain_bin,
         AVG(dev_avg_i_drain)               AS avg_i_drain,
@@ -1086,11 +1112,12 @@ FROM (
         SUM(dev_n_points)                  AS n_points,
         COUNT(*)                           AS n_devices,
         SUM(dev_n_runs)                    AS n_runs
-    FROM pristine_per_device
+    FROM device_library_per_device
     GROUP BY
         device_type,
         manufacturer,
         measurement_category,
+        is_likely_irradiated,
         v_gate_bin,
         v_drain_bin
 ) sub;
@@ -1122,6 +1149,7 @@ def main():
         print("Dropping existing baseline tables...")
         cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
         cur.execute("DROP VIEW IF EXISTS pristine_per_device CASCADE")
+        cur.execute("DROP VIEW IF EXISTS device_library_per_device CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
         cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")
@@ -1133,6 +1161,7 @@ def main():
     # Drop views before (re)creating – views are derived and safe to recreate
     cur.execute("DROP VIEW IF EXISTS baselines_device_averages CASCADE")
     cur.execute("DROP VIEW IF EXISTS pristine_per_device CASCADE")
+    cur.execute("DROP VIEW IF EXISTS device_library_per_device CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_per_device CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_view_device_library CASCADE")
     cur.execute("DROP VIEW IF EXISTS baselines_view CASCADE")

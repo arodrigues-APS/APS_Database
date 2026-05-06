@@ -2,11 +2,11 @@
 """
 Create the "Baselines Device Library" dashboard in Apache Superset via its REST API.
 
-This dashboard shows **averaged device performance** across all runs of the
-same device type, using the ``baselines_device_averages`` SQL view.  Instead
-of plotting every individual experiment curve, it computes mean ± standard
-deviation per voltage bin, giving an overview of typical behaviour and
-run-to-run consistency.
+This dashboard shows **averaged device performance** across all device-library
+eligible runs of the same device type, using the ``baselines_device_averages``
+SQL view.  Instead of plotting every individual experiment curve, it computes
+mean ± standard deviation per voltage bin, giving an overview of typical
+behaviour and run-to-run consistency.
 
 Dashboard design
 ================
@@ -14,8 +14,8 @@ Filters (cascading):
   1. Manufacturer         – optional, multi-select
   2. Device Type          – required, multi-select (cascades from Manufacturer)
   3. Measurement Category – required, multi-select
-  6. Likely Irradiated    – optional, shows all data by default; select
-                            false for pristine-only or true for irradiated-only
+  6. Likely Irradiated    – optional, defaults to false (pristine-only);
+                            select true for irradiated-only or clear for all data
 
 Tabs:
   1. Mean Curves          – averaged device performance (default)
@@ -1109,23 +1109,34 @@ def build_native_filters(chart_ids, avg_ds_id, always_excluded=None,
             },
             "name": "Likely Irradiated",
             "filterType": "filter_select",
-            "targets": ([{"datasetId": indiv_ds_id,
+            "targets": [{"datasetId": avg_ds_id,
+                         "column": {"name": "is_likely_irradiated"}}]
+                       + ([{"datasetId": indiv_ds_id,
                           "column": {"name": "is_likely_irradiated"}}]
                         if indiv_ds_id else [])
                        + ([{"datasetId": meta_ds_id,
                             "column": {"name": "is_likely_irradiated"}}]
                           if meta_ds_id else []),
             "defaultDataMask": {
-                "extraFormData": {},
-                "filterState": {"value": None},
+                "extraFormData": {
+                    "filters": [{
+                        "col": "is_likely_irradiated",
+                        "op": "IN",
+                        "val": [False],
+                    }],
+                },
+                "filterState": {
+                    "label": "false",
+                    "value": [False],
+                },
             },
             "cascadeParentIds": [],
             "scope": {"rootPath": ["ROOT_ID"],
                       "excluded": list(irrad_excluded)},
             "type": "NATIVE_FILTER",
             "description": "Filter by irradiation status "
-                           "(select false for pristine-only, true for "
-                           "irradiated-only, or leave empty for all data)",
+                           "(defaults to false for pristine-only; select true "
+                           "for irradiated-only, or clear for all data)",
             "chartsInScope": irrad_filtered,
             "tabsInScope": [],
         },
@@ -1667,8 +1678,8 @@ def main():
                         "sqlExpression": f"{bp_col} IS NOT NULL",
                         "clause": "WHERE",
                     }],
-                    "whiskerOptions": "Tukey",  # <-- Changed this line
-                    "x_ticks_layout": "auto",
+                    "whiskerOptions": "Tukey",
+                    "x_ticks_layout": "45°",
                     "color_scheme": "supersetColors",
                     "row_limit": 10000,
                 },
@@ -2030,8 +2041,8 @@ def main():
     # always_excluded: charts with no device_type/manufacturer columns
     # (excluded from Manufacturer + Device Type filters)
     always_excluded = [c for c in [devlib_chart_id, calc_chart_id] if c]
-    # irrad_excluded: additionally includes box plots and avg charts whose
-    # datasets have no is_likely_irradiated column (enforced by pristine_per_device)
+    # irrad_excluded: additionally includes box plots whose virtual datasets
+    # have no is_likely_irradiated column.
     irrad_excluded = [c for c in [devlib_chart_id, calc_chart_id]
                       + boxplot_chart_ids if c]
 
@@ -2113,7 +2124,7 @@ def main():
         print("    3. Measurement Category (required, cascades)")
         print("    4. V_Drain Bias (V)     (toggle biases for IdVg/Vth)")
         print("    5. V_Gate Bias (V)      (toggle biases for IdVd/3rdQ)")
-        print("    6. Likely Irradiated    (all data by default; select false/true to filter)")
+        print("    6. Likely Irradiated    (defaults to false; clear for all data)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

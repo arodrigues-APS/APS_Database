@@ -220,6 +220,51 @@ FROM baselines_metadata md
 JOIN baselines_measurements m ON m.metadata_id = md.id
 WHERE md.data_source = 'avalanche'
 GROUP BY md.id;
+
+DROP VIEW IF EXISTS avalanche_prepost_view CASCADE;
+CREATE VIEW avalanche_prepost_view AS
+SELECT
+    m.id AS measurement_id,
+    md.id AS metadata_id,
+    md.experiment,
+    md.device_id,
+    md.device_type,
+    COALESCE(md.device_type, NULLIF(md.device_id, ''), 'unknown') AS device_label,
+    md.manufacturer,
+    COALESCE(md.manufacturer, 'unknown') AS manufacturer_label,
+    md.measurement_type,
+    md.measurement_category,
+    md.filename,
+    md.test_condition,
+    md.sample_group,
+    m.point_index,
+    m.step_index,
+    CASE WHEN m.v_gate IS NOT NULL AND ABS(m.v_gate) < 1e30
+         THEN m.v_gate ELSE NULL END AS v_gate,
+    CASE WHEN m.i_gate IS NOT NULL AND ABS(m.i_gate) < 1e30
+         THEN m.i_gate ELSE NULL END AS i_gate,
+    CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+         THEN m.v_drain ELSE NULL END AS v_drain,
+    CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
+         THEN m.i_drain ELSE NULL END AS i_drain,
+    CASE
+        WHEN m.v_gate IS NULL OR ABS(m.v_gate) >= 1e30 THEN NULL
+        WHEN md.measurement_category IN ('IdVd', '3rd_Quadrant', 'Bodydiode')
+        THEN ROUND(m.v_gate::numeric, 0)::double precision
+        ELSE ROUND(m.v_gate::numeric, 1)::double precision
+    END AS v_gate_plot_bin,
+    CASE
+        WHEN md.measurement_category IN ('IdVg', 'Vth')
+             AND md.drain_bias_value IS NOT NULL
+        THEN ROUND(md.drain_bias_value::numeric, 1)::double precision
+        WHEN m.v_drain IS NULL OR ABS(m.v_drain) >= 1e30 THEN NULL
+        WHEN md.measurement_category = 'Blocking'
+        THEN ROUND(m.v_drain::numeric, 0)::double precision
+        ELSE ROUND(m.v_drain::numeric, 1)::double precision
+    END AS v_drain_plot_bin
+FROM baselines_measurements m
+JOIN baselines_metadata md ON m.metadata_id = md.id
+WHERE md.data_source = 'curve_tracer_avalanche_iv';
 """
 
 

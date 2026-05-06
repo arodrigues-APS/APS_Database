@@ -2,19 +2,22 @@
 """
 Create the "Avalanche" dashboard in Apache Superset via its REST API.
 
-This dashboard visualises avalanche ruggedness waveform data (UIS / UID / RT):
+This dashboard visualises avalanche ruggedness and associated pre/post IV data:
   - Overview: captures per family/mode/device with outcome breakdown
+  - Pre/Post Comparison: mean IdVg / IdVd overlays by test condition
   - Waveform Viewer: Vds, Id, Vgs vs time (µs) per shot
-  - Individual Shots: per-capture peak stats and energy scaling charts
+  - Individual Shots: per-file IdVg / IdVd curves plus shot-level analytics
 
 Datasets (SQL views created / refreshed by ingestion_avalanche.py):
   1. avalanche_waveform_view   – point-level time-domain waveforms
   2. avalanche_summary_view    – one row per capture with peak stats
+  3. avalanche_prepost_view    – pre/post avalanche IV curves
 
 Tabs:
-  1. Overview         – summary tables and capture-count bar charts
-  2. Waveform Viewer  – Vds / Id / Vgs vs time (µs)
-  3. Individual Shots – per-shot detail table and energy-scaling charts
+  1. Overview            – summary tables and capture-count bar charts
+  2. Pre/Post Comparison – mean IdVg / IdVd overlays
+  3. Waveform Viewer     – Vds / Id / Vgs vs time (µs)
+  4. Individual Shots    – per-file IdVg / IdVd and shot analytics
 
 Filters (cascading):
   1. Manufacturer       – optional multi-select
@@ -24,6 +27,7 @@ Filters (cascading):
   5. Outcome            – survived / failed / unknown
   6. Gate Bias (V)      – range slider; all charts, cascades from Device
   7. Capture            – Waveform Viewer only, defaults to one capture
+  8. Test Condition     – pre_avalanche / post_avalanche (IV tabs)
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -102,20 +106,26 @@ def build_dashboard_layout(tab_defs):
 # ── Native Filters ───────────────────────────────────────────────────────────
 
 def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
-                         waveform_chart_ids=None):
+                         prepost_ds_id=None, waveform_chart_ids=None,
+                         prepost_chart_ids=None):
     mfr_fid  = "NATIVE_FILTER-avl-manufacturer"
     dev_fid  = "NATIVE_FILTER-avl-device"
     fam_fid  = "NATIVE_FILTER-avl-family"
     mode_fid = "NATIVE_FILTER-avl-mode"
     out_fid  = "NATIVE_FILTER-avl-outcome"
     gbias_fid = "NATIVE_FILTER-avl-gate-bias"
-    cap_fid  = "NATIVE_FILTER-avl-capture"
+    cap_fid   = "NATIVE_FILTER-avl-capture"
+    test_fid  = "NATIVE_FILTER-avl-test-condition"
 
-    def multi_targets(col):
+    def dataset_targets(col, include_waveform=True, include_summary=True,
+                        include_prepost=False):
         targets = []
-        for ds_id in (waveform_ds_id, summary_ds_id):
-            if ds_id:
-                targets.append({"datasetId": ds_id, "column": {"name": col}})
+        if include_waveform and waveform_ds_id:
+            targets.append({"datasetId": waveform_ds_id, "column": {"name": col}})
+        if include_summary and summary_ds_id:
+            targets.append({"datasetId": summary_ds_id, "column": {"name": col}})
+        if include_prepost and prepost_ds_id:
+            targets.append({"datasetId": prepost_ds_id, "column": {"name": col}})
         return targets
 
     def make_filter(fid, name, col, cascade_from=None, description="",
@@ -138,7 +148,7 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
             },
             "name": name,
             "filterType": "filter_select",
-            "targets": targets if targets is not None else multi_targets(col),
+            "targets": targets if targets is not None else dataset_targets(col),
             "defaultDataMask": {"extraFormData": {},
                                 "filterState": {"value": None}},
             "cascadeParentIds": cascade_parent_ids,
@@ -150,27 +160,54 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
         }
 
     filters = [
-        make_filter(mfr_fid,  "Manufacturer",     "manufacturer_label",
-                    description="Filter by device manufacturer"),
-        make_filter(dev_fid,  "Device",            "device_label",
-                    cascade_from=mfr_fid,
-                    description="Filter by part number or capture device ID"),
-        make_filter(fam_fid,  "Avalanche Family",  "avalanche_family",
-                    description="Top-level capture folder group"),
-        make_filter(mode_fid, "Mode",              "avalanche_mode",
-                    description="UIS / UID / RT / Avalanche"),
-        make_filter(out_fid,  "Outcome",           "avalanche_outcome",
-                    description="survived / failed / unknown"),
+        make_filter(
+            mfr_fid, "Manufacturer", "manufacturer_label",
+            targets=dataset_targets(
+                "manufacturer_label",
+                include_waveform=True, include_summary=True, include_prepost=True,
+            ),
+            description="Filter by device manufacturer",
+        ),
+        make_filter(
+            dev_fid, "Device", "device_label",
+            targets=dataset_targets(
+                "device_label",
+                include_waveform=True, include_summary=True, include_prepost=True,
+            ),
+            cascade_from=mfr_fid,
+            description="Filter by part number or capture device ID",
+        ),
+        make_filter(
+            fam_fid, "Avalanche Family", "avalanche_family",
+            targets=dataset_targets(
+                "avalanche_family",
+                include_waveform=True, include_summary=True, include_prepost=False,
+            ),
+            description="Top-level capture folder group",
+        ),
+        make_filter(
+            mode_fid, "Mode", "avalanche_mode",
+            targets=dataset_targets(
+                "avalanche_mode",
+                include_waveform=True, include_summary=True, include_prepost=False,
+            ),
+            description="UIS / UID / RT / Avalanche",
+        ),
+        make_filter(
+            out_fid, "Outcome", "avalanche_outcome",
+            targets=dataset_targets(
+                "avalanche_outcome",
+                include_waveform=True, include_summary=True, include_prepost=False,
+            ),
+            description="survived / failed / unknown",
+        ),
     ]
 
-    # Gate Bias range slider — targets both datasets; cascades from Device
-    gate_bias_targets = []
-    if summary_ds_id:
-        gate_bias_targets.append({"datasetId": summary_ds_id,
-                                   "column": {"name": "avalanche_gate_bias_v"}})
-    if waveform_ds_id:
-        gate_bias_targets.append({"datasetId": waveform_ds_id,
-                                   "column": {"name": "avalanche_gate_bias_v"}})
+    # Gate Bias range slider — waveform/summary only; cascades from Device
+    gate_bias_targets = dataset_targets(
+        "avalanche_gate_bias_v",
+        include_waveform=True, include_summary=True, include_prepost=False,
+    )
     if gate_bias_targets:
         filters.append({
             "id": gbias_fid,
@@ -206,6 +243,23 @@ def build_native_filters(all_chart_ids, waveform_ds_id, summary_ds_id,
                 tab_scope=["TAB-waveform"],
                 default_to_first_item=True,
                 multi_select=False,
+            )
+        )
+
+    if prepost_ds_id:
+        filters.append(
+            make_filter(
+                test_fid, "Test Condition", "test_condition",
+                cascade_from=dev_fid,
+                description="Pre/Post avalanche IV condition",
+                targets=dataset_targets(
+                    "test_condition",
+                    include_waveform=False, include_summary=False, include_prepost=True,
+                ),
+                chart_scope=prepost_chart_ids or all_chart_ids,
+                tab_scope=["TAB-prepost", "TAB-shots"],
+                default_to_first_item=False,
+                multi_select=True,
             )
         )
 
@@ -292,6 +346,102 @@ def energy_scaling_params(x_col, x_title, y_col, y_label, y_title):
     }
 
 
+def cat_filter(cat):
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"measurement_category = '{cat}'",
+        "clause": "WHERE",
+    }
+
+
+def non_null_filter(col):
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"{col} IS NOT NULL",
+        "clause": "WHERE",
+    }
+
+
+def prepost_curve_params(x_axis, cat, x_title, y_title, bias_col=None):
+    groupby = ["device_type", "sample_group", "test_condition"]
+    if bias_col:
+        groupby.append({
+            "expressionType": "SQL",
+            "sqlExpression": f"ROUND({bias_col}::numeric)",
+            "label": bias_col.replace("_plot_bin", "").replace("v_", "V_") + " (V)",
+        })
+    return {
+        "x_axis": x_axis,
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(i_drain)",
+            "label": "I_Drain (A)",
+        }],
+        "groupby": groupby,
+        "adhoc_filters": [cat_filter(cat), non_null_filter(x_axis), non_null_filter("i_drain")],
+        "row_limit": 100000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": x_title,
+        "y_axis_title": y_title,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "sort_series_type": "max",
+        "sort_series_ascending": False,
+        "series_limit": 50,
+        "series_limit_metric": {
+            "expressionType": "SQL",
+            "sqlExpression": f"COUNT(DISTINCT {x_axis})",
+            "label": "_rank_by_sweep_range",
+        },
+    }
+
+
+def individual_curve_params(x_axis, cat, x_title, y_title):
+    return {
+        "x_axis": x_axis,
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(i_drain)",
+            "label": "I_Drain (A)",
+        }],
+        "groupby": ["device_id", "measurement_type", "metadata_id",
+                    "step_index", "test_condition", "sample_group"],
+        "adhoc_filters": [cat_filter(cat), non_null_filter(x_axis), non_null_filter("i_drain")],
+        "row_limit": 100000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": x_title,
+        "y_axis_title": y_title,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "series_limit": 50,
+        "series_limit_metric": {
+            "expressionType": "SQL",
+            "sqlExpression": f"COUNT(DISTINCT {x_axis})",
+            "label": "_rank_by_sweep_range",
+        },
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -314,12 +464,14 @@ def main():
                                           "avalanche_waveform_view")
     summary_ds  = find_or_create_dataset(session, db_id,
                                           "avalanche_summary_view")
+    prepost_ds = find_or_create_dataset(session, db_id,
+                                         "avalanche_prepost_view")
     if not waveform_ds:
         print("  FATAL: Could not create avalanche_waveform_view dataset.")
         print("  Run ingestion_avalanche.py first to create the views.")
         sys.exit(1)
 
-    for ds_id in (waveform_ds, summary_ds):
+    for ds_id in (waveform_ds, summary_ds, prepost_ds):
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -415,10 +567,70 @@ def main():
             ),
         ]
 
-    # ── Tab 2: Waveform Viewer ───────────────────────────────────────────
-    print("   Tab 2: Waveform Viewer...")
+    # ── Tab 2: Pre/Post Avalanche Comparison ─────────────────────────────
+    print("   Tab 2: Pre/Post Avalanche Comparison...")
 
-    tab2_chart_defs = [
+    tab2_chart_defs = []
+    if prepost_ds:
+        tab2_chart_defs = [
+            (
+                "Avl – Pre/Post Data Summary",
+                prepost_ds,
+                "table",
+                {
+                    "query_mode": "aggregate",
+                    "groupby": [
+                        "device_type", "sample_group", "test_condition",
+                        "measurement_category",
+                    ],
+                    "metrics": [
+                        {"expressionType": "SQL",
+                         "sqlExpression": "COUNT(DISTINCT metadata_id)",
+                         "label": "Files"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "COUNT(*)",
+                         "label": "Data Points"},
+                    ],
+                    "all_columns": [],
+                    "order_by_cols": [],
+                    "row_limit": 10000,
+                    "include_time": False,
+                    "table_timestamp_format": "smart_date",
+                },
+                12, 50,
+            ),
+            (
+                "Avl – IdVg Transfer Curves",
+                prepost_ds,
+                "echarts_timeseries_line",
+                prepost_curve_params(
+                    x_axis="v_gate_plot_bin",
+                    cat="IdVg",
+                    x_title="V_Gate (V)",
+                    y_title="I_Drain (A)",
+                    bias_col="v_drain_plot_bin",
+                ),
+                12, 60,
+            ),
+            (
+                "Avl – IdVd Output Curves",
+                prepost_ds,
+                "echarts_timeseries_line",
+                prepost_curve_params(
+                    x_axis="v_drain_plot_bin",
+                    cat="IdVd",
+                    x_title="V_Drain (V)",
+                    y_title="I_Drain (A)",
+                    bias_col="v_gate_plot_bin",
+                ),
+                12, 60,
+            ),
+        ]
+
+    # ── Tab 3: Waveform Viewer ───────────────────────────────────────────
+    print("   Tab 3: Waveform Viewer...")
+
+    tab3_chart_defs = [
         (
             "Avl – Waveform: Vds vs Time",
             waveform_ds,
@@ -442,13 +654,41 @@ def main():
         ),
     ]
 
-    # ── Tab 3: Individual Shots ──────────────────────────────────────────
-    print("   Tab 3: Individual Shots...")
+    # ── Tab 4: Individual Shots ──────────────────────────────────────────
+    print("   Tab 4: Individual Shots...")
 
-    tab3_chart_defs = []
+    tab4_chart_defs = []
+    if prepost_ds:
+        tab4_chart_defs.extend([
+            (
+                "Avl – IdVg (Individual Shots)",
+                prepost_ds,
+                "echarts_timeseries_line",
+                individual_curve_params(
+                    x_axis="v_gate_plot_bin",
+                    cat="IdVg",
+                    x_title="V_Gate (V)",
+                    y_title="I_Drain (A)",
+                ),
+                12, 60,
+            ),
+            (
+                "Avl – IdVd (Individual Shots)",
+                prepost_ds,
+                "echarts_timeseries_line",
+                individual_curve_params(
+                    x_axis="v_drain_plot_bin",
+                    cat="IdVd",
+                    x_title="V_Drain (V)",
+                    y_title="I_Drain (A)",
+                ),
+                12, 60,
+            ),
+        ])
+
     if summary_ds:
-        tab3_chart_defs = [
-            # 0 – Per-shot detail table
+        tab4_chart_defs.extend([
+            # Per-shot detail table
             (
                 "Avl – Shot Details",
                 summary_ds,
@@ -487,8 +727,6 @@ def main():
                 },
                 12, 50,
             ),
-
-            # 1 – Peak Id vs Energy (canonical robustness plot)
             (
                 "Avl – Peak Id vs Energy",
                 summary_ds,
@@ -502,8 +740,6 @@ def main():
                 ),
                 12, 60,
             ),
-
-            # 2 – Max Vds vs Inductance (overvoltage scaling)
             (
                 "Avl – Max Vds vs Inductance",
                 summary_ds,
@@ -517,7 +753,7 @@ def main():
                 ),
                 12, 60,
             ),
-        ]
+        ])
 
     # ── Create all charts and build tabs ─────────────────────────────────
     print("\n   Creating all charts...")
@@ -536,21 +772,35 @@ def main():
     tab1_info = create_tab_charts(tab1_chart_defs)
     tab2_info = create_tab_charts(tab2_chart_defs)
     tab3_info = create_tab_charts(tab3_chart_defs)
-    waveform_chart_ids = [cid for cid, _, _, _, _ in tab2_info if cid]
+    tab4_info = create_tab_charts(tab4_chart_defs)
+    waveform_chart_ids = [cid for cid, _, _, _, _ in tab3_info if cid]
+    prepost_chart_names = {
+        "Avl – Pre/Post Data Summary",
+        "Avl – IdVg Transfer Curves",
+        "Avl – IdVd Output Curves",
+        "Avl – IdVg (Individual Shots)",
+        "Avl – IdVd (Individual Shots)",
+    }
+    prepost_chart_ids = [
+        cid for cid, _, cname, _, _ in (tab2_info + tab4_info)
+        if cid and cname in prepost_chart_names
+    ]
 
     print("\n5. Building dashboard layout...")
 
     tab_defs = [
-        ("Overview",        "TAB-overview",   tab1_info),
-        ("Waveform Viewer", "TAB-waveform",   tab2_info),
-        ("Individual Shots","TAB-shots",      tab3_info),
+        ("Overview",            "TAB-overview",   tab1_info),
+        ("Pre/Post Comparison", "TAB-prepost",    tab2_info),
+        ("Waveform Viewer",     "TAB-waveform",   tab3_info),
+        ("Individual Shots",    "TAB-shots",      tab4_info),
     ]
     tab_defs = [td for td in tab_defs if td[2]]
 
     position_json = build_dashboard_layout(tab_defs)
     native_filters = build_native_filters(
-        all_chart_ids, waveform_ds, summary_ds,
+        all_chart_ids, waveform_ds, summary_ds, prepost_ds_id=prepost_ds,
         waveform_chart_ids=waveform_chart_ids,
+        prepost_chart_ids=prepost_chart_ids,
     )
     json_metadata  = build_json_metadata(all_chart_ids, native_filters)
 
@@ -588,6 +838,7 @@ def main():
         print("    5. Outcome             (survived / failed / unknown)")
         print("    6. Gate Bias (V)       (range slider; cascades from Device)")
         print("    7. Capture             (Waveform Viewer, defaults to one)")
+        print("    8. Test Condition      (pre/post avalanche IV tabs)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)
