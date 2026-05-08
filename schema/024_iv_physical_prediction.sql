@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS iv_physical_response_pairs (
     pair_key TEXT NOT NULL UNIQUE,
     stress_type TEXT NOT NULL CHECK (stress_type IN ('sc', 'irradiation')),
     pairing_method TEXT NOT NULL,
+    reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad'
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine')),
     curve_family TEXT NOT NULL CHECK (curve_family IN ('IdVg', 'IdVd')),
     target_type TEXT NOT NULL CHECK (target_type IN ('delta_vth_v', 'log_rdson_ratio')),
     pre_feature_id BIGINT NOT NULL REFERENCES iv_physical_curve_features(id) ON DELETE CASCADE,
@@ -126,6 +128,7 @@ CREATE TABLE IF NOT EXISTS iv_physical_response_pairs (
     post_metadata_id INTEGER NOT NULL REFERENCES baselines_metadata(id) ON DELETE CASCADE,
     physical_device_key TEXT NOT NULL,
     split_group TEXT NOT NULL,
+    same_physical_device BOOLEAN NOT NULL DEFAULT TRUE,
     device_type TEXT NOT NULL,
     manufacturer TEXT,
     voltage_rating_v DOUBLE PRECISION,
@@ -153,6 +156,10 @@ CREATE TABLE IF NOT EXISTS iv_physical_response_pairs (
     range_um DOUBLE PRECISION,
     beam_type TEXT,
     fluence_at_meas DOUBLE PRECISION,
+    baseline_reference_count INTEGER,
+    baseline_reference_spread DOUBLE PRECISION,
+    baseline_reference_method TEXT,
+    library_reference_group_key TEXT,
     quality_status TEXT NOT NULL DEFAULT 'usable'
         CHECK (quality_status IN ('usable', 'excluded', 'unsupported')),
     quality_flags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
@@ -169,6 +176,48 @@ CREATE INDEX IF NOT EXISTS idx_iv_phys_pairs_split
     ON iv_physical_response_pairs(split_group);
 CREATE INDEX IF NOT EXISTS idx_iv_phys_pairs_quality
     ON iv_physical_response_pairs(quality_status);
+
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs
+        ADD COLUMN reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs
+        ADD CONSTRAINT iv_phys_pairs_reference_tier_check
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs
+        ADD COLUMN same_physical_device BOOLEAN NOT NULL DEFAULT TRUE;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs ADD COLUMN baseline_reference_count INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs ADD COLUMN baseline_reference_spread DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs ADD COLUMN baseline_reference_method TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_response_pairs ADD COLUMN library_reference_group_key TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+UPDATE iv_physical_response_pairs
+SET baseline_reference_count = COALESCE(baseline_reference_count, 1),
+    baseline_reference_spread = COALESCE(baseline_reference_spread, 0.0),
+    baseline_reference_method = COALESCE(baseline_reference_method, 'strict_same_physical_device')
+WHERE reference_tier = 'strict_pre_irrad';
+
+CREATE INDEX IF NOT EXISTS idx_iv_phys_pairs_reference_tier
+    ON iv_physical_response_pairs(reference_tier);
 
 CREATE TABLE IF NOT EXISTS iv_physical_model_runs (
     id SERIAL PRIMARY KEY,
@@ -203,6 +252,8 @@ CREATE TABLE IF NOT EXISTS iv_physical_validation_residuals (
     pair_id BIGINT NOT NULL REFERENCES iv_physical_response_pairs(id) ON DELETE CASCADE,
     pair_key TEXT NOT NULL,
     split_group TEXT NOT NULL,
+    reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad'
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine')),
     stress_type TEXT NOT NULL CHECK (stress_type IN ('sc', 'irradiation')),
     curve_family TEXT NOT NULL CHECK (curve_family IN ('IdVg', 'IdVd')),
     target_type TEXT NOT NULL CHECK (target_type IN ('delta_vth_v', 'log_rdson_ratio')),
@@ -255,21 +306,68 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_iv_phys_validation_mode
     ON iv_physical_validation_residuals(validation_mode);
 
+DO $$ BEGIN
+    ALTER TABLE iv_physical_validation_residuals
+        ADD COLUMN reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_validation_residuals
+        ADD CONSTRAINT iv_phys_validation_reference_tier_check
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_iv_phys_validation_reference_tier
+    ON iv_physical_validation_residuals(reference_tier);
+
 -- Reserved for later gated parameter prediction. The V1 workflow does not
 -- write rows here; it exists so downstream work has a stable ownership boundary.
 CREATE TABLE IF NOT EXISTS iv_physical_parameter_predictions (
     id BIGSERIAL PRIMARY KEY,
     model_run_id INTEGER NOT NULL REFERENCES iv_physical_model_runs(id) ON DELETE CASCADE,
+    pair_id BIGINT REFERENCES iv_physical_response_pairs(id) ON DELETE SET NULL,
+    pair_key TEXT,
     source_feature_id BIGINT REFERENCES iv_physical_curve_features(id) ON DELETE SET NULL,
+    post_feature_id BIGINT REFERENCES iv_physical_curve_features(id) ON DELETE SET NULL,
+    source_metadata_id INTEGER REFERENCES baselines_metadata(id) ON DELETE SET NULL,
+    post_metadata_id INTEGER REFERENCES baselines_metadata(id) ON DELETE SET NULL,
     target_type TEXT NOT NULL CHECK (target_type IN ('delta_vth_v', 'log_rdson_ratio')),
     curve_family TEXT NOT NULL CHECK (curve_family IN ('IdVg', 'IdVd')),
     predicted_value DOUBLE PRECISION,
     predicted_p10 DOUBLE PRECISION,
     predicted_p90 DOUBLE PRECISION,
     stress_type TEXT NOT NULL CHECK (stress_type IN ('sc', 'irradiation')),
+    reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad'
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine')),
     donor_pair_keys TEXT[],
     donor_count INTEGER,
+    donor_distance DOUBLE PRECISION,
     support_status TEXT NOT NULL,
+    unsupported_reason TEXT,
+    sc_voltage_v DOUBLE PRECISION,
+    sc_duration_us DOUBLE PRECISION,
+    sc_condition_label TEXT,
+    irrad_run_id INTEGER REFERENCES irradiation_runs(id),
+    ion_species TEXT,
+    beam_energy_mev DOUBLE PRECISION,
+    let_surface DOUBLE PRECISION,
+    let_bragg_peak DOUBLE PRECISION,
+    range_um DOUBLE PRECISION,
+    beam_type TEXT,
+    fluence_at_meas DOUBLE PRECISION,
+    validation_mode_used TEXT,
+    validation_gate_pass BOOLEAN,
+    validation_supported_fraction DOUBLE PRECISION,
+    validation_supported_pairs INTEGER,
+    validation_total_pairs INTEGER,
+    baseline_reference_count INTEGER,
+    baseline_reference_spread DOUBLE PRECISION,
+    baseline_reference_method TEXT,
+    confidence_level TEXT NOT NULL DEFAULT 'unsupported'
+        CHECK (confidence_level IN ('strong', 'weak', 'unsupported')),
+    confidence_score DOUBLE PRECISION,
+    confidence_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
     physics_flags TEXT[],
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -277,7 +375,150 @@ CREATE TABLE IF NOT EXISTS iv_physical_parameter_predictions (
 CREATE INDEX IF NOT EXISTS idx_iv_phys_param_pred_model
     ON iv_physical_parameter_predictions(model_run_id);
 
--- Reserved for later validation-gated constrained curve reconstruction.
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN pair_id BIGINT REFERENCES iv_physical_response_pairs(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN pair_key TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN post_feature_id BIGINT REFERENCES iv_physical_curve_features(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN source_metadata_id INTEGER REFERENCES baselines_metadata(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN post_metadata_id INTEGER REFERENCES baselines_metadata(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions
+        ADD COLUMN reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions
+        ADD CONSTRAINT iv_phys_param_reference_tier_check
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN donor_distance DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN unsupported_reason TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN sc_voltage_v DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN sc_duration_us DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN sc_condition_label TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN irrad_run_id INTEGER REFERENCES irradiation_runs(id);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN ion_species TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN beam_energy_mev DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN let_surface DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN let_bragg_peak DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN range_um DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN beam_type TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN fluence_at_meas DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN validation_mode_used TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN validation_gate_pass BOOLEAN;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN validation_supported_fraction DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN validation_supported_pairs INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN validation_total_pairs INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN baseline_reference_count INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN baseline_reference_spread DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN baseline_reference_method TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions
+        ADD COLUMN confidence_level TEXT NOT NULL DEFAULT 'unsupported';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions
+        ADD CONSTRAINT iv_phys_param_confidence_level_check
+        CHECK (confidence_level IN ('strong', 'weak', 'unsupported'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions ADD COLUMN confidence_score DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_parameter_predictions
+        ADD COLUMN confidence_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::text[];
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_iv_phys_param_pred_pair
+    ON iv_physical_parameter_predictions(pair_id);
+CREATE INDEX IF NOT EXISTS idx_iv_phys_param_pred_confidence
+    ON iv_physical_parameter_predictions(confidence_level);
+CREATE INDEX IF NOT EXISTS idx_iv_phys_param_pred_reference_tier
+    ON iv_physical_parameter_predictions(reference_tier);
+
+-- V2 confidence-labeled constrained curve reconstruction.
 -- Blocking and 3rd_Quadrant are intentionally outside the V1 prediction scope.
 CREATE TABLE IF NOT EXISTS iv_physical_curve_points (
     id BIGSERIAL PRIMARY KEY,
@@ -285,14 +526,34 @@ CREATE TABLE IF NOT EXISTS iv_physical_curve_points (
         REFERENCES iv_physical_parameter_predictions(id) ON DELETE CASCADE,
     model_run_id INTEGER NOT NULL REFERENCES iv_physical_model_runs(id) ON DELETE CASCADE,
     source_metadata_id INTEGER REFERENCES baselines_metadata(id) ON DELETE SET NULL,
+    source_feature_id BIGINT REFERENCES iv_physical_curve_features(id) ON DELETE SET NULL,
+    pair_id BIGINT REFERENCES iv_physical_response_pairs(id) ON DELETE SET NULL,
+    target_type TEXT NOT NULL DEFAULT 'delta_vth_v'
+        CHECK (target_type IN ('delta_vth_v', 'log_rdson_ratio')),
     curve_family TEXT NOT NULL CHECK (curve_family IN ('IdVg', 'IdVd')),
+    reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad'
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine')),
     x_axis_name TEXT NOT NULL,
     x_value DOUBLE PRECISION NOT NULL,
+    source_x_value DOUBLE PRECISION,
+    predicted_x_value DOUBLE PRECISION,
     bias_axis_name TEXT,
     bias_value DOUBLE PRECISION,
     point_index INTEGER,
     pristine_i_drain DOUBLE PRECISION,
     predicted_post_i_drain DOUBLE PRECISION,
+    predicted_parameter_value DOUBLE PRECISION,
+    predicted_parameter_p10 DOUBLE PRECISION,
+    predicted_parameter_p90 DOUBLE PRECISION,
+    donor_pair_keys TEXT[],
+    donor_count INTEGER,
+    donor_distance DOUBLE PRECISION,
+    support_status TEXT,
+    unsupported_reason TEXT,
+    confidence_level TEXT NOT NULL DEFAULT 'weak'
+        CHECK (confidence_level IN ('strong', 'weak', 'unsupported')),
+    confidence_score DOUBLE PRECISION,
+    confidence_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
     physics_flags TEXT[],
     prediction_status TEXT NOT NULL DEFAULT 'ok',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -302,6 +563,104 @@ CREATE INDEX IF NOT EXISTS idx_iv_phys_curve_points_model
     ON iv_physical_curve_points(model_run_id);
 CREATE INDEX IF NOT EXISTS idx_iv_phys_curve_points_source
     ON iv_physical_curve_points(source_metadata_id);
+
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN source_feature_id BIGINT REFERENCES iv_physical_curve_features(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN pair_id BIGINT REFERENCES iv_physical_response_pairs(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD COLUMN target_type TEXT NOT NULL DEFAULT 'delta_vth_v';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD CONSTRAINT iv_phys_curve_target_type_check
+        CHECK (target_type IN ('delta_vth_v', 'log_rdson_ratio'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD COLUMN reference_tier TEXT NOT NULL DEFAULT 'strict_pre_irrad';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD CONSTRAINT iv_phys_curve_reference_tier_check
+        CHECK (reference_tier IN ('strict_pre_irrad', 'library_pristine'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN source_x_value DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN predicted_x_value DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN predicted_parameter_value DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN predicted_parameter_p10 DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN predicted_parameter_p90 DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN donor_pair_keys TEXT[];
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN donor_count INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN donor_distance DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN support_status TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN unsupported_reason TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD COLUMN confidence_level TEXT NOT NULL DEFAULT 'weak';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD CONSTRAINT iv_phys_curve_confidence_level_check
+        CHECK (confidence_level IN ('strong', 'weak', 'unsupported'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points ADD COLUMN confidence_score DOUBLE PRECISION;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE iv_physical_curve_points
+        ADD COLUMN confidence_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::text[];
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_iv_phys_curve_points_param
+    ON iv_physical_curve_points(parameter_prediction_id);
+CREATE INDEX IF NOT EXISTS idx_iv_phys_curve_points_confidence
+    ON iv_physical_curve_points(confidence_level);
+CREATE INDEX IF NOT EXISTS idx_iv_phys_curve_points_reference_tier
+    ON iv_physical_curve_points(reference_tier);
 
 -- Superset dashboard views.
 -- These views flatten validation metrics and support diagnostics into shapes
@@ -313,6 +672,9 @@ DROP VIEW IF EXISTS iv_physical_prediction_pair_coverage_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_support_summary_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_validation_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_model_summary_view CASCADE;
+DROP VIEW IF EXISTS iv_physical_curve_prediction_view CASCADE;
+DROP VIEW IF EXISTS iv_physical_parameter_prediction_summary_view CASCADE;
+DROP VIEW IF EXISTS iv_physical_parameter_prediction_view CASCADE;
 
 CREATE VIEW iv_physical_prediction_model_summary_view AS
 WITH latest_validated AS (
@@ -334,39 +696,40 @@ SELECT
     mr.unsupported_validation_pairs,
     t.validation_mode,
     t.validation_label,
+    t.reference_tier,
     t.stress_type,
     t.stress_target_key,
     t.curve_family,
     t.target_type,
     t.target_label,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'validation_pairs'], '')::integer
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'validation_pairs'], '')::integer
         AS target_validation_pairs,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'supported_validation_pairs'], '')::integer
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'supported_validation_pairs'], '')::integer
         AS target_supported_validation_pairs,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'unsupported_validation_pairs'], '')::integer
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'unsupported_validation_pairs'], '')::integer
         AS target_unsupported_validation_pairs,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'median_abs_residual'], '')::double precision
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'median_abs_residual'], '')::double precision
         AS median_abs_residual,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'p90_abs_residual'], '')::double precision
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'p90_abs_residual'], '')::double precision
         AS p90_abs_residual,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'gate', 'min_supported_validation_pairs'], '')::integer
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'gate', 'min_supported_validation_pairs'], '')::integer
         AS gate_min_supported_validation_pairs,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'gate', 'median_abs_residual_max'], '')::double precision
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'gate', 'median_abs_residual_max'], '')::double precision
         AS gate_median_abs_residual_max,
-    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'gate', 'p90_abs_residual_max'], '')::double precision
+    NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'gate', 'p90_abs_residual_max'], '')::double precision
         AS gate_p90_abs_residual_max,
-    COALESCE(NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'gate_pass'], '')::boolean, false)
+    COALESCE(NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'gate_pass'], '')::boolean, false)
         AS gate_pass,
     COALESCE(NULLIF(mr.metrics #>> ARRAY['curve_reconstruction_enabled'], '')::boolean, false)
         AS curve_reconstruction_enabled,
     (mr.id = (SELECT MAX(id) FROM iv_physical_model_runs)) AS is_latest_model_run,
     (mr.id = lv.latest_validated_model_run_id) AS is_latest_validated_model_run,
-    (mr.metrics #> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key]) IS NOT NULL
+    (mr.metrics #> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key]) IS NOT NULL
         AS is_intended_stress_target,
     CASE
-      WHEN (mr.metrics #> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key]) IS NULL
+      WHEN (mr.metrics #> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key]) IS NULL
         THEN 'not_evaluated'
-      WHEN COALESCE(NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'stress_targets', t.stress_target_key, 'gate_pass'], '')::boolean, false)
+      WHEN COALESCE(NULLIF(mr.metrics #>> ARRAY['validation_modes', t.validation_mode, 'reference_stress_targets', t.stress_target_key, 'gate_pass'], '')::boolean, false)
         THEN 'gate_pass'
       WHEN mr.validation_pairs IS NULL
         THEN 'not_validated'
@@ -376,31 +739,43 @@ FROM iv_physical_model_runs mr
 LEFT JOIN latest_validated lv ON true
 CROSS JOIN (
     VALUES
-      ('within_condition'::text, 'Within-condition validation'::text, 'sc'::text,
-       'sc|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'strict_pre_irrad'::text, 'sc'::text,
+       'strict_pre_irrad|sc|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
        'IdVg / delta Vth'::text),
-      ('within_condition'::text, 'Within-condition validation'::text, 'irradiation'::text,
-       'irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'strict_pre_irrad'::text, 'irradiation'::text,
+       'strict_pre_irrad|irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
        'IdVg / delta Vth'::text),
-      ('within_condition'::text, 'Within-condition validation'::text, 'sc'::text,
-       'sc|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'strict_pre_irrad'::text, 'sc'::text,
+       'strict_pre_irrad|sc|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
        'IdVd / log Rds(on) ratio'::text),
-      ('within_condition'::text, 'Within-condition validation'::text, 'irradiation'::text,
-       'irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'strict_pre_irrad'::text, 'irradiation'::text,
+       'strict_pre_irrad|irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
        'IdVd / log Rds(on) ratio'::text),
-      ('leave_condition'::text, 'Leave-condition validation'::text, 'sc'::text,
-       'sc|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'library_pristine'::text, 'irradiation'::text,
+       'library_pristine|irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
        'IdVg / delta Vth'::text),
-      ('leave_condition'::text, 'Leave-condition validation'::text, 'irradiation'::text,
-       'irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
-       'IdVg / delta Vth'::text),
-      ('leave_condition'::text, 'Leave-condition validation'::text, 'sc'::text,
-       'sc|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+      ('within_condition'::text, 'Within-condition validation'::text, 'library_pristine'::text, 'irradiation'::text,
+       'library_pristine|irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
        'IdVd / log Rds(on) ratio'::text),
-      ('leave_condition'::text, 'Leave-condition validation'::text, 'irradiation'::text,
-       'irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'strict_pre_irrad'::text, 'sc'::text,
+       'strict_pre_irrad|sc|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+       'IdVg / delta Vth'::text),
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'strict_pre_irrad'::text, 'irradiation'::text,
+       'strict_pre_irrad|irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+       'IdVg / delta Vth'::text),
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'strict_pre_irrad'::text, 'sc'::text,
+       'strict_pre_irrad|sc|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+       'IdVd / log Rds(on) ratio'::text),
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'strict_pre_irrad'::text, 'irradiation'::text,
+       'strict_pre_irrad|irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
+       'IdVd / log Rds(on) ratio'::text),
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'library_pristine'::text, 'irradiation'::text,
+       'library_pristine|irradiation|delta_vth_v'::text, 'IdVg'::text, 'delta_vth_v'::text,
+       'IdVg / delta Vth'::text),
+      ('leave_condition'::text, 'Leave-condition validation'::text, 'library_pristine'::text, 'irradiation'::text,
+       'library_pristine|irradiation|log_rdson_ratio'::text, 'IdVd'::text, 'log_rdson_ratio'::text,
        'IdVd / log Rds(on) ratio'::text)
-) AS t(validation_mode, validation_label, stress_type, stress_target_key,
+) AS t(validation_mode, validation_label, reference_tier, stress_type, stress_target_key,
        curve_family, target_type, target_label);
 
 CREATE VIEW iv_physical_prediction_validation_view AS
@@ -427,6 +802,7 @@ SELECT
     vr.pair_id,
     vr.pair_key,
     vr.split_group,
+    vr.reference_tier,
     vr.stress_type,
     vr.curve_family,
     vr.target_type,
@@ -497,6 +873,7 @@ SELECT
     is_latest_validated_model_run,
     validation_mode,
     validation_label,
+    reference_tier,
     target_type,
     target_label,
     curve_family,
@@ -517,11 +894,13 @@ FROM iv_physical_prediction_validation_view
 GROUP BY
     model_run_id, model_version, model_status, is_latest_model_run,
     is_latest_validated_model_run, validation_mode, validation_label,
-    target_type, target_label, curve_family, stress_type, device_type,
+    reference_tier, target_type, target_label, curve_family, stress_type, device_type,
     support_status, support_reason;
 
 CREATE VIEW iv_physical_prediction_pair_coverage_view AS
 SELECT
+    reference_tier,
+    pairing_method,
     target_type,
     CASE
       WHEN target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
@@ -533,6 +912,7 @@ SELECT
     device_type,
     manufacturer,
     quality_status,
+    same_physical_device,
     COUNT(*) AS n_pairs,
     COUNT(DISTINCT split_group) AS n_split_groups,
     COUNT(DISTINCT physical_device_key) AS n_physical_devices,
@@ -546,13 +926,19 @@ SELECT
         AS n_irrad_runs,
     COUNT(DISTINCT ion_species) FILTER (WHERE ion_species IS NOT NULL)
         AS n_ion_species,
+    AVG(baseline_reference_count) FILTER (WHERE baseline_reference_count IS NOT NULL)
+        AS mean_baseline_reference_count,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY baseline_reference_spread)
+        FILTER (WHERE baseline_reference_spread IS NOT NULL) AS median_baseline_reference_spread,
+    PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY baseline_reference_spread)
+        FILTER (WHERE baseline_reference_spread IS NOT NULL) AS p90_baseline_reference_spread,
     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY delta_vth_v)
         FILTER (WHERE delta_vth_v IS NOT NULL) AS median_delta_vth_v,
     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY log_rdson_ratio)
         FILTER (WHERE log_rdson_ratio IS NOT NULL) AS median_log_rdson_ratio
 FROM iv_physical_response_pairs
-GROUP BY target_type, curve_family, stress_type, device_type, manufacturer,
-         quality_status;
+GROUP BY reference_tier, pairing_method, target_type, curve_family, stress_type,
+         device_type, manufacturer, quality_status, same_physical_device;
 
 CREATE VIEW iv_physical_prediction_feature_coverage_view AS
 SELECT
@@ -586,6 +972,7 @@ SELECT
     NULL::integer AS model_run_id,
     NULL::text AS validation_mode,
     NULL::text AS validation_label,
+    NULL::text AS reference_tier,
     f.target_type,
     CASE
       WHEN f.target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
@@ -610,6 +997,7 @@ SELECT
     model_run_id,
     validation_mode,
     validation_label,
+    reference_tier,
     target_type,
     target_label,
     curve_family,
@@ -621,5 +1009,209 @@ SELECT
     COUNT(*) AS n_records
 FROM iv_physical_prediction_validation_view
 WHERE support_status <> 'ok'
-GROUP BY model_run_id, validation_mode, validation_label, target_type, target_label, curve_family,
+GROUP BY model_run_id, validation_mode, validation_label, reference_tier, target_type, target_label, curve_family,
          stress_type, support_status, device_type, support_reason;
+
+CREATE VIEW iv_physical_parameter_prediction_view AS
+SELECT
+    pp.id AS parameter_prediction_id,
+    pp.model_run_id,
+    mr.model_version,
+    mr.algorithm,
+    mr.trained_at,
+    mr.model_status,
+    (mr.id = (SELECT MAX(id) FROM iv_physical_model_runs)) AS is_latest_model_run,
+    pp.pair_id,
+    pp.pair_key,
+    pp.source_feature_id,
+    pp.post_feature_id,
+    pp.source_metadata_id,
+    pp.post_metadata_id,
+    pp.target_type,
+    CASE
+      WHEN pp.target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
+      WHEN pp.target_type = 'log_rdson_ratio' THEN 'IdVd / log Rds(on) ratio'
+      ELSE pp.target_type
+    END AS target_label,
+    pp.curve_family,
+    pp.stress_type,
+    pp.reference_tier,
+    pp.predicted_value,
+    pp.predicted_p10,
+    pp.predicted_p90,
+    pp.predicted_p90 - pp.predicted_p10 AS prediction_interval_width,
+    pp.validation_mode_used,
+    pp.validation_gate_pass,
+    pp.validation_supported_fraction,
+    pp.validation_supported_pairs,
+    pp.validation_total_pairs,
+    pp.baseline_reference_count,
+    pp.baseline_reference_spread,
+    pp.baseline_reference_method,
+    pp.donor_pair_keys,
+    pp.donor_count,
+    pp.donor_distance,
+    pp.support_status,
+    COALESCE(pp.unsupported_reason, 'supported') AS support_reason,
+    pp.confidence_level,
+    pp.confidence_score,
+    pp.confidence_reasons,
+    pp.sc_voltage_v,
+    pp.sc_duration_us,
+    pp.sc_condition_label,
+    pp.irrad_run_id,
+    pp.ion_species,
+    pp.beam_energy_mev,
+    pp.let_surface,
+    pp.let_bragg_peak,
+    pp.range_um,
+    pp.beam_type,
+    pp.fluence_at_meas,
+    sf.device_type,
+    sf.manufacturer,
+    sf.physical_device_key,
+    pp.physics_flags,
+    pp.created_at
+FROM iv_physical_parameter_predictions pp
+JOIN iv_physical_model_runs mr ON mr.id = pp.model_run_id
+LEFT JOIN iv_physical_curve_features sf ON sf.id = pp.source_feature_id;
+
+CREATE VIEW iv_physical_curve_prediction_view AS
+SELECT
+    cp.id AS curve_point_id,
+    cp.parameter_prediction_id,
+    cp.model_run_id,
+    pp.model_version,
+    pp.algorithm,
+    pp.trained_at,
+    pp.model_status,
+    pp.is_latest_model_run,
+    cp.pair_id,
+    pp.pair_key,
+    cp.source_metadata_id,
+    cp.source_feature_id,
+    pp.post_metadata_id,
+    pp.post_feature_id,
+    cp.target_type,
+    pp.target_label,
+    cp.curve_family,
+    pp.stress_type,
+    cp.reference_tier,
+    pp.device_type,
+    pp.manufacturer,
+    pp.physical_device_key,
+    cp.x_axis_name,
+    cp.x_value,
+    cp.source_x_value,
+    cp.predicted_x_value,
+    cp.bias_axis_name,
+    cp.bias_value,
+    cp.point_index,
+    cp.pristine_i_drain,
+    cp.predicted_post_i_drain,
+    cp.predicted_parameter_value,
+    cp.predicted_parameter_p10,
+    cp.predicted_parameter_p90,
+    cp.donor_pair_keys,
+    cp.donor_count,
+    cp.donor_distance,
+    cp.support_status,
+    COALESCE(cp.unsupported_reason, 'supported') AS support_reason,
+    cp.confidence_level,
+    cp.confidence_score,
+    cp.confidence_reasons,
+    cp.physics_flags,
+    cp.prediction_status,
+    pp.validation_mode_used,
+    pp.validation_gate_pass,
+    pp.validation_supported_fraction,
+    pp.validation_supported_pairs,
+    pp.validation_total_pairs,
+    pp.baseline_reference_count,
+    pp.baseline_reference_spread,
+    pp.irrad_run_id,
+    pp.ion_species,
+    pp.beam_energy_mev,
+    pp.let_surface,
+    pp.let_bragg_peak,
+    pp.range_um,
+    pp.fluence_at_meas,
+    cp.created_at
+FROM iv_physical_curve_points cp
+JOIN iv_physical_parameter_prediction_view pp
+  ON pp.parameter_prediction_id = cp.parameter_prediction_id;
+
+CREATE VIEW iv_physical_parameter_prediction_summary_view AS
+WITH curve_counts AS (
+    SELECT
+        parameter_prediction_id,
+        COUNT(*) AS n_curve_points
+    FROM iv_physical_curve_points
+    GROUP BY parameter_prediction_id
+)
+SELECT
+    pp.model_run_id,
+    pp.model_version,
+    pp.algorithm,
+    pp.trained_at,
+    pp.model_status,
+    pp.is_latest_model_run,
+    pp.validation_mode_used,
+    pp.reference_tier,
+    pp.stress_type,
+    pp.target_type,
+    pp.target_label,
+    pp.curve_family,
+    pp.device_type,
+    pp.manufacturer,
+    pp.confidence_level,
+    pp.support_status,
+    pp.support_reason,
+    pp.validation_gate_pass,
+    pp.validation_supported_fraction,
+    pp.validation_supported_pairs,
+    pp.validation_total_pairs,
+    pp.baseline_reference_method,
+    COUNT(*) AS n_parameter_predictions,
+    COUNT(*) FILTER (WHERE pp.predicted_value IS NOT NULL) AS n_numeric_predictions,
+    COUNT(*) FILTER (WHERE pp.confidence_level = 'unsupported') AS n_unsupported_predictions,
+    COUNT(*) FILTER (WHERE COALESCE(cc.n_curve_points, 0) > 0) AS n_parameters_with_curves,
+    COALESCE(SUM(cc.n_curve_points), 0)::bigint AS n_curve_points,
+    AVG(pp.confidence_score) AS avg_confidence_score,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pp.confidence_score)
+        FILTER (WHERE pp.confidence_score IS NOT NULL) AS median_confidence_score,
+    AVG(pp.donor_count) AS avg_donor_count,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pp.donor_distance)
+        FILTER (WHERE pp.donor_distance IS NOT NULL) AS median_donor_distance,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pp.baseline_reference_spread)
+        FILTER (WHERE pp.baseline_reference_spread IS NOT NULL) AS median_baseline_reference_spread,
+    PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY pp.baseline_reference_spread)
+        FILTER (WHERE pp.baseline_reference_spread IS NOT NULL) AS p90_baseline_reference_spread,
+    MIN(pp.created_at) AS first_created_at,
+    MAX(pp.created_at) AS last_created_at
+FROM iv_physical_parameter_prediction_view pp
+LEFT JOIN curve_counts cc
+  ON cc.parameter_prediction_id = pp.parameter_prediction_id
+GROUP BY
+    pp.model_run_id,
+    pp.model_version,
+    pp.algorithm,
+    pp.trained_at,
+    pp.model_status,
+    pp.is_latest_model_run,
+    pp.validation_mode_used,
+    pp.reference_tier,
+    pp.stress_type,
+    pp.target_type,
+    pp.target_label,
+    pp.curve_family,
+    pp.device_type,
+    pp.manufacturer,
+    pp.confidence_level,
+    pp.support_status,
+    pp.support_reason,
+    pp.validation_gate_pass,
+    pp.validation_supported_fraction,
+    pp.validation_supported_pairs,
+    pp.validation_total_pairs,
+    pp.baseline_reference_method;

@@ -8,16 +8,19 @@ post-stress IV behavior. V2 predicts physical degradation parameters first:
   * IdVg -> delta_vth_v
   * IdVd -> log_rdson_ratio
 
-It does not mutate the legacy iv_prediction_* tables and it does not
-reconstruct curves. Blocking and 3rd_Quadrant are intentionally out of V1
+It does not mutate the legacy iv_prediction_* tables. Curve reconstruction is
+V2-only, confidence-labeled, and limited to validated IdVg/IdVd physical
+parameter predictions. Blocking and 3rd_Quadrant are intentionally out of V1
 scope until separate physical envelope/diode models are validated.
 
 Typical usage:
     python3 ml_post_iv_physical_prediction.py --rebuild-sql
     python3 ml_post_iv_physical_prediction.py --extract-features
-    python3 ml_post_iv_physical_prediction.py --build-pairs
-    python3 ml_post_iv_physical_prediction.py --train
-    python3 ml_post_iv_physical_prediction.py --validate
+    python3 ml_post_iv_physical_prediction.py --build-pairs --include-library-pristine
+    python3 ml_post_iv_physical_prediction.py --audit-library-pristine
+    python3 ml_post_iv_physical_prediction.py --train --reference-tier both
+    python3 ml_post_iv_physical_prediction.py --validate --validation-mode both --reference-tier both
+    python3 ml_post_iv_physical_prediction.py --predict-curves --reference-tier both
 """
 
 import argparse
@@ -55,7 +58,7 @@ SCHEMA_PATH = REPO_ROOT / "schema" / "024_iv_physical_prediction.sql"
 OUT_DIR = REPO_ROOT / "out" / "iv_physical_prediction"
 MODEL_DIR = OUT_DIR / "models"
 
-MODEL_VERSION = "v2.1-physical-donor"
+MODEL_VERSION = "v2.2-physical-donor-library-pristine"
 ALGORITHM = "support_gated_weighted_median_donor_v1"
 
 CURVE_TO_TARGET = {
@@ -77,6 +80,22 @@ VALIDATION_MODE_LABELS = {
     "within_condition": "Within-condition validation",
     "leave_condition": "Leave-condition validation",
 }
+REFERENCE_TIERS = ("strict_pre_irrad", "library_pristine")
+REFERENCE_TIER_LABELS = {
+    "strict_pre_irrad": "Strict same-device reference",
+    "library_pristine": "Library pristine reference",
+}
+REFERENCE_TIER_OPTIONS = {
+    "strict": ("strict_pre_irrad",),
+    "library": ("library_pristine",),
+    "both": REFERENCE_TIERS,
+}
+LIBRARY_REFERENCE_METHOD = "single_best_compatible_feature"
+BROAD_ION_NEIGHBORHOOD_ENABLED = False
+CONFIDENCE_LEVELS = ("strong", "weak", "unsupported")
+STRONG_SUPPORTED_FRACTION_MIN = 0.10
+PREDICTION_STRESS_TYPES = ("irradiation",)
+DEFAULT_PREDICTION_DONOR_MODE = "within_condition"
 
 MIN_DONORS = 3
 NEAREST_K = 7
@@ -196,6 +215,39 @@ def is_pristine_reference(row):
     return (
         source == "baselines"
     )
+
+
+def is_library_pristine_reference(row):
+    """Return True for explicitly known-pristine library candidates."""
+    if row.get("quality_status") != "usable":
+        return False
+    if clean_text(row.get("device_type")) is None:
+        return False
+    if row.get("is_likely_irradiated"):
+        return False
+    decision = row.get("promotion_decision")
+    if decision and str(decision).startswith("rejected_"):
+        return False
+
+    source = row.get("data_source") or "baselines"
+    test_condition = row.get("test_condition")
+    irrad_role = row.get("irrad_role")
+    if irrad_role == "pre_irrad":
+        return True
+    if source == "sc_ruggedness" and test_condition == "pristine":
+        return True
+    if test_condition == "pre_avalanche":
+        return True
+    if source == "baselines" and test_condition is None and irrad_role is None:
+        return True
+    return False
+
+
+def reference_tiers_for_option(option):
+    try:
+        return REFERENCE_TIER_OPTIONS[option]
+    except KeyError as exc:
+        raise ValueError(f"unknown reference tier option: {option}") from exc
 
 
 def physical_device_key(row):
@@ -748,6 +800,69 @@ def ranges_overlap(pre_start, pre_stop, post_start, post_stop):
     return max(pre_lo, post_lo) <= min(pre_hi, post_hi)
 
 
+def baseline_metric_value(feature):
+    if feature["target_type"] == "delta_vth_v":
+        return safe_float(feature.get("vth_v"))
+    if feature["target_type"] == "log_rdson_ratio":
+        rdson = safe_float(feature.get("rdson_mohm"))
+        if rdson is None or rdson <= 0:
+            return None
+        return math.log(rdson)
+    return None
+
+
+def _fmt_group_value(value):
+    value = safe_float(value)
+    if value is None:
+        return "missing"
+    return f"{value:.6g}"
+
+
+def library_reference_group_key(post):
+    bias_value = (
+        post.get("drain_bias_value")
+        if post["target_type"] == "delta_vth_v"
+        else post.get("bias_value")
+    )
+    sweep_start = _fmt_group_value(post.get("sweep_start"))
+    sweep_stop = _fmt_group_value(post.get("sweep_stop"))
+    sweep_points = post.get("sweep_points")
+    points = str(sweep_points) if sweep_points is not None else "missing"
+    return "|".join(
+        [
+            "library_pristine",
+            str(post.get("target_type")),
+            str(post.get("curve_family")),
+            str(post.get("device_type")),
+            f"bias={_fmt_group_value(bias_value)}",
+            f"sweep={sweep_start}:{sweep_stop}",
+            f"points={points}",
+        ]
+    )
+
+
+def baseline_reference_stats(compatible_rows, target_type):
+    values = []
+    for row in compatible_rows:
+        candidate = row[3]
+        value = baseline_metric_value(candidate)
+        if value is not None:
+            values.append(value)
+    if not values:
+        return {
+            "baseline_reference_count": 0,
+            "baseline_reference_spread": None,
+        }
+    if len(values) == 1:
+        spread = 0.0
+    else:
+        spread = percentile(values, 0.75) - percentile(values, 0.25)
+    return {
+        "baseline_reference_count": len(values),
+        "baseline_reference_spread": spread,
+    }
+
+
 def setup_compatibility_score(pre, post, stress_type):
     """Return (score, flags, reject_reason) for a candidate pre feature."""
     score = 0.0
@@ -847,6 +962,65 @@ def choose_pre_feature(candidates, post, stress_type):
     return best[3], flags, None
 
 
+def compatible_library_rows(candidates, post):
+    scored = []
+    reject_reasons = Counter()
+    for candidate in candidates:
+        if candidate.get("physical_device_key") == post.get("physical_device_key"):
+            reject_reasons["library_candidate_same_physical_device"] += 1
+            continue
+        score, flags, reason = setup_compatibility_score(candidate, post, "irradiation")
+        if reason:
+            reject_reasons[reason] += 1
+            continue
+        scored.append((
+            score,
+            candidate.get("metadata_created_at"),
+            candidate["metadata_id"],
+            candidate,
+            flags,
+        ))
+    scored.sort(key=lambda item: (
+        item[0],
+        item[1] is None,
+        item[1] or datetime.min.replace(tzinfo=None),
+        item[2],
+    ))
+    return scored, reject_reasons
+
+
+def choose_library_feature(candidates, post):
+    scored, reject_reasons = compatible_library_rows(candidates, post)
+    if not scored:
+        reason = (
+            reject_reasons.most_common(1)[0][0]
+            if reject_reasons
+            else "no_compatible_library_pristine_candidate"
+        )
+        return None, [], reason, {}
+
+    stats = baseline_reference_stats(scored, post["target_type"])
+    if stats["baseline_reference_count"] <= 0:
+        return None, [], "library_pristine_candidates_missing_metric", stats
+
+    best = scored[0]
+    selection_flags = list(best[4])
+    flags = [
+        "library_pristine_reference",
+        "not_same_physical_device",
+        "same_device_type",
+        "baseline_spread_checked",
+    ]
+    if "compatible_drain_bias" in selection_flags or "compatible_gate_bias" in selection_flags:
+        flags.append("compatible_bias")
+    flags.extend(selection_flags)
+    stats.update({
+        "baseline_reference_method": LIBRARY_REFERENCE_METHOD,
+        "library_reference_group_key": library_reference_group_key(post),
+    })
+    return best[3], flags, None, stats
+
+
 def response_from_features(pre, post):
     if post["target_type"] == "delta_vth_v":
         pre_v = safe_float(pre.get("vth_v"))
@@ -871,17 +1045,43 @@ def response_from_features(pre, post):
     return None, "unknown_target_type"
 
 
-def pair_tuple(pre, post, stress_type, response_value, selection_flags=None):
+def pair_tuple(
+    pre,
+    post,
+    stress_type,
+    response_value,
+    selection_flags=None,
+    reference_tier="strict_pre_irrad",
+    baseline_reference_count=1,
+    baseline_reference_spread=0.0,
+    baseline_reference_method="strict_same_physical_device",
+    library_reference_group_key=None,
+):
     target = post["target_type"]
-    pair_key = f"{stress_type}:{target}:pre{pre['metadata_id']}:post{post['metadata_id']}"
-    split_group = f"{stress_type}:{target}:{post['physical_device_key']}"
-    flags = ["strict_device_type_match", "strict_physical_device_key_match"]
+    pair_key = (
+        f"{stress_type}:{reference_tier}:{target}:"
+        f"pre{pre['metadata_id']}:post{post['metadata_id']}"
+    )
+    split_group = f"{stress_type}:{reference_tier}:{target}:{post['physical_device_key']}"
+    same_physical_device = pre.get("physical_device_key") == post.get("physical_device_key")
+    flags = [f"reference_tier_{reference_tier}"]
     flags.extend(selection_flags or [])
-    if stress_type == "sc":
-        flags.append("strict_sc_sample_group_match")
+    if reference_tier == "library_pristine":
+        pairing_method = "same_device_type_library_pristine_to_post_irrad"
+        flags.extend(["same_device_type"])
+    elif stress_type == "sc":
+        flags.extend([
+            "strict_device_type_match",
+            "strict_physical_device_key_match",
+            "strict_sc_sample_group_match",
+        ])
         pairing_method = "same_device_type_sample_group_pristine_to_post_sc"
     else:
-        flags.append("strict_irrad_device_key_match")
+        flags.extend([
+            "strict_device_type_match",
+            "strict_physical_device_key_match",
+            "strict_irrad_device_key_match",
+        ])
         pairing_method = "same_device_type_device_key_pre_to_post_irrad"
 
     delta_vth_v = response_value if target == "delta_vth_v" else None
@@ -891,6 +1091,7 @@ def pair_tuple(pre, post, stress_type, response_value, selection_flags=None):
         pair_key,
         stress_type,
         pairing_method,
+        reference_tier,
         post["curve_family"],
         target,
         pre["id"],
@@ -899,6 +1100,7 @@ def pair_tuple(pre, post, stress_type, response_value, selection_flags=None):
         post["metadata_id"],
         post["physical_device_key"],
         split_group,
+        same_physical_device,
         post["device_type"],
         post.get("manufacturer") or pre.get("manufacturer"),
         post.get("voltage_rating_v") or pre.get("voltage_rating_v"),
@@ -926,14 +1128,62 @@ def pair_tuple(pre, post, stress_type, response_value, selection_flags=None):
         post.get("range_um"),
         post.get("beam_type"),
         post.get("fluence_at_meas"),
+        baseline_reference_count,
+        baseline_reference_spread,
+        baseline_reference_method,
+        library_reference_group_key,
         "usable",
         flags,
     )
 
 
-def build_pairs(conn):
+def library_pristine_index(features):
+    index = defaultdict(list)
+    for feature in features:
+        if not is_library_pristine_reference(feature):
+            continue
+        key = (
+            feature["target_type"],
+            feature["curve_family"],
+            feature["device_type"],
+        )
+        index[key].append(feature)
+    return index
+
+
+def library_pair_for_post(post, library_pre):
+    key = (
+        post["target_type"],
+        post["curve_family"],
+        post["device_type"],
+    )
+    candidates = library_pre.get(key, [])
+    if not candidates:
+        return None, "irrad_no_library_pristine_candidate"
+    pre, selection_flags, reason, stats = choose_library_feature(candidates, post)
+    if reason:
+        return None, reason
+    response, reason = response_from_features(pre, post)
+    if reason:
+        return None, reason
+    return pair_tuple(
+        pre,
+        post,
+        "irradiation",
+        response,
+        selection_flags,
+        reference_tier="library_pristine",
+        baseline_reference_count=stats.get("baseline_reference_count"),
+        baseline_reference_spread=stats.get("baseline_reference_spread"),
+        baseline_reference_method=stats.get("baseline_reference_method"),
+        library_reference_group_key=stats.get("library_reference_group_key"),
+    ), None
+
+
+def build_pairs(conn, include_library_pristine=False):
     apply_schema(conn)
-    print("\nRebuilding strict V2 response pairs ...")
+    mode = "strict + library-pristine" if include_library_pristine else "strict"
+    print(f"\nRebuilding {mode} V2 response pairs ...")
     truncate_tables(conn, V2_DOWNSTREAM_TABLES)
     features = load_features(conn)
     usable = [f for f in features if f["quality_status"] == "usable"]
@@ -953,6 +1203,7 @@ def build_pairs(conn):
             sc_pre[key].append(feature)
         if feature["irrad_role"] == "pre_irrad":
             ir_pre[key].append(feature)
+    library_pre = library_pristine_index(usable)
 
     for post in usable:
         key = (
@@ -985,22 +1236,32 @@ def build_pairs(conn):
                 continue
             candidates = ir_pre.get(key, [])
             if not candidates:
-                reasons["irrad_no_matching_pre_irrad_feature"] += 1
-                continue
-            pre, selection_flags, reason = choose_pre_feature(candidates, post, "irradiation")
-            if reason:
-                reasons[reason] += 1
-                continue
-            response, reason = response_from_features(pre, post)
-            if reason:
-                reasons[reason] += 1
-                continue
-            pairs.append(pair_tuple(pre, post, "irradiation", response, selection_flags))
+                strict_reason = "irrad_no_matching_pre_irrad_feature"
+            else:
+                pre, selection_flags, strict_reason = choose_pre_feature(
+                    candidates, post, "irradiation"
+                )
+                if not strict_reason:
+                    response, strict_reason = response_from_features(pre, post)
+                if not strict_reason:
+                    pairs.append(pair_tuple(pre, post, "irradiation", response, selection_flags))
+                    continue
+
+            if include_library_pristine:
+                pair, library_reason = library_pair_for_post(post, library_pre)
+                if pair:
+                    reasons[f"library_fallback_from_{strict_reason}"] += 1
+                    pairs.append(pair)
+                    continue
+                reasons[library_reason] += 1
+            else:
+                reasons[strict_reason] += 1
 
     columns = (
         "pair_key",
         "stress_type",
         "pairing_method",
+        "reference_tier",
         "curve_family",
         "target_type",
         "pre_feature_id",
@@ -1009,6 +1270,7 @@ def build_pairs(conn):
         "post_metadata_id",
         "physical_device_key",
         "split_group",
+        "same_physical_device",
         "device_type",
         "manufacturer",
         "voltage_rating_v",
@@ -1036,6 +1298,10 @@ def build_pairs(conn):
         "range_um",
         "beam_type",
         "fluence_at_meas",
+        "baseline_reference_count",
+        "baseline_reference_spread",
+        "baseline_reference_method",
+        "library_reference_group_key",
         "quality_status",
         "quality_flags",
     )
@@ -1060,28 +1326,28 @@ def print_pair_summary(conn, reasons):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT target_type, stress_type, COUNT(*)
+            SELECT reference_tier, target_type, stress_type, COUNT(*)
             FROM iv_physical_response_pairs
-            GROUP BY 1, 2
-            ORDER BY 1, 2
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
             """
         )
-        print("\npair count by target / stress:")
-        for target, stress, count in cur.fetchall():
-            print(f"  {target} | {stress}: {count}")
+        print("\npair count by reference tier / target / stress:")
+        for reference_tier, target, stress, count in cur.fetchall():
+            print(f"  {reference_tier} | {target} | {stress}: {count}")
 
         cur.execute(
             """
-            SELECT device_type, target_type, COUNT(*)
+            SELECT reference_tier, device_type, target_type, COUNT(*)
             FROM iv_physical_response_pairs
-            GROUP BY 1, 2
-            ORDER BY COUNT(*) DESC, 1, 2
+            GROUP BY 1, 2, 3
+            ORDER BY COUNT(*) DESC, 1, 2, 3
             LIMIT 60
             """
         )
-        print("\npair count by device_type / target:")
-        for device_type, target, count in cur.fetchall():
-            print(f"  {device_type} | {target}: {count}")
+        print("\npair count by reference tier / device_type / target:")
+        for reference_tier, device_type, target, count in cur.fetchall():
+            print(f"  {reference_tier} | {device_type} | {target}: {count}")
 
         cur.execute(
             """
@@ -1103,15 +1369,133 @@ def print_pair_summary(conn, reasons):
             print(f"  {reason}: {count}")
 
 
-def load_pairs(conn):
+def _audit_summary_value(values, q):
+    value = percentile(values, q)
+    return f"{value:.6g}" if value is not None else "NULL"
+
+
+def print_audit_group(rows, title, fields):
+    groups = defaultdict(list)
+    for row in rows:
+        groups[tuple(row.get(field) for field in fields)].append(row)
+    print(f"\n{title}:")
+    print("group | n | median_abs_library_error | p90_abs_library_error | median_abs_strict_delta | median_baseline_spread")
+    for key, group_rows in sorted(groups.items(), key=lambda item: (-len(item[1]), str(item[0]))):
+        errors = [row["abs_library_error"] for row in group_rows]
+        strict_abs = [abs(row["strict_response"]) for row in group_rows]
+        spreads = [
+            row["baseline_reference_spread"]
+            for row in group_rows
+            if row.get("baseline_reference_spread") is not None
+        ]
+        key_s = " / ".join(str(part) for part in key)
+        print(
+            f"  {key_s} | {len(group_rows)} | "
+            f"{_audit_summary_value(errors, 0.5)} | "
+            f"{_audit_summary_value(errors, 0.9)} | "
+            f"{_audit_summary_value(strict_abs, 0.5)} | "
+            f"{_audit_summary_value(spreads, 0.5)}"
+        )
+
+
+def audit_library_pristine(conn):
+    apply_schema(conn)
+    features = load_features(conn)
+    feature_by_id = {feature["id"]: feature for feature in features}
+    library_pre = library_pristine_index(
+        feature for feature in features if feature["quality_status"] == "usable"
+    )
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
             SELECT *
             FROM iv_physical_response_pairs
             WHERE quality_status = 'usable'
+              AND stress_type = 'irradiation'
+              AND reference_tier = 'strict_pre_irrad'
             ORDER BY id
             """
+        )
+        strict_pairs = list(cur.fetchall())
+
+    audit_rows = []
+    reasons = Counter()
+    for pair in strict_pairs:
+        post = feature_by_id.get(pair["post_feature_id"])
+        if post is None:
+            reasons["missing_post_feature"] += 1
+            continue
+        key = (
+            post["target_type"],
+            post["curve_family"],
+            post["device_type"],
+        )
+        candidates = library_pre.get(key, [])
+        pre, selection_flags, reason, stats = choose_library_feature(candidates, post)
+        if reason:
+            reasons[reason] += 1
+            continue
+        library_response, reason = response_from_features(pre, post)
+        if reason:
+            reasons[reason] += 1
+            continue
+        strict_response = target_value(pair)
+        if strict_response is None:
+            reasons["missing_strict_response"] += 1
+            continue
+        audit_rows.append({
+            "stress_type": pair["stress_type"],
+            "target_type": pair["target_type"],
+            "curve_family": pair["curve_family"],
+            "reference_tier": "library_pristine",
+            "device_type": pair["device_type"],
+            "ion_species": pair.get("ion_species"),
+            "irrad_run_id": pair.get("irrad_run_id"),
+            "strict_response": strict_response,
+            "library_response": library_response,
+            "abs_library_error": abs(library_response - strict_response),
+            "baseline_reference_count": stats.get("baseline_reference_count"),
+            "baseline_reference_spread": stats.get("baseline_reference_spread"),
+            "library_pre_metadata_id": pre["metadata_id"],
+            "post_metadata_id": post["metadata_id"],
+        })
+
+    print("\nLibrary-pristine audit against existing strict irradiation pairs:")
+    print(f"  strict irradiation pairs: {len(strict_pairs)}")
+    print(f"  auditable strict pairs: {len(audit_rows)}")
+    if reasons:
+        print("  audit skip reasons:")
+        for reason, count in reasons.most_common():
+            print(f"    {reason}: {count}")
+    if not audit_rows:
+        return
+    print_audit_group(audit_rows, "by stress / target / reference tier", (
+        "stress_type", "target_type", "reference_tier",
+    ))
+    print_audit_group(audit_rows, "by target / device type", (
+        "target_type", "device_type",
+    ))
+    print_audit_group(audit_rows, "by target / ion species", (
+        "target_type", "ion_species",
+    ))
+    print_audit_group(audit_rows, "by target / irradiation run", (
+        "target_type", "irrad_run_id",
+    ))
+    print_audit_group(audit_rows, "by curve family", ("curve_family",))
+
+
+def load_pairs(conn, reference_tier="both"):
+    tiers = reference_tiers_for_option(reference_tier)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM iv_physical_response_pairs
+            WHERE quality_status = 'usable'
+              AND reference_tier = ANY(%s)
+            ORDER BY id
+            """,
+            (list(tiers),),
         )
         return list(cur.fetchall())
 
@@ -1137,11 +1521,12 @@ def fit_feature_scales(pairs):
 def pair_counts(pairs):
     counts = Counter()
     for pair in pairs:
-        counts[f"{pair['stress_type']}|{pair['target_type']}"] += 1
+        counts[f"{pair['reference_tier']}|{pair['stress_type']}|{pair['target_type']}"] += 1
     return dict(sorted(counts.items()))
 
 
 def feature_config(scales, pairs):
+    reference_tiers = sorted({pair["reference_tier"] for pair in pairs})
     return {
         "model_version": MODEL_VERSION,
         "algorithm": ALGORITHM,
@@ -1153,6 +1538,8 @@ def feature_config(scales, pairs):
         },
         "measurement_category_to_curve_family": MEASUREMENT_CATEGORY_TO_CURVE,
         "validation_modes": VALIDATION_MODES,
+        "reference_tiers": reference_tiers,
+        "reference_tier_labels": REFERENCE_TIER_LABELS,
         "min_donors": MIN_DONORS,
         "nearest_k": NEAREST_K,
         "numeric_features": NUMERIC_FEATURES,
@@ -1160,8 +1547,13 @@ def feature_config(scales, pairs):
         "pair_counts": pair_counts(pairs),
         "categorical_policy": {
             "device_type": "exact_match_required",
-            "ion_species": "exact_match_required_for_irradiation_when_present",
+            "reference_tier": "same_reference_tier_required",
+            "ion_species": (
+                "tier_a_exact_match_required; "
+                "tier_b_broad_ion_let_neighborhood_disabled_until_validated"
+            ),
         },
+        "broad_ion_neighborhood_enabled": BROAD_ION_NEIGHBORHOOD_ENABLED,
         "validation_gates": VALIDATION_GATES,
     }
 
@@ -1174,15 +1566,17 @@ def json_default(value):
     return str(value)
 
 
-def train(conn):
+def train(conn, reference_tier="both"):
     apply_schema(conn)
-    pairs = load_pairs(conn)
+    pairs = load_pairs(conn, reference_tier=reference_tier)
     scales = fit_feature_scales(pairs)
     config = feature_config(scales, pairs)
     status = "pending_validation" if pairs else "unsupported"
     notes = (
         "Physical donor model trained for IdVg/IdVd parameter deltas only; "
-        "curve reconstruction is disabled until validation gates pass."
+        "curve reconstruction is disabled by default; run --predict-curves "
+        "to persist exploratory confidence-labeled V2 curves. "
+        f"Reference tier mode: {reference_tier}."
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -1225,6 +1619,7 @@ def train(conn):
         "training_pair_ids": [int(p["id"]) for p in pairs],
         "training_pair_keys": [p["pair_key"] for p in pairs],
         "training_pair_count": len(pairs),
+        "reference_tier_mode": reference_tier,
     }
     artifact_path.write_text(json.dumps(artifact, indent=2, default=json_default))
     rel_artifact = str(artifact_path.relative_to(REPO_ROOT))
@@ -1239,7 +1634,7 @@ def train(conn):
     print(f"  model_run_id: {run_id}")
     print(f"  train_pairs: {len(pairs)}")
     print(f"  artifact_path: {rel_artifact}")
-    print("  curve reconstruction: disabled")
+    print("  curve reconstruction: disabled until --predict-curves")
     return run_id
 
 
@@ -1321,13 +1716,14 @@ def predict_from_donors(target, pairs, config, validation_mode="within_condition
         for donor in pairs
         if donor["target_type"] == target["target_type"]
         and donor["stress_type"] == target["stress_type"]
+        and donor["reference_tier"] == target["reference_tier"]
         and donor["device_type"] == target["device_type"]
         and donor_allowed_for_validation(target, donor, validation_mode)
     ]
     if len(candidates) < min_donors:
         return {
             "support_status": "unsupported",
-            "unsupported_reason": "insufficient_same_device_type_donor_pairs",
+            "unsupported_reason": "insufficient_same_reference_tier_device_type_donor_pairs",
             "donor_count": len(candidates),
         }
 
@@ -1339,9 +1735,22 @@ def predict_from_donors(target, pairs, config, validation_mode="within_condition
             and donor["ion_species"].lower() == target["ion_species"].lower()
         ]
         if len(same_ion) < min_donors:
+            if (
+                target.get("reference_tier") == "library_pristine"
+                and config.get("broad_ion_neighborhood_enabled")
+            ):
+                return {
+                    "support_status": "unsupported",
+                    "unsupported_reason": "broad_ion_neighborhood_policy_not_implemented",
+                    "donor_count": len(same_ion),
+                }
             return {
                 "support_status": "unsupported",
-                "unsupported_reason": "insufficient_same_ion_species_donor_pairs",
+                "unsupported_reason": (
+                    "insufficient_same_ion_species_donor_pairs"
+                    if target.get("reference_tier") != "library_pristine"
+                    else "insufficient_same_ion_species_donor_pairs_broad_policy_not_validated"
+                ),
                 "donor_count": len(same_ion),
             }
         candidates = same_ion
@@ -1396,6 +1805,7 @@ def validation_tuple(run_id, validation_mode, pair, pred):
         pair["id"],
         pair["pair_key"],
         pair["split_group"],
+        pair["reference_tier"],
         pair["stress_type"],
         pair["curve_family"],
         pair["target_type"],
@@ -1450,73 +1860,93 @@ def _gate_metrics(values, total, unsupported, target_type):
 
 
 def summarize_validation(residual_rows):
-    by_stress_target = defaultdict(list)
-    by_target = defaultdict(list)
-    unsupported_stress_target = Counter()
-    unsupported_target = Counter()
-    totals_stress_target = Counter()
-    totals_target = Counter()
+    by_ref_stress_target = defaultdict(list)
+    by_ref_target = defaultdict(list)
+    unsupported_ref_stress_target = Counter()
+    unsupported_ref_target = Counter()
+    totals_ref_stress_target = Counter()
+    totals_ref_target = Counter()
 
     for row in residual_rows:
         validation_mode = row[1]
-        stress_type = row[5]
-        target_type = row[7]
-        stress_key = (validation_mode, stress_type, target_type)
-        target_key = (validation_mode, target_type)
-        totals_stress_target[stress_key] += 1
-        totals_target[target_key] += 1
-        if row[29] == "ok" and row[13] is not None:
-            by_stress_target[stress_key].append(row[13])
-            by_target[target_key].append(row[13])
+        reference_tier = row[5]
+        stress_type = row[6]
+        target_type = row[8]
+        stress_key = (validation_mode, reference_tier, stress_type, target_type)
+        target_key = (validation_mode, reference_tier, target_type)
+        totals_ref_stress_target[stress_key] += 1
+        totals_ref_target[target_key] += 1
+        if row[30] == "ok" and row[14] is not None:
+            by_ref_stress_target[stress_key].append(row[14])
+            by_ref_target[target_key].append(row[14])
         else:
-            unsupported_stress_target[stress_key] += 1
-            unsupported_target[target_key] += 1
+            unsupported_ref_stress_target[stress_key] += 1
+            unsupported_ref_target[target_key] += 1
 
     metrics = {
         "validation_gates": VALIDATION_GATES,
         "curve_reconstruction_enabled": False,
         "out_of_scope_curve_families": list(OUT_OF_SCOPE_CURVES),
         "validation_modes": {},
-        "validation_pairs_by_mode_stress_target": {},
+        "validation_pairs_by_mode_reference_stress_target": {},
     }
 
     all_pass = True
     any_supported = False
-    for validation_mode in sorted({key[0] for key in totals_stress_target}):
+    for validation_mode in sorted({key[0] for key in totals_ref_stress_target}):
         mode_metrics = {
             "label": VALIDATION_MODE_LABELS.get(validation_mode, validation_mode),
-            "targets": {},
-            "stress_targets": {},
+            "reference_targets": {},
+            "reference_stress_targets": {},
         }
-        for target_type in TARGET_LABELS:
-            target_key = (validation_mode, target_type)
-            if totals_target.get(target_key, 0) == 0:
-                continue
-            mode_metrics["targets"][target_type] = _gate_metrics(
-                by_target.get(target_key, []),
-                totals_target[target_key],
-                unsupported_target.get(target_key, 0),
-                target_type,
-            )
+        for reference_tier in REFERENCE_TIERS:
+            for target_type in TARGET_LABELS:
+                target_key = (validation_mode, reference_tier, target_type)
+                if totals_ref_target.get(target_key, 0) == 0:
+                    continue
+                metric_key = f"{reference_tier}|{target_type}"
+                target_metrics = _gate_metrics(
+                    by_ref_target.get(target_key, []),
+                    totals_ref_target[target_key],
+                    unsupported_ref_target.get(target_key, 0),
+                    target_type,
+                )
+                target_metrics["reference_tier"] = reference_tier
+                mode_metrics["reference_targets"][metric_key] = target_metrics
 
-        for stress_key in sorted(k for k in totals_stress_target if k[0] == validation_mode):
-            _, stress_type, target_type = stress_key
-            metric_key = f"{stress_type}|{target_type}"
+        for stress_key in sorted(
+            k for k in totals_ref_stress_target if k[0] == validation_mode
+        ):
+            _, reference_tier, stress_type, target_type = stress_key
+            metric_key = f"{reference_tier}|{stress_type}|{target_type}"
             gate_metrics = _gate_metrics(
-                by_stress_target.get(stress_key, []),
-                totals_stress_target[stress_key],
-                unsupported_stress_target.get(stress_key, 0),
+                by_ref_stress_target.get(stress_key, []),
+                totals_ref_stress_target[stress_key],
+                unsupported_ref_stress_target.get(stress_key, 0),
                 target_type,
             )
+            gate_metrics["reference_tier"] = reference_tier
             gate_metrics["stress_type"] = stress_type
             gate_metrics["target_type"] = target_type
-            mode_metrics["stress_targets"][metric_key] = gate_metrics
-            metrics["validation_pairs_by_mode_stress_target"][
+            mode_metrics["reference_stress_targets"][metric_key] = gate_metrics
+            metrics["validation_pairs_by_mode_reference_stress_target"][
                 f"{validation_mode}|{metric_key}"
-            ] = totals_stress_target[stress_key]
+            ] = totals_ref_stress_target[stress_key]
             any_supported = any_supported or gate_metrics["supported_validation_pairs"] > 0
             all_pass = all_pass and gate_metrics["gate_pass"]
 
+        # Backward-compatible aliases are strict-only, so library gates cannot
+        # alter strict-pair reporting in existing consumers.
+        mode_metrics["targets"] = {
+            key.split("|", 1)[1]: value
+            for key, value in mode_metrics["reference_targets"].items()
+            if key.startswith("strict_pre_irrad|")
+        }
+        mode_metrics["stress_targets"] = {
+            key.split("|", 1)[1]: value
+            for key, value in mode_metrics["reference_stress_targets"].items()
+            if key.startswith("strict_pre_irrad|")
+        }
         metrics["validation_modes"][validation_mode] = mode_metrics
 
     first_mode = next(iter(metrics["validation_modes"]), None)
@@ -1525,6 +1955,13 @@ def summarize_validation(residual_rows):
     )
     metrics["stress_targets"] = (
         metrics["validation_modes"][first_mode]["stress_targets"] if first_mode else {}
+    )
+    metrics["reference_targets"] = (
+        metrics["validation_modes"][first_mode]["reference_targets"] if first_mode else {}
+    )
+    metrics["reference_stress_targets"] = (
+        metrics["validation_modes"][first_mode]["reference_stress_targets"]
+        if first_mode else {}
     )
 
     if not any_supported:
@@ -1536,7 +1973,7 @@ def summarize_validation(residual_rows):
     return metrics, status
 
 
-def validate(conn, model_run_id=None, validation_mode="within_condition"):
+def validate(conn, model_run_id=None, validation_mode="within_condition", reference_tier="both"):
     apply_schema(conn)
     run_id = model_run_id or latest_model_run_id(conn)
     if run_id is None:
@@ -1544,11 +1981,12 @@ def validate(conn, model_run_id=None, validation_mode="within_condition"):
         return None
     config = load_run_config(conn, run_id)
     if not config:
-        pairs = load_pairs(conn)
+        pairs = load_pairs(conn, reference_tier=reference_tier)
         config = feature_config(fit_feature_scales(pairs), pairs)
-    pairs = load_pairs(conn)
+    pairs = load_pairs(conn, reference_tier=reference_tier)
 
     modes = list(VALIDATION_MODES) if validation_mode == "both" else [validation_mode]
+    tiers = list(reference_tiers_for_option(reference_tier))
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1556,8 +1994,9 @@ def validate(conn, model_run_id=None, validation_mode="within_condition"):
             DELETE FROM iv_physical_validation_residuals
             WHERE model_run_id = %s
               AND validation_mode = ANY(%s)
+              AND reference_tier = ANY(%s)
             """,
-            (run_id, modes),
+            (run_id, modes, tiers),
         )
     conn.commit()
 
@@ -1573,6 +2012,7 @@ def validate(conn, model_run_id=None, validation_mode="within_condition"):
         "pair_id",
         "pair_key",
         "split_group",
+        "reference_tier",
         "stress_type",
         "curve_family",
         "target_type",
@@ -1617,6 +2057,7 @@ def validate(conn, model_run_id=None, validation_mode="within_condition"):
         cur.execute(
             """
             SELECT model_run_id, validation_mode, pair_id, pair_key, split_group,
+                   reference_tier,
                    stress_type, curve_family, target_type, observed_value,
                    predicted_value, predicted_p10, predicted_p90, residual,
                    abs_residual, device_type, manufacturer, physical_device_key,
@@ -1633,15 +2074,21 @@ def validate(conn, model_run_id=None, validation_mode="within_condition"):
         all_residual_rows = cur.fetchall()
 
     metrics, status = summarize_validation(all_residual_rows)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM iv_physical_curve_points WHERE model_run_id = %s)",
+            (run_id,),
+        )
+        metrics["curve_reconstruction_enabled"] = bool(cur.fetchone()[0])
     supported = sum(
         target["supported_validation_pairs"]
         for mode in metrics["validation_modes"].values()
-        for target in mode["stress_targets"].values()
+        for target in mode["reference_stress_targets"].values()
     )
     unsupported = sum(
         target["unsupported_validation_pairs"]
         for mode in metrics["validation_modes"].values()
-        for target in mode["stress_targets"].values()
+        for target in mode["reference_stress_targets"].values()
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -1676,7 +2123,7 @@ def print_validation_summary(run_id, metrics, status):
     print(f"  model_status: {status}")
     for mode, mode_metrics in metrics["validation_modes"].items():
         print(f"  {mode} ({mode_metrics['label']}):")
-        for stress_target, target_metrics in mode_metrics["stress_targets"].items():
+        for stress_target, target_metrics in mode_metrics["reference_stress_targets"].items():
             med = target_metrics["median_abs_residual"]
             p90 = target_metrics["p90_abs_residual"]
             med_s = f"{med:.6g}" if med is not None else "NULL"
@@ -1688,6 +2135,595 @@ def print_validation_summary(run_id, metrics, status):
             print(f"      median_abs_residual: {med_s}")
             print(f"      p90_abs_residual: {p90_s}")
             print(f"      gate_pass: {target_metrics['gate_pass']}")
+
+
+def prediction_parameter_sane(target_type, value):
+    value = safe_float(value)
+    if value is None:
+        return False
+    if target_type == "delta_vth_v":
+        return abs(value) <= 50.0
+    if target_type == "log_rdson_ratio":
+        return abs(value) <= 10.0
+    return False
+
+
+def load_validation_device_gates(conn, model_run_id):
+    sql = """
+        SELECT validation_mode,
+               reference_tier,
+               stress_type,
+               target_type,
+               device_type,
+               COUNT(*) AS total_pairs,
+               COUNT(*) FILTER (
+                   WHERE support_status = 'ok'
+                     AND abs_residual IS NOT NULL
+               ) AS supported_pairs,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY abs_residual)
+                   FILTER (WHERE support_status = 'ok' AND abs_residual IS NOT NULL)
+                   AS median_abs_residual,
+               PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY abs_residual)
+                   FILTER (WHERE support_status = 'ok' AND abs_residual IS NOT NULL)
+                   AS p90_abs_residual
+        FROM iv_physical_validation_residuals
+        WHERE model_run_id = %s
+        GROUP BY validation_mode, reference_tier, stress_type, target_type, device_type
+    """
+    gates = {}
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (model_run_id,))
+        rows = list(cur.fetchall())
+    for row in rows:
+        target_type = row["target_type"]
+        gate = VALIDATION_GATES[target_type]
+        total = int(row["total_pairs"] or 0)
+        supported = int(row["supported_pairs"] or 0)
+        med = safe_float(row.get("median_abs_residual"))
+        p90 = safe_float(row.get("p90_abs_residual"))
+        supported_fraction = supported / total if total else 0.0
+        gate_pass = (
+            supported >= gate["min_supported_validation_pairs"]
+            and med is not None
+            and p90 is not None
+            and med <= gate["median_abs_residual_max"]
+            and p90 <= gate["p90_abs_residual_max"]
+        )
+        key = (
+            row["validation_mode"],
+            row["reference_tier"],
+            row["stress_type"],
+            target_type,
+            row["device_type"],
+        )
+        gates[key] = {
+            "validation_gate_pass": gate_pass,
+            "validation_supported_fraction": supported_fraction,
+            "validation_supported_pairs": supported,
+            "validation_total_pairs": total,
+            "median_abs_residual": med,
+            "p90_abs_residual": p90,
+        }
+    return gates
+
+
+def classify_prediction_confidence(pair, pred, device_gates):
+    reasons = []
+    target_type = pair["target_type"]
+    predicted = pred.get("predicted_value")
+    if pred.get("support_status") != "ok" or not prediction_parameter_sane(target_type, predicted):
+        reason = pred.get("unsupported_reason") or "no_numeric_donor_prediction"
+        if pred.get("support_status") == "ok":
+            reason = "nonsensical_predicted_parameter"
+        return {
+            "confidence_level": "unsupported",
+            "confidence_score": 0.0,
+            "confidence_reasons": [reason],
+            "validation_gate_pass": False,
+            "validation_supported_fraction": 0.0,
+            "validation_supported_pairs": 0,
+            "validation_total_pairs": 0,
+        }
+
+    gate_key = (
+        "leave_condition",
+        pair["reference_tier"],
+        pair["stress_type"],
+        target_type,
+        pair.get("device_type"),
+    )
+    gate_info = device_gates.get(gate_key) or {}
+    gate_pass = bool(gate_info.get("validation_gate_pass"))
+    supported_fraction = safe_float(gate_info.get("validation_supported_fraction")) or 0.0
+    supported_pairs = int(gate_info.get("validation_supported_pairs") or 0)
+    total_pairs = int(gate_info.get("validation_total_pairs") or 0)
+
+    if not gate_info:
+        reasons.append("leave_condition_device_gate_missing")
+    elif not gate_pass:
+        reasons.append("leave_condition_device_gate_failed")
+    if supported_fraction < STRONG_SUPPORTED_FRACTION_MIN:
+        reasons.append("low_leave_condition_supported_fraction")
+
+    baseline_ok = True
+    spread = safe_float(pair.get("baseline_reference_spread"))
+    if pair.get("reference_tier") == "library_pristine":
+        max_spread = VALIDATION_GATES[target_type]["median_abs_residual_max"]
+        if spread is None:
+            baseline_ok = False
+            reasons.append("missing_library_baseline_spread")
+        elif spread > max_spread:
+            baseline_ok = False
+            reasons.append("library_baseline_spread_above_gate")
+
+    strong = (
+        gate_pass
+        and supported_fraction >= STRONG_SUPPORTED_FRACTION_MIN
+        and baseline_ok
+    )
+    if strong:
+        level = "strong"
+        score = min(0.99, 0.90 + min(supported_fraction, 1.0) * 0.09)
+        if not reasons:
+            reasons.append("leave_condition_device_gate_passed")
+    else:
+        level = "weak"
+        score = 0.55
+        if pred.get("donor_count"):
+            score += min(float(pred["donor_count"]) / max(NEAREST_K, 1), 1.0) * 0.10
+        if gate_pass:
+            score += 0.10
+        if baseline_ok:
+            score += 0.05
+        score = min(score, 0.79)
+        if not reasons:
+            reasons.append("numeric_prediction_without_strong_confidence")
+
+    return {
+        "confidence_level": level,
+        "confidence_score": score,
+        "confidence_reasons": sorted(set(reasons)),
+        "validation_gate_pass": gate_pass,
+        "validation_supported_fraction": supported_fraction,
+        "validation_supported_pairs": supported_pairs,
+        "validation_total_pairs": total_pairs,
+    }
+
+
+def prediction_tuple(run_id, donor_mode, pair, pred, confidence):
+    return (
+        run_id,
+        pair["id"],
+        pair["pair_key"],
+        pair.get("pre_feature_id"),
+        pair.get("post_feature_id"),
+        pair.get("pre_metadata_id"),
+        pair.get("post_metadata_id"),
+        pair["target_type"],
+        pair["curve_family"],
+        pred.get("predicted_value"),
+        pred.get("predicted_p10"),
+        pred.get("predicted_p90"),
+        pair["stress_type"],
+        pair["reference_tier"],
+        pred.get("donor_pair_keys"),
+        pred.get("donor_count"),
+        pred.get("donor_distance"),
+        pred.get("support_status"),
+        pred.get("unsupported_reason"),
+        pair.get("sc_voltage_v"),
+        pair.get("sc_duration_us"),
+        pair.get("sc_condition_label"),
+        pair.get("irrad_run_id"),
+        pair.get("ion_species"),
+        pair.get("beam_energy_mev"),
+        pair.get("let_surface"),
+        pair.get("let_bragg_peak"),
+        pair.get("range_um"),
+        pair.get("beam_type"),
+        pair.get("fluence_at_meas"),
+        donor_mode,
+        confidence.get("validation_gate_pass"),
+        confidence.get("validation_supported_fraction"),
+        confidence.get("validation_supported_pairs"),
+        confidence.get("validation_total_pairs"),
+        pair.get("baseline_reference_count"),
+        pair.get("baseline_reference_spread"),
+        pair.get("baseline_reference_method"),
+        confidence["confidence_level"],
+        confidence["confidence_score"],
+        confidence["confidence_reasons"],
+        [
+            f"reference_tier_{pair['reference_tier']}",
+            f"confidence_{confidence['confidence_level']}",
+            "exploratory_curve_prediction",
+        ],
+    )
+
+
+def delete_parameter_predictions(conn, model_run_id, prediction_stress, tiers):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM iv_physical_parameter_predictions
+            WHERE model_run_id = %s
+              AND stress_type = %s
+              AND reference_tier = ANY(%s)
+            """,
+            (model_run_id, prediction_stress, list(tiers)),
+        )
+    conn.commit()
+
+
+def predict_parameters(
+    conn,
+    model_run_id=None,
+    prediction_stress="irradiation",
+    reference_tier="both",
+    donor_mode=DEFAULT_PREDICTION_DONOR_MODE,
+):
+    apply_schema(conn)
+    if prediction_stress not in PREDICTION_STRESS_TYPES:
+        raise ValueError(f"unsupported prediction stress: {prediction_stress}")
+    run_id = model_run_id or latest_model_run_id(conn)
+    if run_id is None:
+        print("No model run found; train first with --train.", file=sys.stderr)
+        return None
+
+    config = load_run_config(conn, run_id)
+    all_pairs = load_pairs(conn, reference_tier=reference_tier)
+    if not config:
+        config = feature_config(fit_feature_scales(all_pairs), all_pairs)
+    pairs = [pair for pair in all_pairs if pair["stress_type"] == prediction_stress]
+    tiers = reference_tiers_for_option(reference_tier)
+    device_gates = load_validation_device_gates(conn, run_id)
+    delete_parameter_predictions(conn, run_id, prediction_stress, tiers)
+
+    rows = []
+    confidence_counts = Counter()
+    for pair in pairs:
+        pred = predict_from_donors(pair, all_pairs, config, validation_mode=donor_mode)
+        confidence = classify_prediction_confidence(pair, pred, device_gates)
+        confidence_counts[confidence["confidence_level"]] += 1
+        rows.append(prediction_tuple(run_id, donor_mode, pair, pred, confidence))
+
+    columns = (
+        "model_run_id",
+        "pair_id",
+        "pair_key",
+        "source_feature_id",
+        "post_feature_id",
+        "source_metadata_id",
+        "post_metadata_id",
+        "target_type",
+        "curve_family",
+        "predicted_value",
+        "predicted_p10",
+        "predicted_p90",
+        "stress_type",
+        "reference_tier",
+        "donor_pair_keys",
+        "donor_count",
+        "donor_distance",
+        "support_status",
+        "unsupported_reason",
+        "sc_voltage_v",
+        "sc_duration_us",
+        "sc_condition_label",
+        "irrad_run_id",
+        "ion_species",
+        "beam_energy_mev",
+        "let_surface",
+        "let_bragg_peak",
+        "range_um",
+        "beam_type",
+        "fluence_at_meas",
+        "validation_mode_used",
+        "validation_gate_pass",
+        "validation_supported_fraction",
+        "validation_supported_pairs",
+        "validation_total_pairs",
+        "baseline_reference_count",
+        "baseline_reference_spread",
+        "baseline_reference_method",
+        "confidence_level",
+        "confidence_score",
+        "confidence_reasons",
+        "physics_flags",
+    )
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                f"""
+                INSERT INTO iv_physical_parameter_predictions ({', '.join(columns)})
+                VALUES %s
+                """,
+                rows,
+                page_size=1000,
+            )
+        conn.commit()
+
+    print("\nParameter prediction complete:")
+    print(f"  model_run_id: {run_id}")
+    print(f"  prediction_stress: {prediction_stress}")
+    print(f"  parameter_predictions: {len(rows)}")
+    for level in CONFIDENCE_LEVELS:
+        print(f"  {level}: {confidence_counts.get(level, 0)}")
+    return run_id
+
+
+def load_parameter_predictions_for_curves(conn, model_run_id, prediction_stress, tiers):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT pp.*,
+                   f.metadata_id AS source_feature_metadata_id,
+                   f.drain_bias_value AS source_drain_bias_value,
+                   f.bias_value AS source_bias_value
+            FROM iv_physical_parameter_predictions pp
+            LEFT JOIN iv_physical_curve_features f
+              ON f.id = pp.source_feature_id
+            WHERE pp.model_run_id = %s
+              AND pp.stress_type = %s
+              AND pp.reference_tier = ANY(%s)
+            ORDER BY pp.id
+            """,
+            (model_run_id, prediction_stress, list(tiers)),
+        )
+        return list(cur.fetchall())
+
+
+def load_source_measurements(conn, metadata_id):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, point_index, v_gate, v_drain, i_drain
+            FROM baselines_measurements
+            WHERE metadata_id = %s
+            ORDER BY point_index, id
+            """,
+            (metadata_id,),
+        )
+        return list(cur.fetchall())
+
+
+def reconstruct_curve_rows(param, source_points):
+    predicted = safe_float(param.get("predicted_value"))
+    if not prediction_parameter_sane(param["target_type"], predicted):
+        return [], "nonsensical_predicted_parameter"
+    rows = []
+    for point in source_points:
+        current = safe_float(point.get("i_drain"))
+        if current is None:
+            continue
+        if param["target_type"] == "delta_vth_v":
+            source_x = safe_float(point.get("v_gate"))
+            if source_x is None:
+                continue
+            predicted_x = source_x + predicted
+            x_axis_name = "v_gate"
+            bias_axis_name = "v_drain"
+            bias_value = safe_float(param.get("source_drain_bias_value"))
+            if bias_value is None:
+                bias_value = safe_float(point.get("v_drain"))
+            predicted_current = current
+        elif param["target_type"] == "log_rdson_ratio":
+            source_x = safe_float(point.get("v_drain"))
+            if source_x is None:
+                continue
+            predicted_x = source_x
+            x_axis_name = "v_drain"
+            bias_axis_name = "v_gate"
+            bias_value = safe_float(point.get("v_gate"))
+            if bias_value is None:
+                bias_value = safe_float(param.get("source_bias_value"))
+            predicted_current = current * math.exp(-predicted)
+        else:
+            return [], "unknown_target_type"
+        if not finite(predicted_x) or not finite(predicted_current):
+            continue
+        rows.append((
+            param["id"],
+            param["model_run_id"],
+            param.get("source_metadata_id"),
+            param.get("source_feature_id"),
+            param.get("pair_id"),
+            param["target_type"],
+            param["curve_family"],
+            param["reference_tier"],
+            x_axis_name,
+            predicted_x,
+            source_x,
+            predicted_x,
+            bias_axis_name,
+            bias_value,
+            point.get("point_index"),
+            current,
+            predicted_current,
+            predicted,
+            param.get("predicted_p10"),
+            param.get("predicted_p90"),
+            param.get("donor_pair_keys"),
+            param.get("donor_count"),
+            param.get("donor_distance"),
+            param.get("support_status"),
+            param.get("unsupported_reason"),
+            param.get("confidence_level"),
+            param.get("confidence_score"),
+            param.get("confidence_reasons"),
+            param.get("physics_flags"),
+            "ok",
+        ))
+    if not rows:
+        return [], "no_valid_source_curve_points"
+    return rows, None
+
+
+def mark_parameter_curve_unsupported(conn, param_id, reason):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE iv_physical_parameter_predictions
+            SET confidence_level = 'unsupported',
+                confidence_score = 0.0,
+                unsupported_reason = COALESCE(unsupported_reason, %s),
+                confidence_reasons = ARRAY(
+                    SELECT DISTINCT reason
+                    FROM unnest(confidence_reasons || ARRAY[%s]::text[]) AS t(reason)
+                ),
+                physics_flags = ARRAY(
+                    SELECT DISTINCT flag
+                    FROM unnest(COALESCE(physics_flags, ARRAY[]::text[]) || ARRAY[%s]::text[]) AS t(flag)
+                )
+            WHERE id = %s
+            """,
+            (reason, reason, reason, param_id),
+        )
+
+
+def delete_curve_points(conn, model_run_id, prediction_stress, tiers):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM iv_physical_curve_points cp
+            USING iv_physical_parameter_predictions pp
+            WHERE cp.parameter_prediction_id = pp.id
+              AND pp.model_run_id = %s
+              AND pp.stress_type = %s
+              AND pp.reference_tier = ANY(%s)
+            """,
+            (model_run_id, prediction_stress, list(tiers)),
+        )
+    conn.commit()
+
+
+def set_curve_reconstruction_metric(conn, model_run_id, enabled):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT metrics FROM iv_physical_model_runs WHERE id = %s", (model_run_id,))
+        row = cur.fetchone()
+    metrics = (row or {}).get("metrics") or {}
+    metrics["curve_reconstruction_enabled"] = bool(enabled)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE iv_physical_model_runs SET metrics = %s WHERE id = %s",
+            (Json(metrics), model_run_id),
+        )
+    conn.commit()
+
+
+def generate_curves(
+    conn,
+    model_run_id=None,
+    prediction_stress="irradiation",
+    reference_tier="both",
+):
+    apply_schema(conn)
+    if prediction_stress not in PREDICTION_STRESS_TYPES:
+        raise ValueError(f"unsupported prediction stress: {prediction_stress}")
+    run_id = model_run_id or latest_model_run_id(conn)
+    if run_id is None:
+        print("No model run found; train first with --train.", file=sys.stderr)
+        return None
+    tiers = reference_tiers_for_option(reference_tier)
+    delete_curve_points(conn, run_id, prediction_stress, tiers)
+    params = load_parameter_predictions_for_curves(conn, run_id, prediction_stress, tiers)
+    if not params:
+        print("No parameter predictions found; run --predict-parameters first.", file=sys.stderr)
+        return run_id
+
+    point_columns = (
+        "parameter_prediction_id",
+        "model_run_id",
+        "source_metadata_id",
+        "source_feature_id",
+        "pair_id",
+        "target_type",
+        "curve_family",
+        "reference_tier",
+        "x_axis_name",
+        "x_value",
+        "source_x_value",
+        "predicted_x_value",
+        "bias_axis_name",
+        "bias_value",
+        "point_index",
+        "pristine_i_drain",
+        "predicted_post_i_drain",
+        "predicted_parameter_value",
+        "predicted_parameter_p10",
+        "predicted_parameter_p90",
+        "donor_pair_keys",
+        "donor_count",
+        "donor_distance",
+        "support_status",
+        "unsupported_reason",
+        "confidence_level",
+        "confidence_score",
+        "confidence_reasons",
+        "physics_flags",
+        "prediction_status",
+    )
+    inserted = 0
+    skipped = Counter()
+    batch = []
+    with conn.cursor() as cur:
+        for param in params:
+            if param.get("confidence_level") == "unsupported" or param.get("support_status") != "ok":
+                skipped["unsupported_parameter"] += 1
+                continue
+            source_metadata_id = param.get("source_metadata_id") or param.get("source_feature_metadata_id")
+            if source_metadata_id is None:
+                mark_parameter_curve_unsupported(conn, param["id"], "missing_source_metadata_id")
+                skipped["missing_source_metadata_id"] += 1
+                continue
+            source_points = load_source_measurements(conn, source_metadata_id)
+            if not source_points:
+                mark_parameter_curve_unsupported(conn, param["id"], "missing_source_curve_points")
+                skipped["missing_source_curve_points"] += 1
+                continue
+            rows, reason = reconstruct_curve_rows(param, source_points)
+            if reason:
+                mark_parameter_curve_unsupported(conn, param["id"], reason)
+                skipped[reason] += 1
+                continue
+            batch.extend(rows)
+            if len(batch) >= 5000:
+                execute_values(
+                    cur,
+                    f"""
+                    INSERT INTO iv_physical_curve_points ({', '.join(point_columns)})
+                    VALUES %s
+                    """,
+                    batch,
+                    page_size=1000,
+                )
+                inserted += len(batch)
+                batch = []
+        if batch:
+            execute_values(
+                cur,
+                f"""
+                INSERT INTO iv_physical_curve_points ({', '.join(point_columns)})
+                VALUES %s
+                """,
+                batch,
+                page_size=1000,
+            )
+            inserted += len(batch)
+    conn.commit()
+    set_curve_reconstruction_metric(conn, run_id, inserted > 0)
+
+    print("\nCurve generation complete:")
+    print(f"  model_run_id: {run_id}")
+    print(f"  prediction_stress: {prediction_stress}")
+    print(f"  parameter_predictions_seen: {len(params)}")
+    print(f"  curve_points_inserted: {inserted}")
+    if skipped:
+        print("  skipped:")
+        for reason, count in skipped.most_common():
+            print(f"    {reason}: {count}")
+    return run_id
 
 
 def print_reserved_prediction_counts(conn):
@@ -1737,17 +2773,41 @@ def main():
                         help="Restrict --refresh-damage to one device_type")
     parser.add_argument("--build-pairs", action="store_true",
                         help="Build strict pre/post physical response pairs")
+    parser.add_argument("--include-library-pristine", action="store_true",
+                        help="Allow irradiation post rows without strict pairs to use library pristine references")
     parser.add_argument("--train", action="store_true",
                         help="Create a support-gated donor model run")
     parser.add_argument("--validate", action="store_true",
                         help="Run support-gated validation for a model run")
+    parser.add_argument("--predict-parameters", action="store_true",
+                        help="Persist confidence-labeled V2 parameter predictions for existing response pairs")
+    parser.add_argument("--generate-curves", action="store_true",
+                        help="Reconstruct V2 IdVg/IdVd curve points from persisted parameter predictions")
+    parser.add_argument("--predict-curves", action="store_true",
+                        help="Shorthand for --predict-parameters --generate-curves")
+    parser.add_argument("--reference-tier",
+                        choices=["strict", "library", "both"],
+                        default="both",
+                        help="Reference tier(s) to use for training, validation, and prediction")
+    parser.add_argument("--audit-library-pristine", action="store_true",
+                        help="Compare hypothetical library-pristine deltas against existing strict irradiation pairs")
     parser.add_argument("--validation-mode",
                         choices=["within_condition", "leave_condition", "both"],
                         default="within_condition",
                         help="Validation donor exclusion mode")
+    parser.add_argument("--prediction-stress",
+                        choices=PREDICTION_STRESS_TYPES,
+                        default="irradiation",
+                        help="Stress type to generate predictions for")
+    parser.add_argument("--prediction-donor-mode",
+                        choices=VALIDATION_MODES,
+                        default=DEFAULT_PREDICTION_DONOR_MODE,
+                        help="Donor exclusion mode used for exploratory parameter prediction")
     parser.add_argument("--model-run-id", type=int,
                         help="Model run to validate; defaults to latest")
     args = parser.parse_args()
+    predict_parameters_requested = args.predict_parameters or args.predict_curves
+    generate_curves_requested = args.generate_curves or args.predict_curves
 
     if not any(
         [
@@ -1757,6 +2817,9 @@ def main():
             args.build_pairs,
             args.train,
             args.validate,
+            args.audit_library_pristine,
+            predict_parameters_requested,
+            generate_curves_requested,
         ]
     ):
         parser.print_help()
@@ -1777,15 +2840,34 @@ def main():
         if args.extract_features:
             extract_features(conn)
         if args.build_pairs:
-            build_pairs(conn)
+            build_pairs(conn, include_library_pristine=args.include_library_pristine)
+        if args.audit_library_pristine:
+            audit_library_pristine(conn)
         if args.train:
-            trained_run_id = train(conn)
+            trained_run_id = train(conn, reference_tier=args.reference_tier)
         if args.validate:
-            validate(
+            trained_run_id = validate(
                 conn,
                 args.model_run_id or trained_run_id,
                 validation_mode=args.validation_mode,
+                reference_tier=args.reference_tier,
             )
+        if predict_parameters_requested:
+            trained_run_id = predict_parameters(
+                conn,
+                args.model_run_id or trained_run_id,
+                prediction_stress=args.prediction_stress,
+                reference_tier=args.reference_tier,
+                donor_mode=args.prediction_donor_mode,
+            )
+        if generate_curves_requested:
+            generate_curves(
+                conn,
+                args.model_run_id or trained_run_id,
+                prediction_stress=args.prediction_stress,
+                reference_tier=args.reference_tier,
+            )
+            print_reserved_prediction_counts(conn)
         print_old_counts(conn, "after")
     finally:
         conn.close()
