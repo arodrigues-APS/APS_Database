@@ -36,26 +36,47 @@ except ImportError:
 
 from db_config import get_connection
 
+try:
+    from extract_damage_metrics import (
+        PARAM_KEYS,
+        apply_extraction,
+        fetch_existing_gate_params,
+        fetch_extracted,
+    )
+except ImportError:
+    PARAM_KEYS = ()
+    apply_extraction = None
+    fetch_existing_gate_params = None
+    fetch_extracted = None
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "schema" / "024_iv_physical_prediction.sql"
 OUT_DIR = REPO_ROOT / "out" / "iv_physical_prediction"
 MODEL_DIR = OUT_DIR / "models"
 
-MODEL_VERSION = "v2.0-physical-donor"
+MODEL_VERSION = "v2.1-physical-donor"
 ALGORITHM = "support_gated_weighted_median_donor_v1"
 
 CURVE_TO_TARGET = {
     "IdVg": "delta_vth_v",
     "IdVd": "log_rdson_ratio",
 }
-TARGET_TO_CURVE = {v: k for k, v in CURVE_TO_TARGET.items()}
+MEASUREMENT_CATEGORY_TO_CURVE = {
+    "IdVg": "IdVg",
+    "Vth": "IdVg",
+    "IdVd": "IdVd",
+}
 TARGET_LABELS = {
     "delta_vth_v": "IdVg / delta_vth_v",
     "log_rdson_ratio": "IdVd / log_rdson_ratio",
 }
-SUPPORTED_CATEGORIES = set(CURVE_TO_TARGET)
 OUT_OF_SCOPE_CURVES = ("Blocking", "3rd_Quadrant")
+VALIDATION_MODES = ("within_condition", "leave_condition")
+VALIDATION_MODE_LABELS = {
+    "within_condition": "Within-condition validation",
+    "leave_condition": "Leave-condition validation",
+}
 
 MIN_DONORS = 3
 NEAREST_K = 7
@@ -149,16 +170,14 @@ def parse_rating(value, kind):
     if kind == "voltage" and "kv" in lower:
         number *= 1000.0
     if kind == "rdson":
-        if "ohm" in lower and "mohm" not in lower and "mω" not in lower:
+        if "ohm" in lower and "mohm" not in lower:
             number *= 1000.0
     return number if math.isfinite(number) else None
 
 
 def curve_family_for(row):
     category = row.get("measurement_category")
-    if category in SUPPORTED_CATEGORIES:
-        return category
-    return None
+    return MEASUREMENT_CATEGORY_TO_CURVE.get(category)
 
 
 def metric_from_gate_params(gate_params, key):
@@ -170,10 +189,12 @@ def metric_from_gate_params(gate_params, key):
 
 def is_pristine_reference(row):
     source = row.get("data_source") or "baselines"
+    if row.get("irrad_role") is not None:
+        return row.get("irrad_role") == "pre_irrad"
+    if row.get("test_condition") is not None:
+        return row.get("test_condition") in ("pristine", "pre_avalanche")
     return (
         source == "baselines"
-        or row.get("test_condition") == "pristine"
-        or row.get("irrad_role") == "pre_irrad"
     )
 
 
@@ -364,7 +385,7 @@ def warn_gate_param_coverage(conn):
                COUNT(*) FILTER (WHERE gate_params ? 'vth_v') AS with_vth,
                COUNT(*) FILTER (WHERE gate_params ? 'rdson_mohm') AS with_rdson
         FROM baselines_metadata
-        WHERE measurement_category IN ('IdVg', 'IdVd')
+        WHERE measurement_category IN ('IdVg', 'Vth', 'IdVd')
         GROUP BY measurement_category
         ORDER BY measurement_category
     """
@@ -373,12 +394,55 @@ def warn_gate_param_coverage(conn):
         rows = cur.fetchall()
     print("\ngate_params coverage before feature extraction:")
     for category, total, with_vth, with_rdson in rows:
-        usable = with_vth if category == "IdVg" else with_rdson
+        usable = with_vth if category in ("IdVg", "Vth") else with_rdson
         frac = usable / total if total else 0.0
         print(f"  {category}: {usable}/{total} target metrics ({frac:.1%})")
         if total and frac < 0.5:
             print("    WARNING: low metric coverage. Consider running:")
             print("      python3 data_processing_scripts/extract_damage_metrics.py")
+
+
+def refresh_damage_metrics(conn, rebuild=False, device_type=None):
+    """Refresh gate_params using the existing extract_damage_metrics helpers."""
+    if not all([fetch_extracted, fetch_existing_gate_params, apply_extraction]):
+        sys.exit(
+            "ERROR: could not import extract_damage_metrics.py. "
+            "Run that script directly before --extract-features."
+        )
+
+    print("\nRefreshing gate_params via extract_damage_metrics.py helpers ...")
+    with conn.cursor() as cur:
+        rows = fetch_extracted(cur, device_type=device_type, rebuild=rebuild)
+        existing = {} if rebuild else fetch_existing_gate_params(
+            cur, device_type=device_type
+        )
+
+        updated = 0
+        skipped_already_done = 0
+        skipped_no_params = 0
+        for row in rows:
+            metadata_id = row["metadata_id"]
+            extracted = {key: row.get(key) for key in PARAM_KEYS}
+            if not any(value is not None for value in extracted.values()):
+                skipped_no_params += 1
+                continue
+            if not rebuild:
+                have = existing.get(metadata_id, set())
+                to_add = {
+                    key
+                    for key, value in extracted.items()
+                    if value is not None and key not in have
+                }
+                if not to_add:
+                    skipped_already_done += 1
+                    continue
+            if apply_extraction(cur, metadata_id, extracted):
+                updated += 1
+    conn.commit()
+    print(f"  candidate files returned by extractor: {len(rows)}")
+    print(f"  gate_params updated: {updated}")
+    print(f"  skipped (no params): {skipped_no_params}")
+    print(f"  skipped (already populated): {skipped_already_done}")
 
 
 def fetch_feature_source_rows(conn):
@@ -394,6 +458,15 @@ def fetch_feature_source_rows(conn):
             md.measurement_type,
             md.filename,
             md.csv_path,
+            md.created_at AS metadata_created_at,
+            md.bias_value,
+            md.drain_bias_value,
+            md.sweep_start,
+            md.sweep_stop,
+            md.sweep_points,
+            md.step_num,
+            md.step_start,
+            md.step_stop,
             md.data_source,
             md.test_condition,
             md.irrad_role,
@@ -427,7 +500,7 @@ def fetch_feature_source_rows(conn):
                ON ir.id = md.irrad_run_id
         LEFT JOIN irradiation_campaigns ic
                ON ic.id = md.irrad_campaign_id
-        WHERE md.measurement_category IN ('IdVg', 'IdVd')
+        WHERE md.measurement_category IN ('IdVg', 'Vth', 'IdVd')
         ORDER BY md.id
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -456,6 +529,15 @@ def build_feature_tuple(row):
         row.get("measurement_type"),
         row.get("filename"),
         row.get("csv_path"),
+        row.get("metadata_created_at"),
+        safe_float(row.get("bias_value")),
+        safe_float(row.get("drain_bias_value")),
+        safe_float(row.get("sweep_start")),
+        safe_float(row.get("sweep_stop")),
+        row.get("sweep_points"),
+        row.get("step_num"),
+        safe_float(row.get("step_start")),
+        safe_float(row.get("step_stop")),
         row.get("experiment"),
         row.get("data_source") or "baselines",
         row.get("test_condition"),
@@ -512,6 +594,15 @@ def extract_features(conn):
         "measurement_type",
         "filename",
         "csv_path",
+        "metadata_created_at",
+        "bias_value",
+        "drain_bias_value",
+        "sweep_start",
+        "sweep_stop",
+        "sweep_points",
+        "step_num",
+        "step_start",
+        "step_stop",
         "experiment",
         "data_source",
         "test_condition",
@@ -640,8 +731,120 @@ def load_features(conn):
         return list(cur.fetchall())
 
 
-def choose_pre_feature(candidates):
-    return sorted(candidates, key=lambda f: (f["metadata_id"], f["id"]))[0]
+def abs_diff_if_both(left, right):
+    left = safe_float(left)
+    right = safe_float(right)
+    if left is None or right is None:
+        return None
+    return abs(left - right)
+
+
+def ranges_overlap(pre_start, pre_stop, post_start, post_stop):
+    vals = [safe_float(v) for v in (pre_start, pre_stop, post_start, post_stop)]
+    if any(v is None for v in vals):
+        return True
+    pre_lo, pre_hi = sorted(vals[:2])
+    post_lo, post_hi = sorted(vals[2:])
+    return max(pre_lo, post_lo) <= min(pre_hi, post_hi)
+
+
+def setup_compatibility_score(pre, post, stress_type):
+    """Return (score, flags, reject_reason) for a candidate pre feature."""
+    score = 0.0
+    flags = []
+
+    if pre.get("measurement_category") == post.get("measurement_category"):
+        flags.append("same_measurement_category")
+    else:
+        score += 2.0
+        flags.append("mixed_measurement_category")
+
+    if post["target_type"] == "delta_vth_v":
+        diff = abs_diff_if_both(pre.get("drain_bias_value"), post.get("drain_bias_value"))
+        if diff is not None:
+            if diff > 0.25:
+                return None, flags, "incompatible_drain_bias"
+            score += diff
+            flags.append("compatible_drain_bias")
+        else:
+            score += 0.5
+            flags.append("missing_drain_bias_for_compatibility")
+
+    if post["target_type"] == "log_rdson_ratio":
+        diff = abs_diff_if_both(pre.get("bias_value"), post.get("bias_value"))
+        if diff is not None:
+            if diff > 0.75:
+                return None, flags, "incompatible_gate_bias"
+            score += diff
+            flags.append("compatible_gate_bias")
+        else:
+            score += 0.5
+            flags.append("missing_gate_bias_for_compatibility")
+
+    if not ranges_overlap(
+        pre.get("sweep_start"), pre.get("sweep_stop"),
+        post.get("sweep_start"), post.get("sweep_stop"),
+    ):
+        return None, flags, "incompatible_sweep_range"
+    flags.append("compatible_sweep_range")
+
+    pre_points = pre.get("sweep_points")
+    post_points = post.get("sweep_points")
+    if pre_points is not None and post_points is not None:
+        try:
+            point_delta = abs(int(pre_points) - int(post_points))
+        except (TypeError, ValueError):
+            point_delta = 0
+        if point_delta > 0:
+            score += min(point_delta / 100.0, 1.0)
+            flags.append("different_sweep_points")
+        else:
+            flags.append("same_sweep_points")
+
+    if stress_type == "sc":
+        pre_seq = pre.get("sc_sequence_num")
+        post_seq = post.get("sc_sequence_num")
+        if pre_seq is not None and post_seq is not None and pre_seq > post_seq:
+            return None, flags, "pre_sc_sequence_after_post"
+        flags.append("compatible_sc_sequence")
+
+    pre_ts = pre.get("metadata_created_at")
+    post_ts = post.get("metadata_created_at")
+    if pre_ts is not None and post_ts is not None:
+        if pre_ts > post_ts:
+            score += 0.25
+            flags.append("pre_metadata_created_after_post")
+        delta_days = abs((post_ts - pre_ts).total_seconds()) / 86400.0
+        score += min(delta_days / 365.0, 1.0)
+        flags.append("closest_metadata_created_at")
+
+    return score, flags, None
+
+
+def choose_pre_feature(candidates, post, stress_type):
+    scored = []
+    reject_reasons = Counter()
+    for candidate in candidates:
+        score, flags, reason = setup_compatibility_score(candidate, post, stress_type)
+        if reason:
+            reject_reasons[reason] += 1
+            continue
+        scored.append((score, candidate.get("metadata_created_at"), candidate["metadata_id"], candidate, flags))
+    if not scored:
+        reason = reject_reasons.most_common(1)[0][0] if reject_reasons else "no_compatible_pre_candidate"
+        return None, [], reason
+
+    scored.sort(key=lambda item: (
+        item[0],
+        item[1] is None,
+        item[1] or datetime.min.replace(tzinfo=None),
+        item[2],
+    ))
+    best = scored[0]
+    if len(scored) > 1 and abs(scored[1][0] - best[0]) < 1e-12:
+        return None, [], "ambiguous_equally_compatible_pre_candidates"
+    flags = ["compatible_pre_selected"] + best[4]
+    return best[3], flags, None
 
 
 def response_from_features(pre, post):
@@ -668,11 +871,12 @@ def response_from_features(pre, post):
     return None, "unknown_target_type"
 
 
-def pair_tuple(pre, post, stress_type, response_value):
+def pair_tuple(pre, post, stress_type, response_value, selection_flags=None):
     target = post["target_type"]
     pair_key = f"{stress_type}:{target}:pre{pre['metadata_id']}:post{post['metadata_id']}"
     split_group = f"{stress_type}:{target}:{post['physical_device_key']}"
     flags = ["strict_device_type_match", "strict_physical_device_key_match"]
+    flags.extend(selection_flags or [])
     if stress_type == "sc":
         flags.append("strict_sc_sample_group_match")
         pairing_method = "same_device_type_sample_group_pristine_to_post_sc"
@@ -736,16 +940,6 @@ def build_pairs(conn):
     reasons = Counter()
     pairs = []
 
-    by_key = defaultdict(list)
-    for feature in usable:
-        key = (
-            feature["target_type"],
-            feature["curve_family"],
-            feature["device_type"],
-            feature["physical_device_key"],
-        )
-        by_key[key].append(feature)
-
     sc_pre = defaultdict(list)
     ir_pre = defaultdict(list)
     for feature in usable:
@@ -775,12 +969,15 @@ def build_pairs(conn):
             if not candidates:
                 reasons["sc_no_matching_pristine_feature"] += 1
                 continue
-            pre = choose_pre_feature(candidates)
+            pre, selection_flags, reason = choose_pre_feature(candidates, post, "sc")
+            if reason:
+                reasons[reason] += 1
+                continue
             response, reason = response_from_features(pre, post)
             if reason:
                 reasons[reason] += 1
                 continue
-            pairs.append(pair_tuple(pre, post, "sc", response))
+            pairs.append(pair_tuple(pre, post, "sc", response, selection_flags))
 
         if post["irrad_role"] == "post_irrad":
             if post.get("irrad_run_id") is None:
@@ -790,12 +987,15 @@ def build_pairs(conn):
             if not candidates:
                 reasons["irrad_no_matching_pre_irrad_feature"] += 1
                 continue
-            pre = choose_pre_feature(candidates)
+            pre, selection_flags, reason = choose_pre_feature(candidates, post, "irradiation")
+            if reason:
+                reasons[reason] += 1
+                continue
             response, reason = response_from_features(pre, post)
             if reason:
                 reasons[reason] += 1
                 continue
-            pairs.append(pair_tuple(pre, post, "irradiation", response))
+            pairs.append(pair_tuple(pre, post, "irradiation", response, selection_flags))
 
     columns = (
         "pair_key",
@@ -948,9 +1148,11 @@ def feature_config(scales, pairs):
         "supported_curve_families": ["IdVg", "IdVd"],
         "out_of_scope_curve_families": list(OUT_OF_SCOPE_CURVES),
         "targets": {
-            "IdVg": "delta_vth_v",
+            "IdVg/Vth": "delta_vth_v",
             "IdVd": "log_rdson_ratio",
         },
+        "measurement_category_to_curve_family": MEASUREMENT_CATEGORY_TO_CURVE,
+        "validation_modes": VALIDATION_MODES,
         "min_donors": MIN_DONORS,
         "nearest_k": NEAREST_K,
         "numeric_features": NUMERIC_FEATURES,
@@ -1021,6 +1223,7 @@ def train(conn):
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "feature_config": config,
         "training_pair_ids": [int(p["id"]) for p in pairs],
+        "training_pair_keys": [p["pair_key"] for p in pairs],
         "training_pair_count": len(pairs),
     }
     artifact_path.write_text(json.dumps(artifact, indent=2, default=json_default))
@@ -1084,17 +1287,42 @@ def normalized_distance(target, donor, config):
     return math.sqrt(total / dims), dims
 
 
-def predict_from_donors(target, pairs, config):
+def same_sc_condition(left, right):
+    return (
+        safe_float(left.get("sc_voltage_v")) == safe_float(right.get("sc_voltage_v"))
+        and safe_float(left.get("sc_duration_us")) == safe_float(right.get("sc_duration_us"))
+    )
+
+
+def same_irrad_condition(left, right):
+    left_run = left.get("irrad_run_id")
+    right_run = right.get("irrad_run_id")
+    return left_run is not None and right_run is not None and left_run == right_run
+
+
+def donor_allowed_for_validation(target, donor, validation_mode):
+    if donor["id"] == target["id"]:
+        return False
+    if donor["split_group"] == target["split_group"]:
+        return False
+    if validation_mode == "leave_condition":
+        if target["stress_type"] == "sc" and same_sc_condition(target, donor):
+            return False
+        if target["stress_type"] == "irradiation" and same_irrad_condition(target, donor):
+            return False
+    return True
+
+
+def predict_from_donors(target, pairs, config, validation_mode="within_condition"):
     min_donors = int(config.get("min_donors") or MIN_DONORS)
     nearest_k = int(config.get("nearest_k") or NEAREST_K)
     candidates = [
         donor
         for donor in pairs
-        if donor["id"] != target["id"]
-        and donor["target_type"] == target["target_type"]
+        if donor["target_type"] == target["target_type"]
         and donor["stress_type"] == target["stress_type"]
         and donor["device_type"] == target["device_type"]
-        and donor["split_group"] != target["split_group"]
+        and donor_allowed_for_validation(target, donor, validation_mode)
     ]
     if len(candidates) < min_donors:
         return {
@@ -1153,7 +1381,7 @@ def predict_from_donors(target, pairs, config):
     }
 
 
-def validation_tuple(run_id, pair, pred):
+def validation_tuple(run_id, validation_mode, pair, pred):
     observed = target_value(pair)
     predicted = pred.get("predicted_value")
     residual = None
@@ -1164,6 +1392,7 @@ def validation_tuple(run_id, pair, pred):
 
     return (
         run_id,
+        validation_mode,
         pair["id"],
         pair["pair_key"],
         pair["split_group"],
@@ -1196,55 +1425,107 @@ def validation_tuple(run_id, pair, pred):
     )
 
 
+def _gate_metrics(values, total, unsupported, target_type):
+    gate = VALIDATION_GATES[target_type]
+    med = percentile(values, 0.5)
+    p90 = percentile(values, 0.9)
+    supported = len(values)
+    gate_pass = (
+        supported >= gate["min_supported_validation_pairs"]
+        and med is not None
+        and p90 is not None
+        and med <= gate["median_abs_residual_max"]
+        and p90 <= gate["p90_abs_residual_max"]
+    )
+    return {
+        "label": TARGET_LABELS[target_type],
+        "validation_pairs": total,
+        "supported_validation_pairs": supported,
+        "unsupported_validation_pairs": unsupported,
+        "median_abs_residual": med,
+        "p90_abs_residual": p90,
+        "gate_pass": gate_pass,
+        "gate": gate,
+    }
+
+
 def summarize_validation(residual_rows):
+    by_stress_target = defaultdict(list)
     by_target = defaultdict(list)
-    unsupported = Counter()
-    totals = Counter()
-    stress_counts = Counter()
+    unsupported_stress_target = Counter()
+    unsupported_target = Counter()
+    totals_stress_target = Counter()
+    totals_target = Counter()
+
     for row in residual_rows:
-        target = row[6]
-        totals[target] += 1
-        stress_counts[f"{row[4]}|{target}"] += 1
-        if row[28] == "ok" and row[12] is not None:
-            by_target[target].append(row[12])
+        validation_mode = row[1]
+        stress_type = row[5]
+        target_type = row[7]
+        stress_key = (validation_mode, stress_type, target_type)
+        target_key = (validation_mode, target_type)
+        totals_stress_target[stress_key] += 1
+        totals_target[target_key] += 1
+        if row[29] == "ok" and row[13] is not None:
+            by_stress_target[stress_key].append(row[13])
+            by_target[target_key].append(row[13])
         else:
-            unsupported[target] += 1
+            unsupported_stress_target[stress_key] += 1
+            unsupported_target[target_key] += 1
 
     metrics = {
         "validation_gates": VALIDATION_GATES,
         "curve_reconstruction_enabled": False,
         "out_of_scope_curve_families": list(OUT_OF_SCOPE_CURVES),
-        "targets": {},
-        "validation_pairs_by_stress_target": dict(sorted(stress_counts.items())),
+        "validation_modes": {},
+        "validation_pairs_by_mode_stress_target": {},
     }
+
     all_pass = True
     any_supported = False
-    for target in TARGET_LABELS:
-        values = by_target.get(target, [])
-        gate = VALIDATION_GATES[target]
-        med = percentile(values, 0.5)
-        p90 = percentile(values, 0.9)
-        supported = len(values)
-        total = totals.get(target, 0)
-        target_pass = (
-            supported >= gate["min_supported_validation_pairs"]
-            and med is not None
-            and p90 is not None
-            and med <= gate["median_abs_residual_max"]
-            and p90 <= gate["p90_abs_residual_max"]
-        )
-        any_supported = any_supported or supported > 0
-        all_pass = all_pass and target_pass
-        metrics["targets"][target] = {
-            "label": TARGET_LABELS[target],
-            "validation_pairs": total,
-            "supported_validation_pairs": supported,
-            "unsupported_validation_pairs": unsupported.get(target, 0),
-            "median_abs_residual": med,
-            "p90_abs_residual": p90,
-            "gate_pass": target_pass,
-            "gate": gate,
+    for validation_mode in sorted({key[0] for key in totals_stress_target}):
+        mode_metrics = {
+            "label": VALIDATION_MODE_LABELS.get(validation_mode, validation_mode),
+            "targets": {},
+            "stress_targets": {},
         }
+        for target_type in TARGET_LABELS:
+            target_key = (validation_mode, target_type)
+            if totals_target.get(target_key, 0) == 0:
+                continue
+            mode_metrics["targets"][target_type] = _gate_metrics(
+                by_target.get(target_key, []),
+                totals_target[target_key],
+                unsupported_target.get(target_key, 0),
+                target_type,
+            )
+
+        for stress_key in sorted(k for k in totals_stress_target if k[0] == validation_mode):
+            _, stress_type, target_type = stress_key
+            metric_key = f"{stress_type}|{target_type}"
+            gate_metrics = _gate_metrics(
+                by_stress_target.get(stress_key, []),
+                totals_stress_target[stress_key],
+                unsupported_stress_target.get(stress_key, 0),
+                target_type,
+            )
+            gate_metrics["stress_type"] = stress_type
+            gate_metrics["target_type"] = target_type
+            mode_metrics["stress_targets"][metric_key] = gate_metrics
+            metrics["validation_pairs_by_mode_stress_target"][
+                f"{validation_mode}|{metric_key}"
+            ] = totals_stress_target[stress_key]
+            any_supported = any_supported or gate_metrics["supported_validation_pairs"] > 0
+            all_pass = all_pass and gate_metrics["gate_pass"]
+
+        metrics["validation_modes"][validation_mode] = mode_metrics
+
+    first_mode = next(iter(metrics["validation_modes"]), None)
+    metrics["targets"] = (
+        metrics["validation_modes"][first_mode]["targets"] if first_mode else {}
+    )
+    metrics["stress_targets"] = (
+        metrics["validation_modes"][first_mode]["stress_targets"] if first_mode else {}
+    )
 
     if not any_supported:
         status = "unsupported"
@@ -1255,7 +1536,7 @@ def summarize_validation(residual_rows):
     return metrics, status
 
 
-def validate(conn, model_run_id=None):
+def validate(conn, model_run_id=None, validation_mode="within_condition"):
     apply_schema(conn)
     run_id = model_run_id or latest_model_run_id(conn)
     if run_id is None:
@@ -1267,20 +1548,28 @@ def validate(conn, model_run_id=None):
         config = feature_config(fit_feature_scales(pairs), pairs)
     pairs = load_pairs(conn)
 
+    modes = list(VALIDATION_MODES) if validation_mode == "both" else [validation_mode]
+
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM iv_physical_validation_residuals WHERE model_run_id = %s",
-            (run_id,),
+            """
+            DELETE FROM iv_physical_validation_residuals
+            WHERE model_run_id = %s
+              AND validation_mode = ANY(%s)
+            """,
+            (run_id, modes),
         )
     conn.commit()
 
     residual_rows = []
-    for pair in pairs:
-        pred = predict_from_donors(pair, pairs, config)
-        residual_rows.append(validation_tuple(run_id, pair, pred))
+    for mode in modes:
+        for pair in pairs:
+            pred = predict_from_donors(pair, pairs, config, validation_mode=mode)
+            residual_rows.append(validation_tuple(run_id, mode, pair, pred))
 
     columns = (
         "model_run_id",
+        "validation_mode",
         "pair_id",
         "pair_key",
         "split_group",
@@ -1324,14 +1613,35 @@ def validate(conn, model_run_id=None):
             )
         conn.commit()
 
-    metrics, status = summarize_validation(residual_rows)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT model_run_id, validation_mode, pair_id, pair_key, split_group,
+                   stress_type, curve_family, target_type, observed_value,
+                   predicted_value, predicted_p10, predicted_p90, residual,
+                   abs_residual, device_type, manufacturer, physical_device_key,
+                   sc_voltage_v, sc_duration_us, irrad_run_id, ion_species,
+                   beam_energy_mev, let_surface, let_bragg_peak, range_um,
+                   fluence_at_meas, donor_pair_keys, donor_count, donor_distance,
+                   support_status, unsupported_reason
+            FROM iv_physical_validation_residuals
+            WHERE model_run_id = %s
+            ORDER BY validation_mode, pair_id
+            """,
+            (run_id,),
+        )
+        all_residual_rows = cur.fetchall()
+
+    metrics, status = summarize_validation(all_residual_rows)
     supported = sum(
         target["supported_validation_pairs"]
-        for target in metrics["targets"].values()
+        for mode in metrics["validation_modes"].values()
+        for target in mode["stress_targets"].values()
     )
     unsupported = sum(
         target["unsupported_validation_pairs"]
-        for target in metrics["targets"].values()
+        for mode in metrics["validation_modes"].values()
+        for target in mode["stress_targets"].values()
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -1345,7 +1655,7 @@ def validate(conn, model_run_id=None):
             WHERE id = %s
             """,
             (
-                len(residual_rows),
+                len(all_residual_rows),
                 supported,
                 unsupported,
                 Json(metrics),
@@ -1364,18 +1674,20 @@ def print_validation_summary(run_id, metrics, status):
     print("\nValidation summary:")
     print(f"  model_run_id: {run_id}")
     print(f"  model_status: {status}")
-    for target, target_metrics in metrics["targets"].items():
-        med = target_metrics["median_abs_residual"]
-        p90 = target_metrics["p90_abs_residual"]
-        med_s = f"{med:.6g}" if med is not None else "NULL"
-        p90_s = f"{p90:.6g}" if p90 is not None else "NULL"
-        print(f"  {target}:")
-        print(f"    validation_pairs: {target_metrics['validation_pairs']}")
-        print(f"    supported: {target_metrics['supported_validation_pairs']}")
-        print(f"    unsupported: {target_metrics['unsupported_validation_pairs']}")
-        print(f"    median_abs_residual: {med_s}")
-        print(f"    p90_abs_residual: {p90_s}")
-        print(f"    gate_pass: {target_metrics['gate_pass']}")
+    for mode, mode_metrics in metrics["validation_modes"].items():
+        print(f"  {mode} ({mode_metrics['label']}):")
+        for stress_target, target_metrics in mode_metrics["stress_targets"].items():
+            med = target_metrics["median_abs_residual"]
+            p90 = target_metrics["p90_abs_residual"]
+            med_s = f"{med:.6g}" if med is not None else "NULL"
+            p90_s = f"{p90:.6g}" if p90 is not None else "NULL"
+            print(f"    {stress_target}:")
+            print(f"      validation_pairs: {target_metrics['validation_pairs']}")
+            print(f"      supported: {target_metrics['supported_validation_pairs']}")
+            print(f"      unsupported: {target_metrics['unsupported_validation_pairs']}")
+            print(f"      median_abs_residual: {med_s}")
+            print(f"      p90_abs_residual: {p90_s}")
+            print(f"      gate_pass: {target_metrics['gate_pass']}")
 
 
 def print_reserved_prediction_counts(conn):
@@ -1417,12 +1729,22 @@ def main():
                         help="Apply schema/024_iv_physical_prediction.sql")
     parser.add_argument("--extract-features", action="store_true",
                         help="Snapshot physical curve features from gate_params")
+    parser.add_argument("--refresh-damage", action="store_true",
+                        help="Refresh gate_params via extract_damage_metrics.py before snapshotting")
+    parser.add_argument("--refresh-damage-rebuild", action="store_true",
+                        help="Recompute all gate_params during --refresh-damage")
+    parser.add_argument("--device-type",
+                        help="Restrict --refresh-damage to one device_type")
     parser.add_argument("--build-pairs", action="store_true",
                         help="Build strict pre/post physical response pairs")
     parser.add_argument("--train", action="store_true",
                         help="Create a support-gated donor model run")
     parser.add_argument("--validate", action="store_true",
-                        help="Run leave-one-device validation for a model run")
+                        help="Run support-gated validation for a model run")
+    parser.add_argument("--validation-mode",
+                        choices=["within_condition", "leave_condition", "both"],
+                        default="within_condition",
+                        help="Validation donor exclusion mode")
     parser.add_argument("--model-run-id", type=int,
                         help="Model run to validate; defaults to latest")
     args = parser.parse_args()
@@ -1430,6 +1752,7 @@ def main():
     if not any(
         [
             args.rebuild_sql,
+            args.refresh_damage,
             args.extract_features,
             args.build_pairs,
             args.train,
@@ -1445,6 +1768,12 @@ def main():
         print_old_counts(conn, "before")
         if args.rebuild_sql:
             rebuild_sql(conn)
+        if args.refresh_damage:
+            refresh_damage_metrics(
+                conn,
+                rebuild=args.refresh_damage_rebuild,
+                device_type=args.device_type,
+            )
         if args.extract_features:
             extract_features(conn)
         if args.build_pairs:
@@ -1452,7 +1781,11 @@ def main():
         if args.train:
             trained_run_id = train(conn)
         if args.validate:
-            validate(conn, args.model_run_id or trained_run_id)
+            validate(
+                conn,
+                args.model_run_id or trained_run_id,
+                validation_mode=args.validation_mode,
+            )
         print_old_counts(conn, "after")
     finally:
         conn.close()
