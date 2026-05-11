@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Create the "Post-IV Physical Prediction Validation Diagnostics" dashboard in Apache
-Superset.
+Create the "Post-IV Prediction V2 - Physical Response Diagnostics" dashboard
+in Apache Superset.
 
 The dashboard visualizes the V2 physical prediction workflow:
   * model-run validation gates by stress type and physical target,
@@ -39,7 +39,7 @@ from superset_api import (
 )
 
 
-DASHBOARD_TITLE = "Post-IV Physical Prediction Validation Diagnostics"
+DASHBOARD_TITLE = "Post-IV Prediction V2 - Physical Response Diagnostics"
 DASHBOARD_SLUG = "post-iv-physical-prediction"
 
 MODEL_VIEW = "iv_physical_prediction_model_summary_view"
@@ -50,6 +50,7 @@ FEATURE_VIEW = "iv_physical_prediction_feature_coverage_view"
 FLAG_VIEW = "iv_physical_prediction_quality_flag_view"
 PARAM_SUMMARY_VIEW = "iv_physical_parameter_prediction_summary_view"
 CURVE_VIEW = "iv_physical_curve_prediction_view"
+CURVE_SHAPE_VIEW = "iv_physical_curve_shape_plot_view"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "schema" / "024_iv_physical_prediction.sql"
@@ -64,6 +65,8 @@ TARGET_COLORS = {
     "unsupported": "#d62728",
     "strong": "#2ca02c",
     "weak": "#ffbf00",
+    "source_reference": "#1f77b4",
+    "predicted_post": "#d55e00",
     "within_median_gate": "#2ca02c",
     "within_p90_gate": "#ffbf00",
     "outside_gate": "#d62728",
@@ -90,6 +93,7 @@ def ensure_views_exist():
         FLAG_VIEW,
         PARAM_SUMMARY_VIEW,
         CURVE_VIEW,
+        CURVE_SHAPE_VIEW,
     ]
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
@@ -171,6 +175,22 @@ def nonnull_filter(sql):
     return {
         "expressionType": "SQL",
         "sqlExpression": sql,
+        "clause": "WHERE",
+    }
+
+
+def target_type_filter(target_type):
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"target_type = '{target_type}'",
+        "clause": "WHERE",
+    }
+
+
+def plot_pair_rank_filter(limit=25):
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"plot_pair_rank <= {int(limit)}",
         "clause": "WHERE",
     }
 
@@ -341,6 +361,52 @@ def residual_distance_scatter_params():
     }
 
 
+def curve_shape_line_params(target_type, x_title):
+    return {
+        "x_axis": "plot_x_value",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [
+            {
+                "expressionType": "SQL",
+                "sqlExpression": "AVG(plot_i_drain)",
+                "label": "I_Drain (A)",
+            },
+        ],
+        "groupby": ["plot_series_label"],
+        "adhoc_filters": [
+            latest_model_filter(),
+            support_ok_filter(),
+            target_type_filter(target_type),
+            plot_pair_rank_filter(25),
+            nonnull_filter("plot_x_value IS NOT NULL AND plot_i_drain IS NOT NULL"),
+        ],
+        "row_limit": 100000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": x_title,
+        "y_axis_title": "I_Drain (A)",
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "sort_series_type": "max",
+        "sort_series_ascending": False,
+        "series_limit": 200,
+        "series_limit_metric": {
+            "expressionType": "SQL",
+            "sqlExpression": "MAX(confidence_score)",
+            "label": "_rank_by_confidence",
+        },
+        "label_colors": TARGET_COLORS,
+    }
+
+
 def build_dashboard_layout(charts):
     layout = {
         "DASHBOARD_VERSION_KEY": "v2",
@@ -354,6 +420,7 @@ def build_dashboard_layout(charts):
                 "ROW-scatter",
                 "ROW-validation",
                 "ROW-generated",
+                "ROW-generated-shapes",
                 "ROW-coverage",
                 "ROW-flags",
             ],
@@ -399,6 +466,13 @@ def build_dashboard_layout(charts):
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         },
+        "ROW-generated-shapes": {
+            "type": "ROW",
+            "id": "ROW-generated-shapes",
+            "children": ["CHART-idvg-curve-shapes", "CHART-idvd-curve-shapes"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
         "ROW-coverage": {
             "type": "ROW",
             "id": "ROW-coverage",
@@ -423,6 +497,8 @@ def build_dashboard_layout(charts):
         "validation_table": ("CHART-validation-table", "ROW-validation"),
         "param_summary": ("CHART-param-summary", "ROW-generated"),
         "curve_table": ("CHART-curve-table", "ROW-generated"),
+        "idvg_curve_shapes": ("CHART-idvg-curve-shapes", "ROW-generated-shapes"),
+        "idvd_curve_shapes": ("CHART-idvd-curve-shapes", "ROW-generated-shapes"),
         "feature_bar": ("CHART-feature-bar", "ROW-coverage"),
         "pair_table": ("CHART-pair-table", "ROW-coverage"),
         "feature_table": ("CHART-feature-table", "ROW-flags"),
@@ -479,6 +555,8 @@ def build_native_filters(chart_ids, datasets, chart_groups):
     stress_id = "NATIVE_FILTER-ivphys-stress"
     support_id = "NATIVE_FILTER-ivphys-support"
     confidence_id = "NATIVE_FILTER-ivphys-confidence"
+    pair_id = "NATIVE_FILTER-ivphys-pair-key"
+    role_id = "NATIVE_FILTER-ivphys-curve-role"
     quality_id = "NATIVE_FILTER-ivphys-quality"
 
     return [
@@ -491,6 +569,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["support"], "column": {"name": "validation_mode"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "validation_mode_used"}},
                 {"datasetId": datasets["curve"], "column": {"name": "validation_mode_used"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "validation_mode_used"}},
             ],
             chart_groups["validation_mode"],
         ),
@@ -505,6 +584,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["flag"], "column": {"name": "reference_tier"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "reference_tier"}},
                 {"datasetId": datasets["curve"], "column": {"name": "reference_tier"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "reference_tier"}},
             ],
             chart_groups["reference_tier"],
             cascade=[mode_id],
@@ -521,6 +601,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["flag"], "column": {"name": "target_type"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "target_type"}},
                 {"datasetId": datasets["curve"], "column": {"name": "target_type"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "target_type"}},
             ],
             chart_ids,
             cascade=[mode_id, reference_id],
@@ -536,6 +617,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["flag"], "column": {"name": "device_type"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "device_type"}},
                 {"datasetId": datasets["curve"], "column": {"name": "device_type"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "device_type"}},
             ],
             chart_groups["device"],
             cascade=[mode_id, reference_id, target_id],
@@ -549,6 +631,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["pair"], "column": {"name": "stress_type"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "stress_type"}},
                 {"datasetId": datasets["curve"], "column": {"name": "stress_type"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "stress_type"}},
             ],
             chart_groups["stress"],
             cascade=[mode_id, reference_id, target_id, device_id],
@@ -561,6 +644,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
                 {"datasetId": datasets["support"], "column": {"name": "support_status"}},
                 {"datasetId": datasets["param_summary"], "column": {"name": "support_status"}},
                 {"datasetId": datasets["curve"], "column": {"name": "support_status"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "support_status"}},
             ],
             chart_groups["support"],
             cascade=[mode_id, reference_id, target_id, device_id, stress_id],
@@ -571,9 +655,37 @@ def build_native_filters(chart_ids, datasets, chart_groups):
             [
                 {"datasetId": datasets["param_summary"], "column": {"name": "confidence_level"}},
                 {"datasetId": datasets["curve"], "column": {"name": "confidence_level"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "confidence_level"}},
             ],
             chart_groups["confidence"],
             cascade=[mode_id, reference_id, target_id, device_id, stress_id],
+        ),
+        filter_select(
+            pair_id,
+            "Pair Key",
+            [
+                {"datasetId": datasets["curve"], "column": {"name": "pair_key"}},
+                {"datasetId": datasets["curve_shape"], "column": {"name": "pair_key"}},
+            ],
+            chart_groups["pair_key"],
+            cascade=[mode_id, reference_id, target_id, device_id, stress_id, confidence_id],
+        ),
+        filter_select(
+            role_id,
+            "Curve Role",
+            [
+                {"datasetId": datasets["curve_shape"], "column": {"name": "curve_role"}},
+            ],
+            chart_groups["curve_role"],
+            cascade=[
+                mode_id,
+                reference_id,
+                target_id,
+                device_id,
+                stress_id,
+                confidence_id,
+                pair_id,
+            ],
         ),
         filter_select(
             quality_id,
@@ -590,7 +702,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
 
 
 def main():
-    print("Creating Post-IV Physical Prediction Validation Diagnostics dashboard\n" + "=" * 62)
+    print(f"Creating {DASHBOARD_TITLE} dashboard\n" + "=" * 62)
 
     print("1. Applying V2 prediction schema and dashboard views ...")
     apply_schema()
@@ -619,6 +731,7 @@ def main():
         "flag": find_or_create_dataset(session, db_id, FLAG_VIEW),
         "param_summary": find_or_create_dataset(session, db_id, PARAM_SUMMARY_VIEW),
         "curve": find_or_create_dataset(session, db_id, CURVE_VIEW),
+        "curve_shape": find_or_create_dataset(session, db_id, CURVE_SHAPE_VIEW),
     }
     if not all(datasets.values()):
         sys.exit("   ERROR: one or more datasets could not be registered")
@@ -896,6 +1009,36 @@ def main():
 
     cid, cuuid = create_chart(
         session,
+        "IV Physical Prediction - IdVg Curve Shapes",
+        datasets["curve_shape"],
+        "echarts_timeseries_line",
+        curve_shape_line_params("delta_vth_v", "V_Gate (V)"),
+    )
+    charts["idvg_curve_shapes"] = (
+        cid,
+        cuuid,
+        "IV Physical Prediction - IdVg Curve Shapes",
+        6,
+        58,
+    )
+
+    cid, cuuid = create_chart(
+        session,
+        "IV Physical Prediction - IdVd Curve Shapes",
+        datasets["curve_shape"],
+        "echarts_timeseries_line",
+        curve_shape_line_params("log_rdson_ratio", "V_Drain (V)"),
+    )
+    charts["idvd_curve_shapes"] = (
+        cid,
+        cuuid,
+        "IV Physical Prediction - IdVd Curve Shapes",
+        6,
+        58,
+    )
+
+    cid, cuuid = create_chart(
+        session,
         "IV Physical Prediction - Feature Coverage by Source",
         datasets["feature"],
         "echarts_timeseries_bar",
@@ -1031,9 +1174,15 @@ def main():
     ]
     support_charts = [charts["support"][0]]
     pair_charts = [charts["pair_table"][0]]
+    curve_shape_charts = [
+        charts["idvg_curve_shapes"][0],
+        charts["idvd_curve_shapes"][0],
+    ]
     prediction_charts = [
         charts["param_summary"][0],
         charts["curve_table"][0],
+        charts["idvg_curve_shapes"][0],
+        charts["idvd_curve_shapes"][0],
     ]
     feature_charts = [
         charts["feature_bar"][0],
@@ -1066,6 +1215,8 @@ def main():
         ],
         "support": [cid for cid in validation_charts + support_charts + prediction_charts if cid],
         "confidence": [cid for cid in prediction_charts if cid],
+        "pair_key": [cid for cid in [charts["curve_table"][0]] + curve_shape_charts if cid],
+        "curve_role": [cid for cid in curve_shape_charts if cid],
         "quality": [cid for cid in pair_charts + feature_charts if cid],
     }
     native_filters = build_native_filters(
@@ -1098,8 +1249,8 @@ def main():
     print("Dashboard ready!")
     print(f"  URL: {SUPERSET_URL}/superset/dashboard/{DASHBOARD_SLUG}/")
     print(f"  Charts: {len(chart_ids)}")
-    print("  Filters: Validation Mode, Reference Tier, Target, Device Type, Stress Type, Support Status, Confidence, Quality Status")
-    print("  Generated output charts: parameter summary and curve point sample")
+    print("  Filters: Validation Mode, Reference Tier, Target, Device Type, Stress Type, Support Status, Confidence, Pair Key, Curve Role, Quality Status")
+    print("  Generated output charts: parameter summary, curve shape overlays, and curve point sample")
 
 
 if __name__ == "__main__":

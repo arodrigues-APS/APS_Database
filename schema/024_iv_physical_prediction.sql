@@ -672,6 +672,7 @@ DROP VIEW IF EXISTS iv_physical_prediction_pair_coverage_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_support_summary_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_validation_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_prediction_model_summary_view CASCADE;
+DROP VIEW IF EXISTS iv_physical_curve_shape_plot_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_curve_prediction_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_parameter_prediction_summary_view CASCADE;
 DROP VIEW IF EXISTS iv_physical_parameter_prediction_view CASCADE;
@@ -1140,6 +1141,157 @@ SELECT
 FROM iv_physical_curve_points cp
 JOIN iv_physical_parameter_prediction_view pp
   ON pp.parameter_prediction_id = cp.parameter_prediction_id;
+
+CREATE VIEW iv_physical_curve_shape_plot_view AS
+WITH supported_curve_points AS (
+    SELECT
+        cv.*,
+        ROUND(cv.bias_value::numeric, 2)::double precision AS bias_value_rounded
+    FROM iv_physical_curve_prediction_view cv
+    WHERE cv.support_status = 'ok'
+      AND COALESCE(cv.confidence_level, 'unsupported') <> 'unsupported'
+      AND cv.source_x_value IS NOT NULL
+      AND cv.predicted_x_value IS NOT NULL
+      AND cv.pristine_i_drain IS NOT NULL
+      AND cv.predicted_post_i_drain IS NOT NULL
+),
+pair_scores AS (
+    SELECT
+        model_run_id,
+        validation_mode_used,
+        reference_tier,
+        stress_type,
+        target_type,
+        pair_key,
+        MAX(confidence_score) AS max_confidence_score,
+        MAX(donor_count) AS max_donor_count,
+        MIN(donor_distance) AS min_donor_distance
+    FROM supported_curve_points
+    GROUP BY
+        model_run_id,
+        validation_mode_used,
+        reference_tier,
+        stress_type,
+        target_type,
+        pair_key
+),
+ranked_pairs AS (
+    SELECT
+        ps.*,
+        DENSE_RANK() OVER (
+            PARTITION BY
+                model_run_id,
+                validation_mode_used,
+                reference_tier,
+                stress_type,
+                target_type
+            ORDER BY
+                max_confidence_score DESC NULLS LAST,
+                max_donor_count DESC NULLS LAST,
+                min_donor_distance ASC NULLS LAST,
+                pair_key ASC
+        ) AS plot_pair_rank
+    FROM pair_scores ps
+)
+SELECT
+    cv.curve_point_id,
+    cv.parameter_prediction_id,
+    cv.model_run_id,
+    cv.model_version,
+    cv.algorithm,
+    cv.trained_at,
+    cv.model_status,
+    cv.is_latest_model_run,
+    cv.pair_id,
+    cv.pair_key,
+    cv.source_metadata_id,
+    cv.source_feature_id,
+    cv.post_metadata_id,
+    cv.post_feature_id,
+    cv.target_type,
+    cv.target_label,
+    cv.curve_family,
+    cv.stress_type,
+    cv.reference_tier,
+    cv.device_type,
+    cv.manufacturer,
+    cv.physical_device_key,
+    cv.x_axis_name,
+    cv.bias_axis_name,
+    cv.bias_value,
+    cv.bias_value_rounded,
+    cv.point_index,
+    role.curve_role,
+    role.curve_role_order,
+    role.plot_x_value,
+    role.plot_i_drain,
+    CONCAT_WS(
+        ' | ',
+        cv.pair_key,
+        role.curve_role_label,
+        cv.confidence_level,
+        COALESCE(cv.bias_axis_name, 'bias') || '=' || COALESCE(cv.bias_value_rounded::text, 'NA')
+    ) AS plot_series_label,
+    cv.source_x_value,
+    cv.predicted_x_value,
+    cv.pristine_i_drain,
+    cv.predicted_post_i_drain,
+    cv.predicted_parameter_value,
+    cv.predicted_parameter_p10,
+    cv.predicted_parameter_p90,
+    cv.donor_pair_keys,
+    cv.donor_count,
+    cv.donor_distance,
+    cv.support_status,
+    cv.support_reason,
+    cv.confidence_level,
+    cv.confidence_score,
+    cv.confidence_reasons,
+    cv.physics_flags,
+    cv.prediction_status,
+    cv.validation_mode_used,
+    cv.validation_gate_pass,
+    cv.validation_supported_fraction,
+    cv.validation_supported_pairs,
+    cv.validation_total_pairs,
+    cv.baseline_reference_count,
+    cv.baseline_reference_spread,
+    cv.irrad_run_id,
+    cv.ion_species,
+    cv.beam_energy_mev,
+    cv.let_surface,
+    cv.let_bragg_peak,
+    cv.range_um,
+    cv.fluence_at_meas,
+    rp.plot_pair_rank,
+    cv.created_at
+FROM supported_curve_points cv
+JOIN ranked_pairs rp
+  ON rp.model_run_id = cv.model_run_id
+ AND rp.validation_mode_used IS NOT DISTINCT FROM cv.validation_mode_used
+ AND rp.reference_tier IS NOT DISTINCT FROM cv.reference_tier
+ AND rp.stress_type IS NOT DISTINCT FROM cv.stress_type
+ AND rp.target_type IS NOT DISTINCT FROM cv.target_type
+ AND rp.pair_key IS NOT DISTINCT FROM cv.pair_key
+CROSS JOIN LATERAL (
+    VALUES
+        (
+            'source_reference',
+            1,
+            'Source reference',
+            cv.source_x_value,
+            cv.pristine_i_drain
+        ),
+        (
+            'predicted_post',
+            2,
+            'Predicted post',
+            cv.predicted_x_value,
+            cv.predicted_post_i_drain
+        )
+) AS role(curve_role, curve_role_order, curve_role_label, plot_x_value, plot_i_drain)
+WHERE role.plot_x_value IS NOT NULL
+  AND role.plot_i_drain IS NOT NULL;
 
 CREATE VIEW iv_physical_parameter_prediction_summary_view AS
 WITH curve_counts AS (
