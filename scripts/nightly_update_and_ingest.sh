@@ -42,6 +42,36 @@ require_file() {
   [[ -e "${path}" ]] || die "Missing required path: ${path}"
 }
 
+check_python_modules() {
+  local missing
+  missing="$("${PYTHON}" - <<'PY'
+modules = [
+    "h5py",
+    "joblib",
+    "luaparser",
+    "matplotlib",
+    "numpy",
+    "openpyxl",
+    "pandas",
+    "psycopg2",
+    "requests",
+    "scipy",
+    "sklearn",
+]
+missing = []
+for module in modules:
+    try:
+        __import__(module)
+    except Exception as exc:
+        missing.append(f"{module}: {exc}")
+print("\n".join(missing))
+PY
+)"
+  if [[ -n "${missing}" ]]; then
+    die "Python environment ${PYTHON} is missing required modules: ${missing}"
+  fi
+}
+
 wait_for_postgres() {
   local container=$1
   local user=$2
@@ -102,6 +132,7 @@ export PYTHONUNBUFFERED=1
 log "Starting APS nightly container update and ingest."
 log "Repository root: ${REPO_ROOT}"
 log "Log file: ${LOG_FILE}"
+check_python_modules
 
 cd "${COMPOSE_DIR}"
 wait_for_postgres "postgresqlv2" "postgres" "mosfets" "APS data database"
@@ -134,7 +165,11 @@ run_py ingestion_avalanche.py
 run_py -c "from db_config import get_connection; conn=get_connection(); cur=conn.cursor(); cur.execute('REFRESH MATERIALIZED VIEW baselines_run_max_current'); conn.commit(); cur.close(); conn.close(); print('refreshed baselines_run_max_current')"
 run_py extract_damage_metrics.py
 run_py create_baselines_dashboard.py
-run_py create_baselines_dashboard_device_library.py
+if [[ -f create_baselines_dashboard_device_library.py ]]; then
+  run_py create_baselines_dashboard_device_library.py
+else
+  log "Skipping create_baselines_dashboard_device_library.py; not present in this checkout."
+fi
 run_py create_sc_dashboard.py
 run_py create_irradiation_dashboard.py
 run_py create_avalanche_dashboard.py
