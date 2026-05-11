@@ -1,5 +1,6 @@
 -- V2 post-stress IV physical degradation prediction tables.
 -- Owned by data_processing_scripts/ml_post_iv_physical_prediction.py.
+-- apply_schema: pipeline-owned
 --
 -- This schema intentionally does not mutate the legacy iv_prediction_* tables.
 -- V2 predicts physical response parameters first; curve reconstruction is

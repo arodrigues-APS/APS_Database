@@ -1,5 +1,6 @@
 -- Single-event effect extraction outputs for irradiation monitor waveforms.
 -- Populated by data_processing_scripts/extract_single_event_effects.py.
+-- apply_schema: pipeline-owned
 
 CREATE TABLE IF NOT EXISTS irradiation_single_event_file_summary (
     metadata_id                 INTEGER PRIMARY KEY

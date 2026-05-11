@@ -984,7 +984,10 @@ def main():
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
-            apply_schema(conn)
+            apply_schema(
+                conn,
+                include_pipeline={"022_irradiation_single_events.sql"},
+            )
             ensure_views(cur)
             conn.commit()
 

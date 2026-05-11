@@ -51,7 +51,8 @@ from luaparser import astnodes
 
 # ── Configuration ────────────────────────────────────────────────────────────
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
-from common import (load_device_library, load_device_mapping_rules, match_device,
+from common import (apply_schema,
+                    load_device_library, load_device_mapping_rules, match_device,
                     compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows, categorize_measurement,
                     sweep_stats, refine_category_by_sweep)
@@ -1178,6 +1179,7 @@ def main():
         user=DB_USER, password=DB_PASSWORD
     )
     conn.autocommit = False
+    apply_schema(conn)
     cur = conn.cursor()
 
     # Drop existing baseline tables if rebuilding

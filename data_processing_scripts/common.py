@@ -15,24 +15,51 @@ from pathlib import Path
 # ── Schema migrations ───────────────────────────────────────────────────────
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
+PIPELINE_SCHEMA_MARKER = "apply_schema: pipeline-owned"
 
 
-def apply_schema(conn):
+def _is_pipeline_owned(sql_text):
+    return PIPELINE_SCHEMA_MARKER in sql_text[:500]
+
+
+def apply_schema(conn, include_pipeline=False):
     """
-    Apply every .sql in schema/ in lexicographic order.
+    Apply schema/*.sql in lexicographic order.
 
     Files are idempotent (CREATE TABLE IF NOT EXISTS + DO $$ ALTER TABLE
     ... ADD COLUMN ... EXCEPTION WHEN duplicate_column $$) so calling
-    this at startup is safe.  Callers: server.py on boot, every
-    ingestion_*.py before first write.
+    this at startup is safe.  SQL files marked with
+    ``apply_schema: pipeline-owned`` are skipped by default because they
+    depend on ingestion-populated tables and are applied by their owning
+    pipeline scripts.  Pass True to include every pipeline-owned file, or
+    pass an iterable of filenames to include only selected pipeline SQL.
     """
     if not SCHEMA_DIR.is_dir():
         return
+    if include_pipeline is True:
+        pipeline_files = None
+    elif isinstance(include_pipeline, str):
+        pipeline_files = {include_pipeline}
+    elif include_pipeline:
+        pipeline_files = set(include_pipeline)
+    else:
+        pipeline_files = set()
     cur = conn.cursor()
-    for sql_path in sorted(SCHEMA_DIR.glob("*.sql")):
-        cur.execute(sql_path.read_text())
-    conn.commit()
-    cur.close()
+    try:
+        for sql_path in sorted(SCHEMA_DIR.glob("*.sql")):
+            sql_text = sql_path.read_text()
+            if _is_pipeline_owned(sql_text):
+                if include_pipeline is True:
+                    pass
+                elif sql_path.name not in pipeline_files:
+                    continue
+            cur.execute(sql_text)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
 
 
 # ── Device Library ──────────────────────────────────────────────────────────

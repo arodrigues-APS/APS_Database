@@ -46,7 +46,8 @@ except ImportError:
     from psycopg2.extras import execute_values
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DATA_ROOT
-from common import (load_device_library, load_device_mapping_rules, match_device,
+from common import (apply_schema,
+                    load_device_library, load_device_mapping_rules, match_device,
                     compute_file_hash, categorize_measurement,
                     sweep_stats, refine_category_by_sweep)
 
@@ -792,6 +793,8 @@ def main():
         user=DB_USER, password=DB_PASSWORD,
     )
     conn.autocommit = False
+    if not args.dry_run:
+        apply_schema(conn)
     cur = conn.cursor()
 
     # Ensure schema is ready

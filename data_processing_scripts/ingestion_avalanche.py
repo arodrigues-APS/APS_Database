@@ -67,7 +67,7 @@ except ImportError:
     from scipy.io import loadmat
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, NAS_ROOT
-from common import (compute_file_hash, load_device_library,
+from common import (apply_schema, compute_file_hash, load_device_library,
                     load_device_mapping_rules, match_device)
 
 
@@ -1006,6 +1006,8 @@ def main():
         user=DB_USER, password=DB_PASSWORD,
     )
     conn.autocommit = False
+    if not args.dry_run:
+        apply_schema(conn)
     cur = conn.cursor()
 
     try:

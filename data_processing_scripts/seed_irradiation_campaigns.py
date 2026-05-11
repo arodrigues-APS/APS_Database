@@ -28,6 +28,7 @@ except ImportError:
     import psycopg2
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from common import apply_schema
 
 
 # ── Known Campaigns (facility-level) ─────────────────────────────────────────
@@ -777,6 +778,7 @@ def main():
         user=DB_USER, password=DB_PASSWORD,
     )
     conn.autocommit = False
+    apply_schema(conn)
     cur = conn.cursor()
 
     # 1. Create / migrate tables

@@ -173,8 +173,19 @@ fi
 run_py create_sc_dashboard.py
 run_py create_irradiation_dashboard.py
 run_py create_avalanche_dashboard.py
+run_py ml_post_iv_physical_prediction.py \
+  --rebuild-sql \
+  --extract-features \
+  --build-pairs \
+  --include-library-pristine \
+  --train \
+  --validate \
+  --validation-mode both \
+  --reference-tier both \
+  --predict-curves
+run_py create_iv_physical_prediction_dashboard.py
 run_py ml_sc_irrad_equivalence.py --rebuild
 run_py create_sc_irrad_dashboard.py
-run_py create_iv_physical_prediction_dashboard.py
+run_py create_sc_irrad_prediction_dashboard.py
 
 log "APS nightly container update and ingest completed successfully."

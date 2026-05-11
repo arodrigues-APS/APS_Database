@@ -1,5 +1,6 @@
 -- Post-stress IV curve prediction tables.
 -- Views are owned by data_processing_scripts/ml_post_iv_prediction.py.
+-- apply_schema: pipeline-owned
 
 CREATE TABLE IF NOT EXISTS iv_prediction_pair_grid (
     id BIGSERIAL PRIMARY KEY,

@@ -8,10 +8,12 @@
 #python -m flask --debug --app server run (--host=0.0.0.0)
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from configobj import ConfigObj
 from flask import Flask, flash, jsonify, request
 from flask_wtf import FlaskForm
+from flask_wtf.csrf import CSRFProtect
 from wtforms import StringField, SubmitField, SelectField
 from flask import render_template, redirect, send_from_directory
 from flaskext.markdown import Markdown
@@ -33,10 +35,12 @@ ds.search_results(sterms=[])  # pre-warm the file listing cache at startup
 class Config():
 	EXPLAIN_TEMPLATE_LOADING = True
 	SECRET_KEY = os.environ.get('SECRET_KEY') or 'vRbPDgZP6rHpjCSQWByy'
+	WTF_CSRF_TIME_LIMIT = None
 
 app = Flask(__name__)
 Markdown(app)
 app.config.from_object(Config)
+csrf = CSRFProtect(app)
 
 #class for defining search form
 class SearchForm(FlaskForm):
@@ -89,13 +93,37 @@ def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
 	return get_connection()
 
+
+@contextmanager
+def db_cursor(cursor_factory=None):
+	"""Open a DB cursor and always commit/rollback and close the connection."""
+	conn = get_db()
+	cur = None
+	try:
+		if cursor_factory is None:
+			cur = conn.cursor()
+		else:
+			cur = conn.cursor(cursor_factory=cursor_factory)
+		yield conn, cur
+		conn.commit()
+	except Exception:
+		conn.rollback()
+		raise
+	finally:
+		if cur is not None:
+			cur.close()
+		conn.close()
+
+
 # Apply idempotent schema migrations (schema/*.sql).
 # This must succeed at boot so admin pages cannot come up against a partial
 # schema (which leads to confusing runtime errors).
 try:
 	_boot_conn = get_connection()
-	apply_schema(_boot_conn)
-	_boot_conn.close()
+	try:
+		apply_schema(_boot_conn)
+	finally:
+		_boot_conn.close()
 except Exception as _e:
 	raise RuntimeError(f"Database schema bootstrap failed: {_e}") from _e
 
@@ -187,25 +215,21 @@ def device_library():
 			error = "Part number is required."
 		else:
 			try:
-				conn = get_db()
-				cur = conn.cursor()
-				cur.execute(
-					"""INSERT INTO device_library
-					   (part_number, device_category, manufacturer,
-					    voltage_rating, rdson_mohm, current_rating_a,
-					    package_type, notes)
-					   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-					(pn,
-					 form.device_category.data,
-					 form.manufacturer.data,
-					 form.voltage_rating.data or None,
-					 form.rdson_mohm.data or None,
-					 form.current_rating_a.data or None,
-					 form.package_type.data,
-					 form.notes.data or None))
-				conn.commit()
-				cur.close()
-				conn.close()
+				with db_cursor() as (_conn, cur):
+					cur.execute(
+						"""INSERT INTO device_library
+						   (part_number, device_category, manufacturer,
+						    voltage_rating, rdson_mohm, current_rating_a,
+						    package_type, notes)
+						   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+						(pn,
+						 form.device_category.data,
+						 form.manufacturer.data,
+						 form.voltage_rating.data or None,
+						 form.rdson_mohm.data or None,
+						 form.current_rating_a.data or None,
+						 form.package_type.data,
+						 form.notes.data or None))
 				flash(f"Device '{pn}' added.", "success")
 				return redirect("/devices")
 			except psycopg2.errors.UniqueViolation:
@@ -217,17 +241,14 @@ def device_library():
 	devices = []
 	mapping_rules = []
 	try:
-		conn = get_db()
-		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-		cur.execute("SELECT * FROM device_library ORDER BY manufacturer, part_number")
-		devices = cur.fetchall()
-		cur.execute("""
-			SELECT * FROM device_mapping_rules
-			ORDER BY scope, priority DESC, LENGTH(pattern) DESC, pattern
-		""")
-		mapping_rules = cur.fetchall()
-		cur.close()
-		conn.close()
+		with db_cursor(cursor_factory=psycopg2.extras.RealDictCursor) as (_conn, cur):
+			cur.execute("SELECT * FROM device_library ORDER BY manufacturer, part_number")
+			devices = cur.fetchall()
+			cur.execute("""
+				SELECT * FROM device_mapping_rules
+				ORDER BY scope, priority DESC, LENGTH(pattern) DESC, pattern
+			""")
+			mapping_rules = cur.fetchall()
 	except Exception as e:
 		error = f"Could not load devices: {e}"
 
@@ -267,18 +288,15 @@ def add_mapping_rule():
 		flash("Invalid pattern type or scope.", "danger")
 		return redirect("/devices")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			INSERT INTO device_mapping_rules
-			    (pattern, pattern_type, scope, priority, part_number,
-			     source_reference, notes)
-			VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-			(pattern, pattern_type, scope, priority, part_number,
-			 request.form.get("source_reference") or None,
-			 request.form.get("notes") or None))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				INSERT INTO device_mapping_rules
+				    (pattern, pattern_type, scope, priority, part_number,
+				     source_reference, notes)
+				VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+				(pattern, pattern_type, scope, priority, part_number,
+				 request.form.get("source_reference") or None,
+				 request.form.get("notes") or None))
 		flash(f"Rule '{pattern}' → {part_number} added.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("A rule with that pattern/type/scope already exists.", "danger")
@@ -297,27 +315,24 @@ def edit_mapping_rule(rule_id):
 		flash("Invalid pattern type or scope.", "danger")
 		return redirect("/devices")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			UPDATE device_mapping_rules
-			SET pattern          = %s,
-			    pattern_type     = %s,
-			    scope            = %s,
-			    priority         = %s,
-			    part_number      = %s,
-			    source_reference = %s,
-			    notes            = %s
-			WHERE id = %s""",
-			(request.form["pattern"].strip(),
-			 pattern_type, scope,
-			 _parse_priority(request.form.get("priority"), 100),
-			 request.form["part_number"].strip(),
-			 request.form.get("source_reference") or None,
-			 request.form.get("notes") or None,
-			 rule_id))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				UPDATE device_mapping_rules
+				SET pattern          = %s,
+				    pattern_type     = %s,
+				    scope            = %s,
+				    priority         = %s,
+				    part_number      = %s,
+				    source_reference = %s,
+				    notes            = %s
+				WHERE id = %s""",
+				(request.form["pattern"].strip(),
+				 pattern_type, scope,
+				 _parse_priority(request.form.get("priority"), 100),
+				 request.form["part_number"].strip(),
+				 request.form.get("source_reference") or None,
+				 request.form.get("notes") or None,
+				 rule_id))
 		flash("Rule updated.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("Another rule with that pattern/type/scope already exists.", "danger")
@@ -331,11 +346,8 @@ def edit_mapping_rule(rule_id):
 @app.route("/devices/mapping-rules/delete/<int:rule_id>", methods=["POST"])
 def delete_mapping_rule(rule_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM device_mapping_rules WHERE id = %s", (rule_id,))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("DELETE FROM device_mapping_rules WHERE id = %s", (rule_id,))
 		flash("Rule removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -345,12 +357,8 @@ def delete_mapping_rule(rule_id):
 @app.route("/devices/delete/<int:device_id>", methods=["POST"])
 def delete_device(device_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM device_library WHERE id = %s", (device_id,))
-		conn.commit()
-		cur.close()
-		conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("DELETE FROM device_library WHERE id = %s", (device_id,))
 		flash("Device removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -360,31 +368,27 @@ def delete_device(device_id):
 @app.route("/devices/edit/<int:device_id>", methods=["POST"])
 def edit_device(device_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute(
-			"""UPDATE device_library
-			   SET part_number = %s,
-			       device_category = %s,
-			       manufacturer = %s,
-			       voltage_rating = %s,
-			       rdson_mohm = %s,
-			       current_rating_a = %s,
-			       package_type = %s,
-			       notes = %s
-			   WHERE id = %s""",
-			(request.form["part_number"].strip(),
-			 request.form["device_category"],
-			 request.form["manufacturer"],
-			 request.form["voltage_rating"] or None,
-			 request.form["rdson_mohm"] or None,
-			 request.form["current_rating_a"] or None,
-			 request.form["package_type"],
-			 request.form["notes"] or None,
-			 device_id))
-		conn.commit()
-		cur.close()
-		conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute(
+				"""UPDATE device_library
+				   SET part_number = %s,
+				       device_category = %s,
+				       manufacturer = %s,
+				       voltage_rating = %s,
+				       rdson_mohm = %s,
+				       current_rating_a = %s,
+				       package_type = %s,
+				       notes = %s
+				   WHERE id = %s""",
+				(request.form["part_number"].strip(),
+				 request.form["device_category"],
+				 request.form["manufacturer"],
+				 request.form["voltage_rating"] or None,
+				 request.form["rdson_mohm"] or None,
+				 request.form["current_rating_a"] or None,
+				 request.form["package_type"],
+				 request.form["notes"] or None,
+				 device_id))
 		flash("Device updated.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("A device with that part number already exists.", "danger")
@@ -407,20 +411,17 @@ def irradiation():
 			error = "Campaign name is required."
 		else:
 			try:
-				conn = get_db()
-				cur = conn.cursor()
-				cur.execute("""
-					INSERT INTO irradiation_campaigns
-					    (campaign_name, folder_name, beam_type,
-					     facility, notes)
-					VALUES (%s, %s, %s, %s, %s)""",
-					(name,
-					 normalize_optional_text(form.folder_name.data),
-					 normalize_optional_text(form.beam_type.data),
-					 normalize_optional_text(form.facility.data),
-					 normalize_optional_text(form.notes.data)))
-				conn.commit()
-				cur.close(); conn.close()
+				with db_cursor() as (_conn, cur):
+					cur.execute("""
+						INSERT INTO irradiation_campaigns
+						    (campaign_name, folder_name, beam_type,
+						     facility, notes)
+						VALUES (%s, %s, %s, %s, %s)""",
+						(name,
+						 normalize_optional_text(form.folder_name.data),
+						 normalize_optional_text(form.beam_type.data),
+						 normalize_optional_text(form.facility.data),
+						 normalize_optional_text(form.notes.data)))
 				flash(f"Campaign '{name}' added.", "success")
 				return redirect("/irradiation")
 			except psycopg2.errors.UniqueViolation:
@@ -433,30 +434,28 @@ def irradiation():
 	mappings = []
 	experiments = []
 	try:
-		conn = get_db()
-		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-		cur.execute("SELECT * FROM irradiation_campaigns ORDER BY campaign_name")
-		campaigns = cur.fetchall()
-		cur.execute("""
-			SELECT ir.*, ic.campaign_name
-			FROM irradiation_runs ir
-			JOIN irradiation_campaigns ic ON ir.campaign_id = ic.id
-			ORDER BY ic.campaign_name, ir.ion_species, ir.beam_energy_mev
-		""")
-		runs = cur.fetchall()
-		cur.execute("""
-			SELECT ecm.*, ic.campaign_name
-			FROM experiment_campaign_map ecm
-			JOIN irradiation_campaigns ic ON ecm.campaign_id = ic.id
-			ORDER BY ecm.experiment
-		""")
-		mappings = cur.fetchall()
-		cur.execute("""
-			SELECT DISTINCT experiment FROM baselines_metadata
-			WHERE experiment IS NOT NULL ORDER BY experiment
-		""")
-		experiments = [r["experiment"] for r in cur.fetchall()]
-		cur.close(); conn.close()
+		with db_cursor(cursor_factory=psycopg2.extras.RealDictCursor) as (_conn, cur):
+			cur.execute("SELECT * FROM irradiation_campaigns ORDER BY campaign_name")
+			campaigns = cur.fetchall()
+			cur.execute("""
+				SELECT ir.*, ic.campaign_name
+				FROM irradiation_runs ir
+				JOIN irradiation_campaigns ic ON ir.campaign_id = ic.id
+				ORDER BY ic.campaign_name, ir.ion_species, ir.beam_energy_mev
+			""")
+			runs = cur.fetchall()
+			cur.execute("""
+				SELECT ecm.*, ic.campaign_name
+				FROM experiment_campaign_map ecm
+				JOIN irradiation_campaigns ic ON ecm.campaign_id = ic.id
+				ORDER BY ecm.experiment
+			""")
+			mappings = cur.fetchall()
+			cur.execute("""
+				SELECT DISTINCT experiment FROM baselines_metadata
+				WHERE experiment IS NOT NULL ORDER BY experiment
+			""")
+			experiments = [r["experiment"] for r in cur.fetchall()]
 	except Exception as e:
 		error = f"Could not load data: {e}"
 
@@ -472,11 +471,8 @@ def irradiation():
 @app.route("/irradiation/delete/<int:campaign_id>", methods=["POST"])
 def delete_campaign(campaign_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM irradiation_campaigns WHERE id = %s", (campaign_id,))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("DELETE FROM irradiation_campaigns WHERE id = %s", (campaign_id,))
 		flash("Campaign removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -490,24 +486,21 @@ def edit_campaign(campaign_id):
 		flash("Campaign name is required.", "danger")
 		return redirect("/irradiation")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			UPDATE irradiation_campaigns
-			SET campaign_name   = %s,
-			    folder_name     = %s,
-			    beam_type       = %s,
-			    facility        = %s,
-			    notes           = %s
-			WHERE id = %s""",
-			(name,
-			 normalize_optional_text(request.form.get("folder_name")),
-			 normalize_optional_text(request.form.get("beam_type")),
-			 normalize_optional_text(request.form.get("facility")),
-			 normalize_optional_text(request.form.get("notes")),
-			 campaign_id))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				UPDATE irradiation_campaigns
+				SET campaign_name   = %s,
+				    folder_name     = %s,
+				    beam_type       = %s,
+				    facility        = %s,
+				    notes           = %s
+				WHERE id = %s""",
+				(name,
+				 normalize_optional_text(request.form.get("folder_name")),
+				 normalize_optional_text(request.form.get("beam_type")),
+				 normalize_optional_text(request.form.get("facility")),
+				 normalize_optional_text(request.form.get("notes")),
+				 campaign_id))
 		flash("Campaign updated.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("A campaign with that name already exists.", "danger")
@@ -526,23 +519,20 @@ def add_irradiation_run():
 		flash("Campaign and ion species are required.", "danger")
 		return redirect("/irradiation")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			INSERT INTO irradiation_runs
-			    (campaign_id, ion_species, beam_energy_mev,
-			     let_surface, let_bragg_peak, range_um,
-			     beam_type, notes)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-			(int(campaign_id), ion_species,
-			 request.form.get("beam_energy_mev") or None,
-			 request.form.get("let_surface") or None,
-			 request.form.get("let_bragg_peak") or None,
-			 request.form.get("range_um") or None,
-			 request.form.get("run_beam_type") or None,
-			 request.form.get("run_notes") or None))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				INSERT INTO irradiation_runs
+				    (campaign_id, ion_species, beam_energy_mev,
+				     let_surface, let_bragg_peak, range_um,
+				     beam_type, notes)
+				VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+				(int(campaign_id), ion_species,
+				 request.form.get("beam_energy_mev") or None,
+				 request.form.get("let_surface") or None,
+				 request.form.get("let_bragg_peak") or None,
+				 request.form.get("range_um") or None,
+				 request.form.get("run_beam_type") or None,
+				 request.form.get("run_notes") or None))
 		flash(f"Run '{ion_species}' added to campaign.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("That ion/energy combination already exists for this campaign.", "danger")
@@ -554,28 +544,25 @@ def add_irradiation_run():
 @app.route("/irradiation/run/edit/<int:run_id>", methods=["POST"])
 def edit_irradiation_run(run_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			UPDATE irradiation_runs
-			SET ion_species     = %s,
-			    beam_energy_mev = %s,
-			    let_surface     = %s,
-			    let_bragg_peak  = %s,
-			    range_um        = %s,
-			    beam_type       = %s,
-			    notes           = %s
-			WHERE id = %s""",
-			(request.form["ion_species"],
-			 request.form.get("beam_energy_mev") or None,
-			 request.form.get("let_surface") or None,
-			 request.form.get("let_bragg_peak") or None,
-			 request.form.get("range_um") or None,
-			 request.form.get("run_beam_type") or None,
-			 request.form.get("run_notes") or None,
-			 run_id))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				UPDATE irradiation_runs
+				SET ion_species     = %s,
+				    beam_energy_mev = %s,
+				    let_surface     = %s,
+				    let_bragg_peak  = %s,
+				    range_um        = %s,
+				    beam_type       = %s,
+				    notes           = %s
+				WHERE id = %s""",
+				(request.form["ion_species"],
+				 request.form.get("beam_energy_mev") or None,
+				 request.form.get("let_surface") or None,
+				 request.form.get("let_bragg_peak") or None,
+				 request.form.get("range_um") or None,
+				 request.form.get("run_beam_type") or None,
+				 request.form.get("run_notes") or None,
+				 run_id))
 		flash("Run updated.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("That ion/energy combination already exists for this campaign.", "danger")
@@ -587,11 +574,8 @@ def edit_irradiation_run(run_id):
 @app.route("/irradiation/run/delete/<int:run_id>", methods=["POST"])
 def delete_irradiation_run(run_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (run_id,))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (run_id,))
 		flash("Run removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -609,17 +593,14 @@ def add_experiment_mapping():
 		flash("Experiment and campaign are required.", "danger")
 		return redirect("/irradiation")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			INSERT INTO experiment_campaign_map (experiment, campaign_id, role)
-			VALUES (%s, %s, %s)
-			ON CONFLICT (experiment)
-			DO UPDATE SET campaign_id = EXCLUDED.campaign_id,
-			              role        = EXCLUDED.role""",
-			(experiment, int(campaign_id), role))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				INSERT INTO experiment_campaign_map (experiment, campaign_id, role)
+				VALUES (%s, %s, %s)
+				ON CONFLICT (experiment)
+				DO UPDATE SET campaign_id = EXCLUDED.campaign_id,
+				              role        = EXCLUDED.role""",
+				(experiment, int(campaign_id), role))
 		flash(f"Mapped '{experiment}' to campaign.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -629,11 +610,8 @@ def add_experiment_mapping():
 @app.route("/irradiation/map/delete/<int:map_id>", methods=["POST"])
 def delete_experiment_mapping(map_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM experiment_campaign_map WHERE id = %s", (map_id,))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("DELETE FROM experiment_campaign_map WHERE id = %s", (map_id,))
 		flash("Mapping removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -653,41 +631,36 @@ def assign_run_to_measurements():
 		flash("Run and campaign are required.", "danger")
 		return redirect("/irradiation")
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		rid = int(run_id)
-		cid = int(campaign_id)
-		cur.execute("SELECT campaign_id FROM irradiation_runs WHERE id = %s",
-		            (rid,))
-		run_row = cur.fetchone()
-		if not run_row:
-			flash("Selected irradiation run does not exist.", "danger")
-			cur.close(); conn.close()
-			return redirect("/irradiation")
-		if run_row[0] != cid:
-			flash("Selected run does not belong to the selected campaign.", "danger")
-			cur.close(); conn.close()
-			return redirect("/irradiation")
-		# Build WHERE clause for filtering measurements
-		conditions = ["md.irrad_campaign_id = %s"]
-		params = [cid]
-		if device_filter:
-			conditions.append("md.device_id ILIKE %s")
-			params.append(f"%{device_filter}%")
-		if filename_pattern:
-			conditions.append("md.filename ILIKE %s")
-			params.append(f"%{filename_pattern}%")
-		where = " AND ".join(conditions)
-		sql = f"""
-			UPDATE baselines_metadata md
-			SET irrad_run_id = %s
-			WHERE {where}
-			  AND (md.irrad_run_id IS DISTINCT FROM %s)
-		"""
-		cur.execute(sql, (rid, *params, rid))
-		n = cur.rowcount
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			rid = int(run_id)
+			cid = int(campaign_id)
+			cur.execute("SELECT campaign_id FROM irradiation_runs WHERE id = %s",
+			            (rid,))
+			run_row = cur.fetchone()
+			if not run_row:
+				flash("Selected irradiation run does not exist.", "danger")
+				return redirect("/irradiation")
+			if run_row[0] != cid:
+				flash("Selected run does not belong to the selected campaign.", "danger")
+				return redirect("/irradiation")
+			# Build WHERE clause for filtering measurements
+			conditions = ["md.irrad_campaign_id = %s"]
+			params = [cid]
+			if device_filter:
+				conditions.append("md.device_id ILIKE %s")
+				params.append(f"%{device_filter}%")
+			if filename_pattern:
+				conditions.append("md.filename ILIKE %s")
+				params.append(f"%{filename_pattern}%")
+			where = " AND ".join(conditions)
+			sql = f"""
+				UPDATE baselines_metadata md
+				SET irrad_run_id = %s
+				WHERE {where}
+				  AND (md.irrad_run_id IS DISTINCT FROM %s)
+			"""
+			cur.execute(sql, (rid, *params, rid))
+			n = cur.rowcount
 		flash(f"Assigned run to {n} measurement(s).", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -698,20 +671,17 @@ def assign_run_to_measurements():
 def sync_irradiation_metadata():
 	"""Propagate experiment_campaign_map assignments to baselines_metadata."""
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			UPDATE baselines_metadata md
-			SET irrad_campaign_id = ecm.campaign_id,
-			    irrad_role        = ecm.role
-			FROM experiment_campaign_map ecm
-			WHERE md.experiment = ecm.experiment
-			  AND (md.irrad_campaign_id IS DISTINCT FROM ecm.campaign_id
-			       OR md.irrad_role IS DISTINCT FROM ecm.role)
-		""")
-		n = cur.rowcount
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			cur.execute("""
+				UPDATE baselines_metadata md
+				SET irrad_campaign_id = ecm.campaign_id,
+				    irrad_role        = ecm.role
+				FROM experiment_campaign_map ecm
+				WHERE md.experiment = ecm.experiment
+				  AND (md.irrad_campaign_id IS DISTINCT FROM ecm.campaign_id
+				       OR md.irrad_role IS DISTINCT FROM ecm.role)
+			""")
+			n = cur.rowcount
 		flash(f"Sync complete: {n} metadata row(s) updated.", "success")
 	except Exception as e:
 		flash(f"Sync error: {e}", "danger")
@@ -750,44 +720,50 @@ CREATE TABLE IF NOT EXISTS avalanche_campaigns (
     notes              TEXT
 );
 DO $$ BEGIN
-    ALTER TABLE baselines_metadata ADD COLUMN avalanche_inductance_mh DOUBLE PRECISION;
+    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
+        ALTER TABLE baselines_metadata ADD COLUMN avalanche_family TEXT;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$ BEGIN
+    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
+        ALTER TABLE baselines_metadata ADD COLUMN avalanche_inductance_mh DOUBLE PRECISION;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$ BEGIN
+    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
+        ALTER TABLE baselines_metadata ADD COLUMN avalanche_temperature_c DOUBLE PRECISION;
+    END IF;
 EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 """
 
 
-def _ensure_avalanche_schema(conn):
-	cur = conn.cursor()
+def _ensure_avalanche_schema(cur):
 	cur.execute(_ENSURE_AVALANCHE_SQL)
-	conn.commit()
-	cur.close()
 
 
-def _list_avalanche_families(conn):
+def _list_avalanche_families(cur):
 	"""Return distinct avalanche_family values already in baselines_metadata."""
-	try:
-		cur = conn.cursor()
-		cur.execute("""
-			SELECT DISTINCT avalanche_family
-			FROM baselines_metadata
-			WHERE data_source = 'avalanche' AND avalanche_family IS NOT NULL
-			ORDER BY avalanche_family
-		""")
-		rows = [r[0] for r in cur.fetchall()]
-		cur.close()
-		return rows
-	except Exception:
+	cur.execute("SELECT to_regclass('public.baselines_metadata') AS table_name")
+	row = cur.fetchone()
+	table_name = row["table_name"] if isinstance(row, dict) else row[0]
+	if table_name is None:
 		return []
+	cur.execute("""
+		SELECT DISTINCT avalanche_family
+		FROM baselines_metadata
+		WHERE data_source = 'avalanche' AND avalanche_family IS NOT NULL
+		ORDER BY avalanche_family
+	""")
+	rows = cur.fetchall()
+	return [
+		r["avalanche_family"] if isinstance(r, dict) else r[0]
+		for r in rows
+	]
 
 
 @app.route("/avalanche", methods=["GET", "POST"])
 def avalanche():
 	error = None
-	conn = get_db()
-	try:
-		_ensure_avalanche_schema(conn)
-	except Exception as e:
-		error = f"Schema error: {e}"
-
 	form = AvalancheCampaignForm()
 	if form.validate_on_submit():
 		fp = form.folder_path.data.strip()
@@ -796,42 +772,37 @@ def avalanche():
 			error = "Folder path and campaign name are required."
 		else:
 			try:
-				cur = conn.cursor()
-				cur.execute("""
-					INSERT INTO avalanche_campaigns
-					    (folder_path, campaign_name, inductance_mh,
-					     temperature_c, device_part_number,
-					     outcome_default, notes)
-					VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-					(fp, name,
-					 form.inductance_mh.data or None,
-					 form.temperature_c.data or None,
-					 form.device_part_number.data.strip() or None,
-					 form.outcome_default.data or "unknown",
-					 form.notes.data or None))
-				conn.commit()
-				cur.close()
+				with db_cursor() as (_conn, cur):
+					_ensure_avalanche_schema(cur)
+					cur.execute("""
+						INSERT INTO avalanche_campaigns
+						    (folder_path, campaign_name, inductance_mh,
+						     temperature_c, device_part_number,
+						     outcome_default, notes)
+						VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+						(fp, name,
+						 form.inductance_mh.data or None,
+						 form.temperature_c.data or None,
+						 form.device_part_number.data.strip() or None,
+						 form.outcome_default.data or "unknown",
+						 form.notes.data or None))
 				flash(f"Campaign '{name}' added.", "success")
 				return redirect("/avalanche")
 			except psycopg2.errors.UniqueViolation:
-				conn.rollback()
 				error = f"A campaign for folder '{fp}' already exists."
 			except Exception as e:
-				conn.rollback()
 				error = f"Database error: {e}"
 
 	campaigns = []
 	known_families = []
 	try:
-		cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-		cur.execute("SELECT * FROM avalanche_campaigns ORDER BY folder_path")
-		campaigns = cur.fetchall()
-		cur.close()
-		known_families = _list_avalanche_families(conn)
+		with db_cursor(cursor_factory=psycopg2.extras.RealDictCursor) as (_conn, cur):
+			_ensure_avalanche_schema(cur)
+			cur.execute("SELECT * FROM avalanche_campaigns ORDER BY folder_path")
+			campaigns = cur.fetchall()
+			known_families = _list_avalanche_families(cur)
 	except Exception as e:
 		error = f"Could not load campaigns: {e}"
-	finally:
-		conn.close()
 
 	return render_template("avalanche.html",
 	                       form=form, campaigns=campaigns,
@@ -843,11 +814,9 @@ def avalanche():
 @app.route("/avalanche/delete/<int:campaign_id>", methods=["POST"])
 def delete_avalanche_campaign(campaign_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("DELETE FROM avalanche_campaigns WHERE id = %s", (campaign_id,))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			_ensure_avalanche_schema(cur)
+			cur.execute("DELETE FROM avalanche_campaigns WHERE id = %s", (campaign_id,))
 		flash("Campaign removed.", "success")
 	except Exception as e:
 		flash(f"Error: {e}", "danger")
@@ -857,28 +826,26 @@ def delete_avalanche_campaign(campaign_id):
 @app.route("/avalanche/edit/<int:campaign_id>", methods=["POST"])
 def edit_avalanche_campaign(campaign_id):
 	try:
-		conn = get_db()
-		cur = conn.cursor()
-		cur.execute("""
-			UPDATE avalanche_campaigns
-			SET folder_path        = %s,
-			    campaign_name      = %s,
-			    inductance_mh      = %s,
-			    temperature_c      = %s,
-			    device_part_number = %s,
-			    outcome_default    = %s,
-			    notes              = %s
-			WHERE id = %s""",
-			(request.form["folder_path"].strip(),
-			 request.form["campaign_name"].strip(),
-			 request.form.get("inductance_mh") or None,
-			 request.form.get("temperature_c") or None,
-			 request.form.get("device_part_number", "").strip() or None,
-			 request.form.get("outcome_default") or "unknown",
-			 request.form.get("notes") or None,
-			 campaign_id))
-		conn.commit()
-		cur.close(); conn.close()
+		with db_cursor() as (_conn, cur):
+			_ensure_avalanche_schema(cur)
+			cur.execute("""
+				UPDATE avalanche_campaigns
+				SET folder_path        = %s,
+				    campaign_name      = %s,
+				    inductance_mh      = %s,
+				    temperature_c      = %s,
+				    device_part_number = %s,
+				    outcome_default    = %s,
+				    notes              = %s
+				WHERE id = %s""",
+				(request.form["folder_path"].strip(),
+				 request.form["campaign_name"].strip(),
+				 request.form.get("inductance_mh") or None,
+				 request.form.get("temperature_c") or None,
+				 request.form.get("device_part_number", "").strip() or None,
+				 request.form.get("outcome_default") or "unknown",
+				 request.form.get("notes") or None,
+				 campaign_id))
 		flash("Campaign updated.", "success")
 	except psycopg2.errors.UniqueViolation:
 		flash("A campaign for that folder path already exists.", "danger")
@@ -891,45 +858,41 @@ def edit_avalanche_campaign(campaign_id):
 def sync_avalanche_metadata():
 	"""Push inductance / temperature / device overrides to baselines_metadata null fields."""
 	try:
-		conn = get_db()
-		_ensure_avalanche_schema(conn)
-		cur = conn.cursor()
+		with db_cursor() as (_conn, cur):
+			_ensure_avalanche_schema(cur)
 
-		cur.execute("""
-			UPDATE baselines_metadata bm
-			SET avalanche_inductance_mh = ac.inductance_mh
-			FROM avalanche_campaigns ac
-			WHERE bm.data_source = 'avalanche'
-			  AND bm.avalanche_family = ac.folder_path
-			  AND ac.inductance_mh IS NOT NULL
-			  AND bm.avalanche_inductance_mh IS NULL
-		""")
-		n_ind = cur.rowcount
+			cur.execute("""
+				UPDATE baselines_metadata bm
+				SET avalanche_inductance_mh = ac.inductance_mh
+				FROM avalanche_campaigns ac
+				WHERE bm.data_source = 'avalanche'
+				  AND bm.avalanche_family = ac.folder_path
+				  AND ac.inductance_mh IS NOT NULL
+				  AND bm.avalanche_inductance_mh IS NULL
+			""")
+			n_ind = cur.rowcount
 
-		cur.execute("""
-			UPDATE baselines_metadata bm
-			SET avalanche_temperature_c = ac.temperature_c
-			FROM avalanche_campaigns ac
-			WHERE bm.data_source = 'avalanche'
-			  AND bm.avalanche_family = ac.folder_path
-			  AND ac.temperature_c IS NOT NULL
-			  AND bm.avalanche_temperature_c IS NULL
-		""")
-		n_temp = cur.rowcount
+			cur.execute("""
+				UPDATE baselines_metadata bm
+				SET avalanche_temperature_c = ac.temperature_c
+				FROM avalanche_campaigns ac
+				WHERE bm.data_source = 'avalanche'
+				  AND bm.avalanche_family = ac.folder_path
+				  AND ac.temperature_c IS NOT NULL
+				  AND bm.avalanche_temperature_c IS NULL
+			""")
+			n_temp = cur.rowcount
 
-		cur.execute("""
-			UPDATE baselines_metadata bm
-			SET device_type = ac.device_part_number
-			FROM avalanche_campaigns ac
-			WHERE bm.data_source = 'avalanche'
-			  AND bm.avalanche_family = ac.folder_path
-			  AND ac.device_part_number IS NOT NULL
-			  AND bm.device_type IS NULL
-		""")
-		n_dev = cur.rowcount
-
-		conn.commit()
-		cur.close(); conn.close()
+			cur.execute("""
+				UPDATE baselines_metadata bm
+				SET device_type = ac.device_part_number
+				FROM avalanche_campaigns ac
+				WHERE bm.data_source = 'avalanche'
+				  AND bm.avalanche_family = ac.folder_path
+				  AND ac.device_part_number IS NOT NULL
+				  AND bm.device_type IS NULL
+			""")
+			n_dev = cur.rowcount
 		flash(
 			f"Sync complete: {n_ind} inductance, {n_temp} temperature, "
 			f"{n_dev} device-type field(s) updated.",

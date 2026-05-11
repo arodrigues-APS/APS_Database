@@ -154,7 +154,10 @@ Creates `stress_features_view` — one row per `metadata_id` with damage params 
 - Avalanche: `avalanche_family`, `avalanche_mode`, `avalanche_energy_j`, `avalanche_peak_current_a`, `avalanche_inductance_mh`, `avalanche_temperature_c`, `avalanche_gate_bias_v`, `avalanche_outcome`
 - Provenance: `promotion_decision`, `is_likely_irradiated`
 
-**Note:** Use `DROP VIEW IF EXISTS stress_features_view CASCADE; CREATE VIEW …` so it's idempotent and picked up by `common.apply_schema()`.
+**Note:** Use `DROP VIEW IF EXISTS stress_features_view CASCADE; CREATE VIEW ...`
+so the view rebuild is idempotent.  If this SQL lives under `schema/`, mark it
+`-- apply_schema: pipeline-owned` and have the owning pipeline apply it
+explicitly rather than relying on default boot-time `common.apply_schema()`.
 
 ### 2. `data_processing_scripts/coverage_report.py` — read-only verification harness
 
