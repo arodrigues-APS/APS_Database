@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly APS Docker update and data ingest
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/opt/aps_database/APS_Database
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aps_database/APS_Database
+ExecStart=/opt/aps_database/APS_Database/scripts/nightly_update_and_ingest.sh
+TimeoutStartSec=12h
+Environment=PYTHONUNBUFFERED=1
+
