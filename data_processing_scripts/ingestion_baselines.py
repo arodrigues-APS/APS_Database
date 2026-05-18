@@ -582,7 +582,7 @@ CREATE TABLE IF NOT EXISTS device_library (
     part_number  TEXT NOT NULL UNIQUE,
     device_category TEXT,          -- MOSFET, Diode, etc.
     manufacturer TEXT,             -- Wolfspeed, Infineon, Rohm, ...
-    voltage_rating TEXT,           -- e.g. '1200 V'
+    voltage_rating TEXT,           -- e.g. '1200' (V)
     rdson_mohm   TEXT,             -- e.g. '80' (mOhm), NULL for diodes
     current_rating_a TEXT,         -- e.g. '33' (A), NULL for MOSFETs
     package_type TEXT,             -- bare_die, TO-247, home_made_TO, etc.

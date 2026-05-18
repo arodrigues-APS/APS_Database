@@ -68,6 +68,8 @@ from db_config import get_connection
 # device identity before the final device_type median is taken.
 DAMAGE_VIEW_SQL = """
 DROP VIEW IF EXISTS damage_equivalence_prediction_match_segment_view CASCADE;
+DROP VIEW IF EXISTS damage_equivalence_prediction_support_reason_view CASCADE;
+DROP VIEW IF EXISTS damage_equivalence_prediction_validation_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_prediction_match_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_prediction_coverage_view CASCADE;
 DROP VIEW IF EXISTS damage_equivalence_prediction_fingerprint_view CASCADE;
@@ -497,15 +499,72 @@ pairs AS (
                + COALESCE(dbv_weight, 0.0),
                0.0
              )
-           ) AS nearest_distance
+           ) AS nearest_distance,
+           CASE
+             WHEN (has_dvth + has_drds + has_dbv) >= 3
+                  AND SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 0.75
+               THEN 1
+             WHEN (has_dvth + has_drds + has_dbv) >= 2
+                  AND SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 1.5
+               THEN 2
+             WHEN SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 2.5
+               THEN 3
+             ELSE 4
+           END AS comparability_rank
     FROM pairs_raw pr
 ),
 ranked AS (
     SELECT p.*,
            ROW_NUMBER() OVER (
              PARTITION BY pair_type, device_type, right_fingerprint_key
-             ORDER BY nearest_distance ASC NULLS LAST,
+             ORDER BY comparability_rank ASC,
                       comparable_axes DESC,
+                      nearest_distance ASC NULLS LAST,
                       left_label ASC
            ) AS match_rank,
            COUNT(*) OVER (
@@ -516,11 +575,11 @@ ranked AS (
 )
 SELECT ranked.*,
        CASE
-         WHEN comparable_axes >= 3 AND nearest_distance <= 0.75
+         WHEN comparability_rank = 1
            THEN 'strong'
-         WHEN comparable_axes >= 2 AND nearest_distance <= 1.5
+         WHEN comparability_rank = 2
            THEN 'usable'
-         WHEN nearest_distance <= 2.5
+         WHEN comparability_rank = 3
            THEN 'weak'
          ELSE 'inspect manually'
        END AS comparability_status,
@@ -894,6 +953,9 @@ measured_context AS (
            0::bigint AS dvth_prediction_count,
            0::bigint AS drds_prediction_count,
            0::bigint AS dbv_prediction_count,
+           0::integer AS prediction_axis_count,
+           false AS has_predicted_dbv,
+           'measured_damage_axes'::text AS equivalence_basis,
            NULL::double precision AS median_confidence_score,
            NULL::double precision AS median_donor_count,
            NULL::double precision AS median_donor_distance,
@@ -947,14 +1009,14 @@ predicted_fp AS (
              FILTER (WHERE dvth IS NOT NULL)
              - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY dvth)
                FILTER (WHERE dvth IS NOT NULL) AS dvth_iqr,
-           CASE WHEN COUNT(dvth) > 0 THEN 1 ELSE 0 END AS dvth_n,
+           COUNT(dvth) AS dvth_n,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY drds)
              FILTER (WHERE drds IS NOT NULL) AS drds,
            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY drds)
              FILTER (WHERE drds IS NOT NULL)
              - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY drds)
                FILTER (WHERE drds IS NOT NULL) AS drds_iqr,
-           CASE WHEN COUNT(drds) > 0 THEN 1 ELSE 0 END AS drds_n,
+           COUNT(drds) AS drds_n,
            NULL::double precision AS dbv,
            NULL::double precision AS dbv_iqr,
            0::bigint AS dbv_n,
@@ -966,6 +1028,18 @@ predicted_fp AS (
            COUNT(dvth) AS dvth_prediction_count,
            COUNT(drds) AS drds_prediction_count,
            0::bigint AS dbv_prediction_count,
+           (CASE WHEN COUNT(dvth) > 0 THEN 1 ELSE 0 END
+             + CASE WHEN COUNT(drds) > 0 THEN 1 ELSE 0 END) AS prediction_axis_count,
+           false AS has_predicted_dbv,
+           CASE
+             WHEN COUNT(dvth) > 0 AND COUNT(drds) > 0
+               THEN 'predicted_two_axis_dvth_drds_no_dbv'
+             WHEN COUNT(dvth) > 0
+               THEN 'predicted_one_axis_dvth_no_dbv'
+             WHEN COUNT(drds) > 0
+               THEN 'predicted_one_axis_drds_no_dbv'
+             ELSE 'predicted_no_comparable_axis'
+           END AS equivalence_basis,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY confidence_score)
              FILTER (WHERE confidence_score IS NOT NULL) AS median_confidence_score,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY donor_count)
@@ -1169,6 +1243,9 @@ pairs_raw AS (
            rf.dvth_prediction_count AS right_dvth_prediction_count,
            rf.drds_prediction_count AS right_drds_prediction_count,
            rf.dbv_prediction_count AS right_dbv_prediction_count,
+           rf.prediction_axis_count AS right_prediction_axis_count,
+           rf.has_predicted_dbv AS right_has_predicted_dbv,
+           rf.equivalence_basis AS right_equivalence_basis,
            rf.fingerprint_confidence AS right_fingerprint_confidence,
            rf.median_confidence_score AS right_median_confidence_score,
            rf.median_donor_count AS right_median_donor_count,
@@ -1256,7 +1333,63 @@ pairs AS (
                + COALESCE(dbv_weight, 0.0),
                0.0
              )
-           ) AS nearest_distance
+           ) AS nearest_distance,
+           CASE
+             WHEN (has_dvth + has_drds + has_dbv) >= 3
+                  AND SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 0.75
+               THEN 1
+             WHEN (has_dvth + has_drds + has_dbv) >= 2
+                  AND SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 1.5
+               THEN 2
+             WHEN SQRT(
+                    (
+                      COALESCE(dvth_weight
+                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
+                      + COALESCE(drds_weight
+                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
+                      + COALESCE(dbv_weight
+                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
+                    )
+                    / NULLIF(
+                      COALESCE(dvth_weight, 0.0)
+                      + COALESCE(drds_weight, 0.0)
+                      + COALESCE(dbv_weight, 0.0),
+                      0.0
+                    )
+                  ) <= 2.5
+               THEN 3
+             ELSE 4
+           END AS comparability_rank
     FROM pairs_raw pr
 ),
 ranked AS (
@@ -1265,8 +1398,9 @@ ranked AS (
              PARTITION BY pair_type, model_run_id, reference_tier,
                           validation_mode_used, device_type,
                           right_fingerprint_key
-             ORDER BY nearest_distance ASC NULLS LAST,
+             ORDER BY comparability_rank ASC,
                       comparable_axes DESC,
+                      nearest_distance ASC NULLS LAST,
                       left_label ASC
            ) AS match_rank,
            COUNT(*) OVER (
@@ -1279,11 +1413,11 @@ ranked AS (
 )
 SELECT ranked.*,
        CASE
-         WHEN comparable_axes >= 3 AND nearest_distance <= 0.75
+         WHEN comparability_rank = 1
            THEN 'strong'
-         WHEN comparable_axes >= 2 AND nearest_distance <= 1.5
+         WHEN comparability_rank = 2
            THEN 'usable'
-         WHEN nearest_distance <= 2.5
+         WHEN comparability_rank = 3
            THEN 'weak'
          ELSE 'inspect manually'
        END AS comparability_status,
@@ -1307,6 +1441,9 @@ SELECT ranked.*,
        right_prediction_count AS predicted_irrad_prediction_count,
        right_strong_prediction_count AS predicted_irrad_strong_prediction_count,
        right_weak_prediction_count AS predicted_irrad_weak_prediction_count,
+       right_prediction_axis_count AS predicted_irrad_prediction_axis_count,
+       right_has_predicted_dbv AS predicted_irrad_has_predicted_dbv,
+       right_equivalence_basis AS predicted_irrad_equivalence_basis,
        left_dvth AS sc_dvth,
        left_dvth_iqr AS sc_dvth_iqr,
        left_dvth_n AS sc_dvth_n,
@@ -1359,7 +1496,14 @@ fp_counts AS (
            SUM(fp.strong_prediction_count) FILTER (WHERE fp.source = 'predicted_irrad')
              AS strong_prediction_count,
            SUM(fp.weak_prediction_count) FILTER (WHERE fp.source = 'predicted_irrad')
-             AS weak_prediction_count
+             AS weak_prediction_count,
+           MAX(fp.prediction_axis_count) FILTER (WHERE fp.source = 'predicted_irrad')
+             AS max_prediction_axis_count,
+           BOOL_OR(fp.has_predicted_dbv) FILTER (WHERE fp.source = 'predicted_irrad')
+             AS has_predicted_dbv,
+           STRING_AGG(DISTINCT fp.equivalence_basis, ', ' ORDER BY fp.equivalence_basis)
+             FILTER (WHERE fp.source = 'predicted_irrad' AND fp.equivalence_basis IS NOT NULL)
+             AS equivalence_basis
     FROM context c
     LEFT JOIN fp
       ON fp.model_run_id = c.model_run_id
@@ -1377,7 +1521,12 @@ match_counts AS (
            COUNT(*) AS comparable_pair_count,
            COUNT(DISTINCT right_fingerprint_key) AS comparable_right_count,
            MIN(nearest_distance) AS best_distance,
-           COUNT(*) FILTER (WHERE comparable_axes >= 2) AS pairs_with_2plus_axes
+           MIN(nearest_distance) FILTER (WHERE comparability_rank <= 2)
+             AS best_eligible_distance,
+           COUNT(*) FILTER (WHERE comparability_rank = 1) AS strong_match_count,
+           COUNT(*) FILTER (WHERE comparability_rank = 2) AS usable_match_count,
+           COUNT(*) FILTER (WHERE comparability_rank <= 2) AS eligible_match_count,
+           COUNT(*) FILTER (WHERE comparability_rank = 3) AS weak_match_count
     FROM damage_equivalence_prediction_match_view
     GROUP BY model_run_id, reference_tier, validation_mode_used, device_type
 )
@@ -1395,6 +1544,11 @@ SELECT fp.pair_type,
        COALESCE(mc.comparable_pair_count, 0) AS comparable_pair_count,
        COALESCE(mc.comparable_right_count, 0) AS comparable_right_count,
        mc.best_distance,
+       mc.best_eligible_distance,
+       COALESCE(mc.strong_match_count, 0) AS strong_match_count,
+       COALESCE(mc.usable_match_count, 0) AS usable_match_count,
+       COALESCE(mc.eligible_match_count, 0) AS eligible_match_count,
+       COALESCE(mc.weak_match_count, 0) AS weak_match_count,
        CONCAT_WS(', ',
          CASE WHEN fp.left_dvth_fingerprints > 0
                 AND fp.right_dvth_fingerprints > 0
@@ -1415,16 +1569,17 @@ SELECT fp.pair_type,
        COALESCE(fp.prediction_count, 0) AS prediction_count,
        COALESCE(fp.strong_prediction_count, 0) AS strong_prediction_count,
        COALESCE(fp.weak_prediction_count, 0) AS weak_prediction_count,
+       COALESCE(fp.max_prediction_axis_count, 0) AS max_prediction_axis_count,
+       COALESCE(fp.has_predicted_dbv, false) AS has_predicted_dbv,
+       fp.equivalence_basis,
        CASE
          WHEN fp.n_left_fingerprints = 0 OR fp.n_right_fingerprints = 0
            THEN 'missing counterpart'
          WHEN COALESCE(mc.comparable_pair_count, 0) = 0
            THEN 'no shared damage axes'
-         WHEN mc.best_distance <= 0.75
-              AND COALESCE(mc.pairs_with_2plus_axes, 0) > 0
+         WHEN COALESCE(mc.strong_match_count, 0) > 0
            THEN 'strong matches available'
-         WHEN mc.best_distance <= 1.5
-              AND COALESCE(mc.pairs_with_2plus_axes, 0) > 0
+         WHEN COALESCE(mc.usable_match_count, 0) > 0
            THEN 'usable matches available'
          ELSE 'weak/inspect manually'
        END AS comparability_status
@@ -1463,6 +1618,9 @@ SELECT m.pair_type,
        m.right_prediction_count AS prediction_count,
        m.right_strong_prediction_count AS strong_prediction_count,
        m.right_weak_prediction_count AS weak_prediction_count,
+       m.right_prediction_axis_count AS prediction_axis_count,
+       m.right_has_predicted_dbv AS has_predicted_dbv,
+       m.right_equivalence_basis AS equivalence_basis,
        m.pair_type || ' | model ' || m.model_run_id::text || ' | '
          || m.reference_tier || ' | ' || m.validation_mode_used || ' | '
          || m.device_type || ' | '
@@ -1505,6 +1663,9 @@ SELECT m.pair_type,
        0::bigint AS prediction_count,
        0::bigint AS strong_prediction_count,
        0::bigint AS weak_prediction_count,
+       0::integer AS prediction_axis_count,
+       false AS has_predicted_dbv,
+       'measured_sc_damage_axes'::text AS equivalence_basis,
        m.pair_type || ' | model ' || m.model_run_id::text || ' | '
          || m.reference_tier || ' | ' || m.validation_mode_used || ' | '
          || m.device_type || ' | '
@@ -1519,6 +1680,156 @@ SELECT m.pair_type,
 FROM damage_equivalence_prediction_match_view m
 WHERE m.match_rank = 1
   AND m.comparability_status IN ('strong', 'usable');
+
+CREATE VIEW damage_equivalence_prediction_validation_view AS
+WITH summary AS (
+    SELECT
+        vr.model_run_id,
+        mr.model_version,
+        mr.algorithm,
+        mr.model_status,
+        mr.trained_at,
+        (mr.id = (SELECT MAX(id) FROM iv_physical_model_runs)) AS is_latest_model_run,
+        vr.validation_mode AS validation_mode_used,
+        vr.reference_tier,
+        vr.stress_type,
+        vr.target_type,
+        CASE
+          WHEN vr.target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
+          WHEN vr.target_type = 'log_rdson_ratio' THEN 'IdVd / log Rds(on) ratio'
+          ELSE vr.target_type
+        END AS target_label,
+        vr.device_type,
+        vr.ion_species,
+        COUNT(*) AS validation_pairs,
+        COUNT(*) FILTER (
+            WHERE vr.support_status = 'ok'
+              AND vr.abs_residual IS NOT NULL
+        ) AS supported_pairs,
+        COUNT(*) FILTER (
+            WHERE vr.support_status <> 'ok'
+               OR vr.abs_residual IS NULL
+        ) AS unsupported_pairs,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vr.abs_residual)
+            FILTER (WHERE vr.support_status = 'ok' AND vr.abs_residual IS NOT NULL)
+            AS median_abs_residual,
+        PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY vr.abs_residual)
+            FILTER (WHERE vr.support_status = 'ok' AND vr.abs_residual IS NOT NULL)
+            AS p90_abs_residual,
+        COUNT(*) FILTER (
+            WHERE vr.support_status = 'ok'
+              AND vr.predicted_value IS NOT NULL
+              AND vr.predicted_p10 IS NOT NULL
+              AND vr.predicted_p90 IS NOT NULL
+        ) AS interval_evaluable_count,
+        AVG(
+            CASE
+              WHEN vr.observed_value BETWEEN LEAST(vr.predicted_p10, vr.predicted_p90)
+                                        AND GREATEST(vr.predicted_p10, vr.predicted_p90)
+                THEN 1.0
+              ELSE 0.0
+            END
+        ) FILTER (
+            WHERE vr.support_status = 'ok'
+              AND vr.predicted_value IS NOT NULL
+              AND vr.predicted_p10 IS NOT NULL
+              AND vr.predicted_p90 IS NOT NULL
+        ) AS observed_interval_coverage,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (
+            ORDER BY vr.predicted_p90 - vr.predicted_p10
+        ) FILTER (
+            WHERE vr.support_status = 'ok'
+              AND vr.predicted_p10 IS NOT NULL
+              AND vr.predicted_p90 IS NOT NULL
+        ) AS median_prediction_interval_width,
+        CASE WHEN vr.target_type = 'delta_vth_v' THEN 10 ELSE 10 END
+            AS gate_min_supported_validation_pairs,
+        CASE WHEN vr.target_type = 'delta_vth_v' THEN 0.5 ELSE 0.25 END
+            AS gate_median_abs_residual_max,
+        CASE WHEN vr.target_type = 'delta_vth_v' THEN 2.0 ELSE 0.75 END
+            AS gate_p90_abs_residual_max
+    FROM iv_physical_validation_residuals vr
+    JOIN iv_physical_model_runs mr ON mr.id = vr.model_run_id
+    GROUP BY vr.model_run_id, mr.id, mr.model_version, mr.algorithm, mr.model_status,
+             mr.trained_at, vr.validation_mode, vr.reference_tier,
+             vr.stress_type, vr.target_type, vr.device_type, vr.ion_species
+)
+SELECT summary.*,
+       supported_pairs::double precision / NULLIF(validation_pairs, 0)
+           AS supported_fraction,
+       CASE
+         WHEN supported_pairs < gate_min_supported_validation_pairs
+           THEN 'insufficient_support'
+         WHEN median_abs_residual IS NULL OR p90_abs_residual IS NULL
+           THEN 'not_evaluable'
+         WHEN median_abs_residual <= gate_median_abs_residual_max
+              AND p90_abs_residual <= gate_p90_abs_residual_max
+           THEN 'gate_pass'
+         ELSE 'gate_fail'
+       END AS validation_gate_status
+FROM summary;
+
+CREATE VIEW damage_equivalence_prediction_support_reason_view AS
+SELECT
+    'validation'::text AS record_type,
+    vr.model_run_id,
+    mr.model_version,
+    mr.algorithm,
+    mr.model_status,
+    mr.trained_at,
+    (mr.id = (SELECT MAX(id) FROM iv_physical_model_runs)) AS is_latest_model_run,
+    vr.validation_mode AS validation_mode_used,
+    vr.reference_tier,
+    vr.stress_type,
+    vr.target_type,
+    CASE
+      WHEN vr.target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
+      WHEN vr.target_type = 'log_rdson_ratio' THEN 'IdVd / log Rds(on) ratio'
+      ELSE vr.target_type
+    END AS target_label,
+    vr.device_type,
+    vr.ion_species,
+    NULL::text AS confidence_level,
+    vr.support_status,
+    COALESCE(vr.unsupported_reason, 'supported') AS support_reason,
+    COUNT(*) AS n_records
+FROM iv_physical_validation_residuals vr
+JOIN iv_physical_model_runs mr ON mr.id = vr.model_run_id
+GROUP BY vr.model_run_id, mr.id, mr.model_version, mr.algorithm, mr.model_status,
+         mr.trained_at, vr.validation_mode, vr.reference_tier, vr.stress_type,
+         vr.target_type, vr.device_type, vr.ion_species,
+         vr.support_status, COALESCE(vr.unsupported_reason, 'supported')
+UNION ALL
+SELECT
+    'parameter_prediction'::text AS record_type,
+    pp.model_run_id,
+    mr.model_version,
+    mr.algorithm,
+    mr.model_status,
+    mr.trained_at,
+    (mr.id = (SELECT MAX(id) FROM iv_physical_model_runs)) AS is_latest_model_run,
+    pp.validation_mode_used,
+    pp.reference_tier,
+    pp.stress_type,
+    pp.target_type,
+    CASE
+      WHEN pp.target_type = 'delta_vth_v' THEN 'IdVg / delta Vth'
+      WHEN pp.target_type = 'log_rdson_ratio' THEN 'IdVd / log Rds(on) ratio'
+      ELSE pp.target_type
+    END AS target_label,
+    rp.device_type,
+    pp.ion_species,
+    pp.confidence_level,
+    pp.support_status,
+    COALESCE(pp.unsupported_reason, 'supported') AS support_reason,
+    COUNT(*) AS n_records
+FROM iv_physical_parameter_predictions pp
+JOIN iv_physical_model_runs mr ON mr.id = pp.model_run_id
+LEFT JOIN iv_physical_response_pairs rp ON rp.id = pp.pair_id
+GROUP BY pp.model_run_id, mr.id, mr.model_version, mr.algorithm, mr.model_status,
+         mr.trained_at, pp.validation_mode_used, pp.reference_tier, pp.stress_type,
+         pp.target_type, rp.device_type, pp.ion_species, pp.confidence_level,
+         pp.support_status, COALESCE(pp.unsupported_reason, 'supported');
 """
 
 

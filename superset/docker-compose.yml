@@ -39,7 +39,7 @@ services:
     command: ["bash", "/app/docker/docker-bootstrap.sh", "app"]
     user: *superset-user
     ports:
-      - "8088:8088"
+      - "127.0.0.1:8088:8088"
     volumes: *superset-volumes
     depends_on: *superset-depends-on
     restart: unless-stopped

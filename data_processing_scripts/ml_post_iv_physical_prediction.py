@@ -95,7 +95,7 @@ BROAD_ION_NEIGHBORHOOD_ENABLED = False
 CONFIDENCE_LEVELS = ("strong", "weak", "unsupported")
 STRONG_SUPPORTED_FRACTION_MIN = 0.10
 PREDICTION_STRESS_TYPES = ("irradiation",)
-DEFAULT_PREDICTION_DONOR_MODE = "within_condition"
+DEFAULT_PREDICTION_DONOR_MODE = "leave_condition"
 
 MIN_DONORS = 3
 NEAREST_K = 7
@@ -121,6 +121,32 @@ NUMERIC_FEATURES = {
         "log_fluence_at_meas",
     ),
 }
+BENCHMARK_SPLITS = ("leave_device", "leave_condition", "leave_ion_or_run")
+BENCHMARK_NUMERIC_FEATURES = (
+    "sc_voltage_v",
+    "sc_duration_us",
+    "log_sc_v_us",
+    "beam_energy_mev",
+    "let_surface",
+    "let_bragg_peak",
+    "range_um",
+    "log_fluence_at_meas",
+    "pre_vth_v",
+    "pre_rdson_mohm",
+    "baseline_reference_count",
+    "baseline_reference_spread",
+    "voltage_rating_v",
+    "rdson_rating_mohm",
+    "current_rating_a",
+)
+BENCHMARK_CATEGORICAL_FEATURES = (
+    "device_type",
+    "manufacturer",
+    "package_type",
+    "ion_species",
+    "beam_type",
+    "reference_tier",
+)
 
 V2_TABLES = (
     "iv_physical_curve_points",
@@ -707,6 +733,7 @@ def extract_features(conn):
         conn.commit()
     print(f"  inserted feature rows: {len(values)}")
     print_feature_coverage(conn)
+    print_input_data_quality(conn)
 
 
 def print_feature_coverage(conn):
@@ -768,6 +795,51 @@ def print_feature_coverage(conn):
         print("\nfeature quality flag counts:")
         for flag, count in rows:
             print(f"  {flag}: {count}")
+
+
+def print_input_data_quality(conn):
+    print("\ninput data quality checks:")
+    checks = [
+        (
+            "metadata by irradiation role",
+            """
+            SELECT COALESCE(irrad_role, '<none>') AS irrad_role,
+                   COUNT(*) AS n_rows,
+                   COUNT(*) FILTER (WHERE device_type IS NULL) AS missing_device_type,
+                   COUNT(*) FILTER (WHERE gate_params IS NULL OR gate_params = '{}'::jsonb)
+                       AS missing_gate_params,
+                   COUNT(*) FILTER (WHERE irrad_run_id IS NULL) AS missing_irrad_run_id,
+                   COUNT(*) FILTER (WHERE fluence_at_meas IS NULL) AS missing_fluence_at_meas
+            FROM baselines_metadata
+            WHERE data_source = 'irradiation' OR irrad_role IS NOT NULL
+            GROUP BY COALESCE(irrad_role, '<none>')
+            ORDER BY COALESCE(irrad_role, '<none>')
+            """,
+        ),
+        (
+            "gate parameter coverage",
+            """
+            SELECT measurement_category,
+                   COUNT(*) AS n_rows,
+                   COUNT(*) FILTER (WHERE gate_params ? 'vth_v') AS with_vth,
+                   COUNT(*) FILTER (WHERE gate_params ? 'rdson_mohm') AS with_rdson,
+                   COUNT(*) FILTER (WHERE gate_params ? 'bvdss_v') AS with_bvdss,
+                   COUNT(*) FILTER (WHERE gate_params ? 'vsd_v') AS with_vsd
+            FROM baselines_metadata
+            WHERE measurement_category IN ('IdVg', 'Vth', 'IdVd', 'Blocking', '3rd_Quadrant')
+            GROUP BY measurement_category
+            ORDER BY measurement_category
+            """,
+        ),
+    ]
+    with conn.cursor() as cur:
+        for title, sql in checks:
+            print(f"\n{title}:")
+            cur.execute(sql)
+            cols = [desc[0] for desc in cur.description]
+            print("  " + " | ".join(cols))
+            for row in cur.fetchall():
+                print("  " + " | ".join(str(value) for value in row))
 
 
 def load_features(conn):
@@ -1575,7 +1647,7 @@ def train(conn, reference_tier="both"):
     notes = (
         "Physical donor model trained for IdVg/IdVd parameter deltas only; "
         "curve reconstruction is disabled by default; run --predict-curves "
-        "to persist exploratory confidence-labeled V2 curves. "
+        "to persist validation-gated confidence-labeled V2 curves. "
         f"Reference tier mode: {reference_tier}."
     )
     with conn.cursor() as cur:
@@ -2148,13 +2220,14 @@ def prediction_parameter_sane(target_type, value):
     return False
 
 
-def load_validation_device_gates(conn, model_run_id):
+def load_validation_device_ion_gates(conn, model_run_id):
     sql = """
         SELECT validation_mode,
                reference_tier,
                stress_type,
                target_type,
                device_type,
+               ion_species,
                COUNT(*) AS total_pairs,
                COUNT(*) FILTER (
                    WHERE support_status = 'ok'
@@ -2168,7 +2241,8 @@ def load_validation_device_gates(conn, model_run_id):
                    AS p90_abs_residual
         FROM iv_physical_validation_residuals
         WHERE model_run_id = %s
-        GROUP BY validation_mode, reference_tier, stress_type, target_type, device_type
+        GROUP BY validation_mode, reference_tier, stress_type, target_type,
+                 device_type, ion_species
     """
     gates = {}
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2195,6 +2269,7 @@ def load_validation_device_gates(conn, model_run_id):
             row["stress_type"],
             target_type,
             row["device_type"],
+            clean_text(row.get("ion_species")),
         )
         gates[key] = {
             "validation_gate_pass": gate_pass,
@@ -2207,7 +2282,7 @@ def load_validation_device_gates(conn, model_run_id):
     return gates
 
 
-def classify_prediction_confidence(pair, pred, device_gates):
+def classify_prediction_confidence(pair, pred, device_ion_gates):
     reasons = []
     target_type = pair["target_type"]
     predicted = pred.get("predicted_value")
@@ -2231,17 +2306,18 @@ def classify_prediction_confidence(pair, pred, device_gates):
         pair["stress_type"],
         target_type,
         pair.get("device_type"),
+        clean_text(pair.get("ion_species")),
     )
-    gate_info = device_gates.get(gate_key) or {}
+    gate_info = device_ion_gates.get(gate_key) or {}
     gate_pass = bool(gate_info.get("validation_gate_pass"))
     supported_fraction = safe_float(gate_info.get("validation_supported_fraction")) or 0.0
     supported_pairs = int(gate_info.get("validation_supported_pairs") or 0)
     total_pairs = int(gate_info.get("validation_total_pairs") or 0)
 
     if not gate_info:
-        reasons.append("leave_condition_device_gate_missing")
+        reasons.append("leave_condition_device_ion_gate_missing")
     elif not gate_pass:
-        reasons.append("leave_condition_device_gate_failed")
+        reasons.append("leave_condition_device_ion_gate_failed")
     if supported_fraction < STRONG_SUPPORTED_FRACTION_MIN:
         reasons.append("low_leave_condition_supported_fraction")
 
@@ -2265,7 +2341,7 @@ def classify_prediction_confidence(pair, pred, device_gates):
         level = "strong"
         score = min(0.99, 0.90 + min(supported_fraction, 1.0) * 0.09)
         if not reasons:
-            reasons.append("leave_condition_device_gate_passed")
+            reasons.append("leave_condition_device_ion_gate_passed")
     else:
         level = "weak"
         score = 0.55
@@ -2336,12 +2412,17 @@ def prediction_tuple(run_id, donor_mode, pair, pred, confidence):
         [
             f"reference_tier_{pair['reference_tier']}",
             f"confidence_{confidence['confidence_level']}",
-            "exploratory_curve_prediction",
+            f"donor_mode_{donor_mode}",
+            *(
+                ["within_condition_exploratory_only", "exploratory_curve_prediction"]
+                if donor_mode == "within_condition"
+                else ["validation_gated_curve_prediction"]
+            ),
         ],
     )
 
 
-def delete_parameter_predictions(conn, model_run_id, prediction_stress, tiers):
+def delete_parameter_predictions(conn, model_run_id, prediction_stress, tiers, donor_mode):
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2349,8 +2430,9 @@ def delete_parameter_predictions(conn, model_run_id, prediction_stress, tiers):
             WHERE model_run_id = %s
               AND stress_type = %s
               AND reference_tier = ANY(%s)
+              AND validation_mode_used = %s
             """,
-            (model_run_id, prediction_stress, list(tiers)),
+            (model_run_id, prediction_stress, list(tiers), donor_mode),
         )
     conn.commit()
 
@@ -2370,20 +2452,37 @@ def predict_parameters(
         print("No model run found; train first with --train.", file=sys.stderr)
         return None
 
+    if donor_mode == "within_condition":
+        print(
+            "\nWARNING: --prediction-donor-mode within_condition is exploratory. "
+            "Default dashboard-facing predictions should use leave_condition.",
+            file=sys.stderr,
+        )
+
     config = load_run_config(conn, run_id)
     all_pairs = load_pairs(conn, reference_tier=reference_tier)
     if not config:
         config = feature_config(fit_feature_scales(all_pairs), all_pairs)
     pairs = [pair for pair in all_pairs if pair["stress_type"] == prediction_stress]
     tiers = reference_tiers_for_option(reference_tier)
-    device_gates = load_validation_device_gates(conn, run_id)
-    delete_parameter_predictions(conn, run_id, prediction_stress, tiers)
+    device_ion_gates = load_validation_device_ion_gates(conn, run_id)
+    if donor_mode == "leave_condition" and not any(
+        key[0] == "leave_condition" for key in device_ion_gates
+    ):
+        print(
+            "\nWARNING: no leave-condition validation residuals were found for "
+            f"model_run_id {run_id}. Predictions will not receive strong "
+            "confidence until --validate --validation-mode both or "
+            "--validate --validation-mode leave_condition has been run.",
+            file=sys.stderr,
+        )
+    delete_parameter_predictions(conn, run_id, prediction_stress, tiers, donor_mode)
 
     rows = []
     confidence_counts = Counter()
     for pair in pairs:
         pred = predict_from_donors(pair, all_pairs, config, validation_mode=donor_mode)
-        confidence = classify_prediction_confidence(pair, pred, device_gates)
+        confidence = classify_prediction_confidence(pair, pred, device_ion_gates)
         confidence_counts[confidence["confidence_level"]] += 1
         rows.append(prediction_tuple(run_id, donor_mode, pair, pred, confidence))
 
@@ -2726,6 +2825,368 @@ def generate_curves(
     return run_id
 
 
+def benchmark_scope_key(pair):
+    return (
+        pair["reference_tier"],
+        pair["stress_type"],
+        pair["target_type"],
+        pair["device_type"],
+    )
+
+
+def benchmark_group_key(pair, split_mode):
+    if split_mode == "leave_device":
+        return clean_text(pair.get("physical_device_key")) or clean_text(pair.get("split_group"))
+    if split_mode == "leave_condition":
+        if pair["stress_type"] == "sc":
+            if pair.get("sc_voltage_v") is None or pair.get("sc_duration_us") is None:
+                return None
+            return f"sc:{pair['sc_voltage_v']}V:{pair['sc_duration_us']}us"
+        return f"irrad_run:{pair.get('irrad_run_id')}" if pair.get("irrad_run_id") else None
+    if split_mode == "leave_ion_or_run":
+        if pair["stress_type"] != "irradiation":
+            return None
+        return (
+            f"ion:{clean_text(pair.get('ion_species'))}"
+            if clean_text(pair.get("ion_species"))
+            else (
+                f"irrad_run:{pair.get('irrad_run_id')}"
+                if pair.get("irrad_run_id") else None
+            )
+        )
+    raise ValueError(f"unknown benchmark split: {split_mode}")
+
+
+def benchmark_feature_row(pair):
+    row = {}
+    for name in BENCHMARK_NUMERIC_FEATURES:
+        if name in {"log_sc_v_us", "log_fluence_at_meas"}:
+            row[name] = row_feature_value(pair, name)
+        else:
+            row[name] = safe_float(pair.get(name))
+    for name in BENCHMARK_CATEGORICAL_FEATURES:
+        row[name] = clean_text(pair.get(name)) or "missing"
+    return row
+
+
+def benchmark_result(method, split_mode, group_key, pair, pred):
+    observed = target_value(pair)
+    predicted = safe_float(pred.get("predicted_value"))
+    residual = predicted - observed if observed is not None and predicted is not None else None
+    p10 = safe_float(pred.get("predicted_p10"))
+    p90 = safe_float(pred.get("predicted_p90"))
+    interval_hit = None
+    if observed is not None and p10 is not None and p90 is not None:
+        interval_hit = min(p10, p90) <= observed <= max(p10, p90)
+    return {
+        "method": method,
+        "split_mode": split_mode,
+        "group_key": group_key,
+        "reference_tier": pair["reference_tier"],
+        "stress_type": pair["stress_type"],
+        "target_type": pair["target_type"],
+        "device_type": pair["device_type"],
+        "support_status": pred.get("support_status"),
+        "unsupported_reason": pred.get("unsupported_reason"),
+        "observed": observed,
+        "predicted": predicted,
+        "abs_residual": abs(residual) if residual is not None else None,
+        "interval_hit": interval_hit,
+    }
+
+
+def grouped_pairs(scope_pairs, split_mode):
+    groups = defaultdict(list)
+    for pair in scope_pairs:
+        key = benchmark_group_key(pair, split_mode)
+        if key is not None:
+            groups[key].append(pair)
+    return groups
+
+
+def donor_grouped_benchmark(scope_pairs, split_mode):
+    groups = grouped_pairs(scope_pairs, split_mode)
+    if len(groups) < 2:
+        return [
+            benchmark_result(
+                "donor_weighted_median",
+                split_mode,
+                None,
+                pair,
+                {
+                    "support_status": "unsupported",
+                    "unsupported_reason": "insufficient_benchmark_groups",
+                },
+            )
+            for pair in scope_pairs
+        ]
+
+    rows = []
+    for group_key, test_pairs in groups.items():
+        train_pairs = [
+            pair
+            for key, pairs_for_key in groups.items()
+            if key != group_key
+            for pair in pairs_for_key
+        ]
+        config = feature_config(fit_feature_scales(train_pairs), train_pairs)
+        for pair in test_pairs:
+            pred = predict_from_donors(
+                pair,
+                train_pairs,
+                config,
+                validation_mode="within_condition",
+            )
+            rows.append(benchmark_result("donor_weighted_median", split_mode, group_key, pair, pred))
+    return rows
+
+
+def sklearn_grouped_benchmark(scope_pairs, split_mode):
+    try:
+        import numpy as np
+        import pandas as pd
+        from sklearn.compose import ColumnTransformer
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import OneHotEncoder
+    except ImportError as exc:
+        return [
+            benchmark_result(
+                "sklearn_random_forest",
+                split_mode,
+                None,
+                pair,
+                {
+                    "support_status": "unsupported",
+                    "unsupported_reason": f"sklearn_unavailable:{exc.__class__.__name__}",
+                },
+            )
+            for pair in scope_pairs
+        ]
+
+    groups = grouped_pairs(scope_pairs, split_mode)
+    if len(groups) < 2:
+        return [
+            benchmark_result(
+                "sklearn_random_forest",
+                split_mode,
+                None,
+                pair,
+                {
+                    "support_status": "unsupported",
+                    "unsupported_reason": "insufficient_benchmark_groups",
+                },
+            )
+            for pair in scope_pairs
+        ]
+
+    rows = []
+    for group_key, test_pairs in groups.items():
+        train_pairs = [
+            pair
+            for key, pairs_for_key in groups.items()
+            if key != group_key
+            for pair in pairs_for_key
+        ]
+        train_pairs = [pair for pair in train_pairs if target_value(pair) is not None]
+        if len(train_pairs) < max(MIN_DONORS, 5):
+            for pair in test_pairs:
+                rows.append(
+                    benchmark_result(
+                        "sklearn_random_forest",
+                        split_mode,
+                        group_key,
+                        pair,
+                        {
+                            "support_status": "unsupported",
+                            "unsupported_reason": "insufficient_training_pairs",
+                        },
+                    )
+                )
+            continue
+
+        x_train = pd.DataFrame(benchmark_feature_row(pair) for pair in train_pairs)
+        y_train = np.array([target_value(pair) for pair in train_pairs], dtype=float)
+        x_test = pd.DataFrame(benchmark_feature_row(pair) for pair in test_pairs)
+        numeric = [
+            col
+            for col in BENCHMARK_NUMERIC_FEATURES
+            if col in x_train.columns and x_train[col].notna().any()
+        ]
+        categorical = [col for col in BENCHMARK_CATEGORICAL_FEATURES if col in x_train.columns]
+        model = Pipeline([
+            ("prep", ColumnTransformer([
+                ("num", SimpleImputer(strategy="median"), numeric),
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="constant", fill_value="missing")),
+                    ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+                ]), categorical),
+            ])),
+            ("model", RandomForestRegressor(
+                n_estimators=200,
+                min_samples_leaf=2,
+                random_state=17,
+                n_jobs=1,
+            )),
+        ])
+        try:
+            model.fit(x_train, y_train)
+            point_predictions = model.predict(x_test)
+            transformed = model.named_steps["prep"].transform(x_test)
+            tree_predictions = np.array([
+                tree.predict(transformed)
+                for tree in model.named_steps["model"].estimators_
+            ])
+            lower = np.percentile(tree_predictions, 10, axis=0)
+            upper = np.percentile(tree_predictions, 90, axis=0)
+        except Exception as exc:
+            for pair in test_pairs:
+                rows.append(
+                    benchmark_result(
+                        "sklearn_random_forest",
+                        split_mode,
+                        group_key,
+                        pair,
+                        {
+                            "support_status": "unsupported",
+                            "unsupported_reason": f"sklearn_fit_failed:{exc.__class__.__name__}",
+                        },
+                    )
+                )
+            continue
+
+        for pair, predicted, p10, p90 in zip(test_pairs, point_predictions, lower, upper):
+            rows.append(
+                benchmark_result(
+                    "sklearn_random_forest",
+                    split_mode,
+                    group_key,
+                    pair,
+                    {
+                        "support_status": "ok",
+                        "predicted_value": float(predicted),
+                        "predicted_p10": float(p10),
+                        "predicted_p90": float(p90),
+                    },
+                )
+            )
+    return rows
+
+
+def summarize_benchmark_rows(rows):
+    grouped = defaultdict(list)
+    for row in rows:
+        key = (
+            row["method"],
+            row["split_mode"],
+            row["reference_tier"],
+            row["stress_type"],
+            row["target_type"],
+        )
+        grouped[key].append(row)
+
+    summaries = []
+    for key, group in grouped.items():
+        abs_residuals = [
+            row["abs_residual"]
+            for row in group
+            if row["support_status"] == "ok" and row["abs_residual"] is not None
+        ]
+        interval_hits = [
+            row["interval_hit"]
+            for row in group
+            if row["interval_hit"] is not None
+        ]
+        total = len(group)
+        supported = len(abs_residuals)
+        summaries.append({
+            "method": key[0],
+            "split_mode": key[1],
+            "reference_tier": key[2],
+            "stress_type": key[3],
+            "target_type": key[4],
+            "total": total,
+            "supported": supported,
+            "unsupported": total - supported,
+            "supported_fraction": supported / total if total else 0.0,
+            "median_abs_residual": percentile(abs_residuals, 0.5),
+            "p90_abs_residual": percentile(abs_residuals, 0.9),
+            "interval_coverage": (
+                sum(1 for hit in interval_hits if hit) / len(interval_hits)
+                if interval_hits else None
+            ),
+        })
+    return sorted(
+        summaries,
+        key=lambda row: (
+            row["split_mode"],
+            row["reference_tier"],
+            row["stress_type"],
+            row["target_type"],
+            row["method"],
+        ),
+    )
+
+
+def _metric_text(value, digits=4):
+    if value is None:
+        return "NULL"
+    return f"{float(value):.{digits}g}"
+
+
+def print_benchmark_summary(rows):
+    summaries = summarize_benchmark_rows(rows)
+    print("\nGrouped prediction benchmark:")
+    print(
+        "method | split | reference_tier | stress | target | total | supported | "
+        "unsupported | supported_fraction | median_abs | p90_abs | interval_coverage"
+    )
+    for row in summaries:
+        print(
+            f"{row['method']} | {row['split_mode']} | {row['reference_tier']} | "
+            f"{row['stress_type']} | {row['target_type']} | {row['total']} | "
+            f"{row['supported']} | {row['unsupported']} | "
+            f"{_metric_text(row['supported_fraction'])} | "
+            f"{_metric_text(row['median_abs_residual'])} | "
+            f"{_metric_text(row['p90_abs_residual'])} | "
+            f"{_metric_text(row['interval_coverage'])}"
+        )
+
+
+def benchmark_models(conn, reference_tier="both"):
+    apply_schema(conn)
+    pairs = [
+        pair
+        for pair in load_pairs(conn, reference_tier=reference_tier)
+        if target_value(pair) is not None
+    ]
+    scopes = defaultdict(list)
+    for pair in pairs:
+        scopes[benchmark_scope_key(pair)].append(pair)
+
+    rows = []
+    for scope_key, scope_pairs in sorted(scopes.items(), key=lambda item: str(item[0])):
+        reference, stress_type, target_type, device_type = scope_key
+        if len(scope_pairs) < max(MIN_DONORS, 3):
+            continue
+        print(
+            f"Benchmark scope: {reference} | {stress_type} | "
+            f"{target_type} | {device_type} ({len(scope_pairs)} pairs)"
+        )
+        for split_mode in BENCHMARK_SPLITS:
+            if split_mode == "leave_ion_or_run" and stress_type != "irradiation":
+                continue
+            rows.extend(donor_grouped_benchmark(scope_pairs, split_mode))
+            rows.extend(sklearn_grouped_benchmark(scope_pairs, split_mode))
+
+    if not rows:
+        print("\nNo benchmarkable scopes found.")
+        return []
+    print_benchmark_summary(rows)
+    return rows
+
+
 def print_reserved_prediction_counts(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM iv_physical_parameter_predictions")
@@ -2779,6 +3240,8 @@ def main():
                         help="Create a support-gated donor model run")
     parser.add_argument("--validate", action="store_true",
                         help="Run support-gated validation for a model run")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Compare donor baseline with grouped scikit-learn baseline")
     parser.add_argument("--predict-parameters", action="store_true",
                         help="Persist confidence-labeled V2 parameter predictions for existing response pairs")
     parser.add_argument("--generate-curves", action="store_true",
@@ -2793,8 +3256,8 @@ def main():
                         help="Compare hypothetical library-pristine deltas against existing strict irradiation pairs")
     parser.add_argument("--validation-mode",
                         choices=["within_condition", "leave_condition", "both"],
-                        default="within_condition",
-                        help="Validation donor exclusion mode")
+                        default="both",
+                        help="Validation donor exclusion mode; defaults to both so prediction gates have leave-condition residuals")
     parser.add_argument("--prediction-stress",
                         choices=PREDICTION_STRESS_TYPES,
                         default="irradiation",
@@ -2802,7 +3265,7 @@ def main():
     parser.add_argument("--prediction-donor-mode",
                         choices=VALIDATION_MODES,
                         default=DEFAULT_PREDICTION_DONOR_MODE,
-                        help="Donor exclusion mode used for exploratory parameter prediction")
+                        help="Donor exclusion mode used for parameter prediction; within_condition is exploratory")
     parser.add_argument("--model-run-id", type=int,
                         help="Model run to validate; defaults to latest")
     args = parser.parse_args()
@@ -2817,6 +3280,7 @@ def main():
             args.build_pairs,
             args.train,
             args.validate,
+            args.benchmark,
             args.audit_library_pristine,
             predict_parameters_requested,
             generate_curves_requested,
@@ -2852,6 +3316,8 @@ def main():
                 validation_mode=args.validation_mode,
                 reference_tier=args.reference_tier,
             )
+        if args.benchmark:
+            benchmark_models(conn, reference_tier=args.reference_tier)
         if predict_parameters_requested:
             trained_run_id = predict_parameters(
                 conn,

@@ -8,6 +8,7 @@
 #python -m flask --debug --app server run (--host=0.0.0.0)
 
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from configobj import ConfigObj
@@ -195,6 +196,33 @@ def normalize_optional_text(value):
 	value = value.strip()
 	return value or None
 
+
+def _format_decimal(value):
+	"""Return compact decimal text without losing non-integer precision."""
+	text = f"{value:.12g}"
+	return "0" if text == "-0" else text
+
+
+def normalize_voltage_rating(value):
+	"""Store voltage ratings as numeric text in volts."""
+	value = normalize_optional_text(value)
+	if value is None:
+		return None
+	text = value.replace(",", "")
+	match = re.fullmatch(
+		r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*(k\s*v|kv|v|volts?)?",
+		text,
+		re.IGNORECASE,
+	)
+	if not match:
+		return value
+	number = float(match.group(1))
+	unit = (match.group(2) or "").lower().replace(" ", "")
+	if unit == "kv":
+		number *= 1000.0
+	return _format_decimal(number)
+
+
 class CampaignForm(FlaskForm):
 	campaign_name = StringField("Campaign Name")
 	folder_name = SelectField("Data Folder", choices=[])
@@ -225,7 +253,7 @@ def device_library():
 						(pn,
 						 form.device_category.data,
 						 form.manufacturer.data,
-						 form.voltage_rating.data or None,
+						 normalize_voltage_rating(form.voltage_rating.data),
 						 form.rdson_mohm.data or None,
 						 form.current_rating_a.data or None,
 						 form.package_type.data,
@@ -383,7 +411,7 @@ def edit_device(device_id):
 				(request.form["part_number"].strip(),
 				 request.form["device_category"],
 				 request.form["manufacturer"],
-				 request.form["voltage_rating"] or None,
+				 normalize_voltage_rating(request.form["voltage_rating"]),
 				 request.form["rdson_mohm"] or None,
 				 request.form["current_rating_a"] or None,
 				 request.form["package_type"],

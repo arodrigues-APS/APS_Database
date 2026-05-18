@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create the "Post-IV Prediction V2 - Physical Response Diagnostics" dashboard
+Create the "Post-IV Physical Prediction Validation Diagnostics" dashboard
 in Apache Superset.
 
 The dashboard visualizes the V2 physical prediction workflow:
@@ -39,7 +39,7 @@ from superset_api import (
 )
 
 
-DASHBOARD_TITLE = "Post-IV Prediction V2 - Physical Response Diagnostics"
+DASHBOARD_TITLE = "Post-IV Physical Prediction Validation Diagnostics"
 DASHBOARD_SLUG = "post-iv-physical-prediction"
 
 MODEL_VIEW = "iv_physical_prediction_model_summary_view"
@@ -392,7 +392,8 @@ def curve_shape_line_params(target_type, x_title):
         "truncateYAxis": False,
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
-        "markerEnabled": False,
+        "markerEnabled": True,
+        "markerSize": 4,
         "connectNulls": True,
         "zoomable": True,
         "sort_series_type": "max",
@@ -408,22 +409,50 @@ def curve_shape_line_params(target_type, x_title):
 
 
 def build_dashboard_layout(charts):
+    layout_map = {
+        "idvg_curve_shapes": ("CHART-idvg-curve-shapes", "ROW-idvg-curve-shapes"),
+        "idvd_curve_shapes": ("CHART-idvd-curve-shapes", "ROW-idvd-curve-shapes"),
+        "param_summary": ("CHART-param-summary", "ROW-param-summary"),
+        "curve_table": ("CHART-curve-table", "ROW-curve-table"),
+        "summary": ("CHART-summary", "ROW-summary"),
+        "gates": ("CHART-gates", "ROW-gates"),
+        "support": ("CHART-support", "ROW-support"),
+        "predobs": ("CHART-predobs", "ROW-predobs"),
+        "resdist": ("CHART-resdist", "ROW-resdist"),
+        "validation_table": ("CHART-validation-table", "ROW-validation-table"),
+        "feature_bar": ("CHART-feature-bar", "ROW-feature-bar"),
+        "pair_table": ("CHART-pair-table", "ROW-pair-table"),
+        "feature_table": ("CHART-feature-table", "ROW-feature-table"),
+        "flag_table": ("CHART-flag-table", "ROW-flag-table"),
+    }
+    row_order = [
+        "idvg_curve_shapes",
+        "idvd_curve_shapes",
+        "param_summary",
+        "curve_table",
+        "summary",
+        "gates",
+        "support",
+        "predobs",
+        "resdist",
+        "validation_table",
+        "feature_bar",
+        "pair_table",
+        "feature_table",
+        "flag_table",
+    ]
+    visible_rows = [
+        layout_map[key][1]
+        for key in row_order
+        if key in charts and charts[key][0] is not None
+    ]
     layout = {
         "DASHBOARD_VERSION_KEY": "v2",
         "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
         "GRID_ID": {
             "type": "GRID",
             "id": "GRID_ID",
-            "children": [
-                "ROW-summary",
-                "ROW-model",
-                "ROW-scatter",
-                "ROW-validation",
-                "ROW-generated",
-                "ROW-generated-shapes",
-                "ROW-coverage",
-                "ROW-flags",
-            ],
+            "children": visible_rows,
             "parents": ["ROOT_ID"],
         },
         "HEADER_ID": {
@@ -431,83 +460,21 @@ def build_dashboard_layout(charts):
             "id": "HEADER_ID",
             "meta": {"text": DASHBOARD_TITLE},
         },
-        "ROW-summary": {
-            "type": "ROW",
-            "id": "ROW-summary",
-            "children": ["CHART-summary"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-model": {
-            "type": "ROW",
-            "id": "ROW-model",
-            "children": ["CHART-gates", "CHART-support"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-scatter": {
-            "type": "ROW",
-            "id": "ROW-scatter",
-            "children": ["CHART-predobs", "CHART-resdist"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-validation": {
-            "type": "ROW",
-            "id": "ROW-validation",
-            "children": ["CHART-validation-table"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-generated": {
-            "type": "ROW",
-            "id": "ROW-generated",
-            "children": ["CHART-param-summary", "CHART-curve-table"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-generated-shapes": {
-            "type": "ROW",
-            "id": "ROW-generated-shapes",
-            "children": ["CHART-idvg-curve-shapes", "CHART-idvd-curve-shapes"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-coverage": {
-            "type": "ROW",
-            "id": "ROW-coverage",
-            "children": ["CHART-feature-bar", "CHART-pair-table"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
-        "ROW-flags": {
-            "type": "ROW",
-            "id": "ROW-flags",
-            "children": ["CHART-feature-table", "CHART-flag-table"],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        },
     }
-    layout_map = {
-        "summary": ("CHART-summary", "ROW-summary"),
-        "gates": ("CHART-gates", "ROW-model"),
-        "support": ("CHART-support", "ROW-model"),
-        "predobs": ("CHART-predobs", "ROW-scatter"),
-        "resdist": ("CHART-resdist", "ROW-scatter"),
-        "validation_table": ("CHART-validation-table", "ROW-validation"),
-        "param_summary": ("CHART-param-summary", "ROW-generated"),
-        "curve_table": ("CHART-curve-table", "ROW-generated"),
-        "idvg_curve_shapes": ("CHART-idvg-curve-shapes", "ROW-generated-shapes"),
-        "idvd_curve_shapes": ("CHART-idvd-curve-shapes", "ROW-generated-shapes"),
-        "feature_bar": ("CHART-feature-bar", "ROW-coverage"),
-        "pair_table": ("CHART-pair-table", "ROW-coverage"),
-        "feature_table": ("CHART-feature-table", "ROW-flags"),
-        "flag_table": ("CHART-flag-table", "ROW-flags"),
-    }
-    for key, (cid, cuuid, cname, width, height) in charts.items():
+    for key in row_order:
+        if key not in charts:
+            continue
+        cid, cuuid, cname, _width, height = charts[key]
         if cid is None:
             continue
         chart_id, row_id = layout_map[key]
+        layout[row_id] = {
+            "type": "ROW",
+            "id": row_id,
+            "children": [chart_id],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        }
         layout[chart_id] = {
             "type": "CHART",
             "id": chart_id,
@@ -515,7 +482,7 @@ def build_dashboard_layout(charts):
             "parents": ["ROOT_ID", "GRID_ID", row_id],
             "meta": {
                 "chartId": cid,
-                "width": width,
+                "width": 12,
                 "height": height,
                 "sliceName": cname,
                 "uuid": cuuid,
@@ -1019,7 +986,7 @@ def main():
         cuuid,
         "IV Physical Prediction - IdVg Curve Shapes",
         6,
-        58,
+        76,
     )
 
     cid, cuuid = create_chart(
@@ -1034,7 +1001,7 @@ def main():
         cuuid,
         "IV Physical Prediction - IdVd Curve Shapes",
         6,
-        58,
+        76,
     )
 
     cid, cuuid = create_chart(

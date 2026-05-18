@@ -33,57 +33,57 @@ from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 DEVICES = [
     # ── Wolfspeed bare-die Diodes ────────────────────────────────────────
     ("CPW4-1200-S010B", "Diode", "Wolfspeed",
-     "1200 V", None, "33", "bare_die", None),
+     "1200", None, "33", "bare_die", None),
     ("CPW4-1200-S020B", "Diode", "Wolfspeed",
-     "1200 V", None, "91", "bare_die", None),
+     "1200", None, "91", "bare_die", None),
     ("CPW5-1200-Z050B", "Diode", "Wolfspeed",
-     "1200 V", None, "50", "bare_die", None),
+     "1200", None, "50", "bare_die", None),
     ("CPW5-1700-Z025A", "Diode", "Wolfspeed",
-     "1700 V", None, "25", "bare_die", None),
+     "1700", None, "25", "bare_die", None),
     ("CPW5-1700-Z005A", "Diode", "Wolfspeed",
-     "1700 V", None, "5", "bare_die", None),
+     "1700", None, "5", "bare_die", None),
 
     # ── Wolfspeed bare-die MOSFETs (Gen 2) ──────────────────────────────
     ("CPM2-1200-0025A", "MOSFET", "Wolfspeed",
-     "1200 V", "25", None, "bare_die", None),
+     "1200", "25", None, "bare_die", None),
     ("CPM2-1200-0040A", "MOSFET", "Wolfspeed",
-     "1200 V", "40", None, "bare_die", None),
+     "1200", "40", None, "bare_die", None),
     ("CPM2-1200-0040B", "MOSFET", "Wolfspeed",
-     "1200 V", "40", None, "bare_die", None),
+     "1200", "40", None, "bare_die", None),
     ("CPM2-1200-0080A", "MOSFET", "Wolfspeed",
-     "1200 V", "80", None, "bare_die", None),
+     "1200", "80", None, "bare_die", None),
     ("CPM2-1200-0080B", "MOSFET", "Wolfspeed",
-     "1200 V", "80", None, "bare_die", None),
+     "1200", "80", None, "bare_die", None),
     ("CPM2-1200-0160A", "MOSFET", "Wolfspeed",
-     "1200 V", "160", None, "bare_die", None),
+     "1200", "160", None, "bare_die", None),
     ("CPM2-1200-0160B", "MOSFET", "Wolfspeed",
-     "1200 V", "160", None, "bare_die", None),
+     "1200", "160", None, "bare_die", None),
 
     # ── Wolfspeed bare-die MOSFETs (Gen 3) ──────────────────────────────
     ("CPM3-0650-0015A", "MOSFET", "Wolfspeed",
-     "650 V", "15", None, "bare_die", None),
+     "650", "15", None, "bare_die", None),
     ("CPM3-1200-0060A", "MOSFET", "Wolfspeed",
-     "1200 V", "60", None, "bare_die", None),
+     "1200", "60", None, "bare_die", None),
     ("CPM3-0900-0065B", "MOSFET", "Wolfspeed",
-     "900 V", "65", None, "bare_die", None),
+     "900", "65", None, "bare_die", None),
     ("CPM3-1200-0032A", "MOSFET", "Wolfspeed",
-     "1200 V", "32", None, "bare_die", None),
+     "1200", "32", None, "bare_die", None),
     ("CPM3-1200-0075A", "MOSFET", "Wolfspeed",
-     "1200 V", "75", None, "bare_die", None),
+     "1200", "75", None, "bare_die", None),
 
     # ── Wolfspeed packaged TO-247 (Gen 2) ────────────────────────────────
     ("C2M0080120D", "MOSFET", "Wolfspeed",
-     "1200 V", "80", None, "TO-247", None),
+     "1200", "80", None, "TO-247", None),
     ("C2M0025120D", "MOSFET", "Wolfspeed",
-     "1200 V", "25", None, "TO-247", None),
+     "1200", "25", None, "TO-247", None),
     ("C2M0280120D", "MOSFET", "Wolfspeed",
-     "1200 V", "280", None, "TO-247", None),
+     "1200", "280", None, "TO-247", None),
 
     # ── Wolfspeed packaged TO-247 (Gen 3) ────────────────────────────────
     ("C3M0075120D", "MOSFET", "Wolfspeed",
-     "1200 V", "75", None, "TO-247", None),
+     "1200", "75", None, "TO-247", None),
     ("C3M0065090D", "MOSFET", "Wolfspeed",
-     "900 V", "65", None, "TO-247", None),
+     "900", "65", None, "TO-247", None),
 
     # ── Wolfspeed home-made TO packages ──────────────────────────────────
     # (same part numbers as bare-die, different package_type)
@@ -99,27 +99,27 @@ DEVICES = [
 
     # ── Infineon packaged ────────────────────────────────────────────────
     ("IMW120R090M1H", "MOSFET", "Infineon",
-     "1200 V", "90", None, "TO-247", None),
+     "1200", "90", None, "TO-247", None),
 
     # ── Rohm packaged ────────────────────────────────────────────────────
     ("SCT3030AL", "MOSFET", "Rohm",
-     "1200 V", "30", None, "TO-247", None),
+     "1200", "30", None, "TO-247", None),
     ("SCT2080KE", "MOSFET", "Rohm",
-     "1200 V", "80", None, "TO-247", "Trench SiC MOSFET"),
+     "1200", "80", None, "TO-247", "Trench SiC MOSFET"),
     ("SCT3080AL", "MOSFET", "Rohm",
-     "1200 V", "80", None, "TO-247", "Planar SiC MOSFET"),
+     "1200", "80", None, "TO-247", "Planar SiC MOSFET"),
 
     # ── Infineon packaged (additional) ──────────────────────────────────
     ("IMW120R060M1H", "MOSFET", "Infineon",
-     "1200 V", "60", None, "TO-247", None),
+     "1200", "60", None, "TO-247", None),
 
     # ── Littlefuse packaged ─────────────────────────────────────────────
     ("LSIC1MO120E0080", "MOSFET", "Littlefuse",
-     "1200 V", "80", None, "TO-247", None),
+     "1200", "80", None, "TO-247", None),
 
     # ── STMicroelectronics packaged ─────────────────────────────────────
     ("SCTW35N65G2V", "MOSFET", "STMicroelectronics",
-     "650 V", "55", None, "TO-247", "Gen 1 SiC MOSFET"),
+     "650", "55", None, "TO-247", "Gen 1 SiC MOSFET"),
 ]
 
 
@@ -186,7 +186,7 @@ def main():
     print("  INSERT INTO device_library (part_number, device_category, manufacturer,")
     print("    voltage_rating, rdson_mohm, package_type)")
     print("  VALUES ('NEW-PART-NUMBER', 'MOSFET', 'Manufacturer',")
-    print("    '1200 V', '80', 'bare_die');")
+    print("    '1200', '80', 'bare_die');")
     print()
     print("  -- Remove a device:")
     print("  DELETE FROM device_library WHERE part_number = 'OLD-PART';")

@@ -3,11 +3,13 @@
 Create the "Predicted Irradiation Damage Equivalence" dashboard in Apache
 Superset.
 
-Uses the exploratory V2 prediction views built by ml_sc_irrad_equivalence.py:
+Uses the validation-gated V2 prediction views built by ml_sc_irrad_equivalence.py:
   * damage_equivalence_prediction_fingerprint_view
   * damage_equivalence_prediction_match_view
   * damage_equivalence_prediction_coverage_view
   * damage_equivalence_prediction_match_segment_view
+  * damage_equivalence_prediction_validation_view
+  * damage_equivalence_prediction_support_reason_view
 
 The measured damage-equivalence dashboard is intentionally left untouched.
 This dashboard compares measured SC fingerprints against V2 predicted
@@ -42,16 +44,31 @@ FINGERPRINT_VIEW = "damage_equivalence_prediction_fingerprint_view"
 MATCH_VIEW = "damage_equivalence_prediction_match_view"
 COVERAGE_VIEW = "damage_equivalence_prediction_coverage_view"
 SEGMENT_VIEW = "damage_equivalence_prediction_match_segment_view"
+VALIDATION_VIEW = "damage_equivalence_prediction_validation_view"
+SUPPORT_REASON_VIEW = "damage_equivalence_prediction_support_reason_view"
 
 SOURCE_COLORS = {
     "sc": "#1f77b4",
     "irrad": "#7f7f7f",
     "predicted_irrad": "#9467bd",
 }
+CONFIDENCE_COLORS = {
+    "strong": "#2ca02c",
+    "weak": "#ffbf00",
+    "unsupported": "#d62728",
+    "measured": "#7f7f7f",
+}
 
 
 def ensure_view_exists():
-    required = [FINGERPRINT_VIEW, MATCH_VIEW, COVERAGE_VIEW, SEGMENT_VIEW]
+    required = [
+        FINGERPRINT_VIEW,
+        MATCH_VIEW,
+        COVERAGE_VIEW,
+        SEGMENT_VIEW,
+        VALIDATION_VIEW,
+        SUPPORT_REASON_VIEW,
+    ]
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -81,6 +98,9 @@ def build_dashboard_layout(charts):
             "id": "GRID_ID",
             "children": [
                 "ROW-coverage",
+                "ROW-validation",
+                "ROW-confidence",
+                "ROW-support",
                 "ROW-scatter",
                 "ROW-links",
                 "ROW-matches",
@@ -97,6 +117,27 @@ def build_dashboard_layout(charts):
             "type": "ROW",
             "id": "ROW-coverage",
             "children": ["CHART-coverage"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
+        "ROW-validation": {
+            "type": "ROW",
+            "id": "ROW-validation",
+            "children": ["CHART-validation"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
+        "ROW-confidence": {
+            "type": "ROW",
+            "id": "ROW-confidence",
+            "children": ["CHART-confidence"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
+        "ROW-support": {
+            "type": "ROW",
+            "id": "ROW-support",
+            "children": ["CHART-support"],
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         },
@@ -131,6 +172,9 @@ def build_dashboard_layout(charts):
     }
     layout_map = {
         "coverage": ("CHART-coverage", "ROW-coverage"),
+        "validation": ("CHART-validation", "ROW-validation"),
+        "confidence": ("CHART-confidence", "ROW-confidence"),
+        "support": ("CHART-support", "ROW-support"),
         "scatter_rds": ("CHART-scatter-rds", "ROW-scatter"),
         "link_rds": ("CHART-link-rds", "ROW-links"),
         "matches": ("CHART-matches", "ROW-matches"),
@@ -193,8 +237,10 @@ def filter_select(filter_id, name, targets, chart_ids, cascade=None,
 
 
 def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
-                         segment_ds_id, source_chart_ids, match_chart_ids,
-                         coverage_chart_ids):
+                         segment_ds_id, validation_ds_id, support_ds_id,
+                         source_chart_ids, match_chart_ids,
+                         coverage_chart_ids, validation_chart_ids,
+                         support_chart_ids):
     latest_id = "NATIVE_FILTER-pred-latest-model"
     model_id = "NATIVE_FILTER-pred-model-run"
     device_id = "NATIVE_FILTER-pred-device-type"
@@ -211,6 +257,8 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
         {"datasetId": match_ds_id, "column": {"name": col}},
         {"datasetId": coverage_ds_id, "column": {"name": col}},
         {"datasetId": segment_ds_id, "column": {"name": col}},
+        {"datasetId": validation_ds_id, "column": {"name": col}},
+        {"datasetId": support_ds_id, "column": {"name": col}},
     ]
 
     return [
@@ -256,8 +304,9 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
                 {"datasetId": fp_ds_id, "column": {"name": "fingerprint_confidence"}},
                 {"datasetId": match_ds_id, "column": {"name": "right_fingerprint_confidence"}},
                 {"datasetId": segment_ds_id, "column": {"name": "fingerprint_confidence"}},
+                {"datasetId": support_ds_id, "column": {"name": "confidence_level"}},
             ],
-            source_chart_ids + match_chart_ids,
+            source_chart_ids + match_chart_ids + support_chart_ids,
             cascade=[latest_id, model_id, device_id, ref_id, validation_id],
         ),
         filter_select(
@@ -274,8 +323,10 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
                 {"datasetId": fp_ds_id, "column": {"name": "ion_species"}},
                 {"datasetId": match_ds_id, "column": {"name": "right_ion_species"}},
                 {"datasetId": segment_ds_id, "column": {"name": "ion_species"}},
+                {"datasetId": validation_ds_id, "column": {"name": "ion_species"}},
+                {"datasetId": support_ds_id, "column": {"name": "ion_species"}},
             ],
-            source_chart_ids + match_chart_ids,
+            source_chart_ids + match_chart_ids + validation_chart_ids + support_chart_ids,
             cascade=[latest_id, model_id, device_id, ref_id, validation_id],
         ),
         filter_select(
@@ -312,15 +363,19 @@ def load_source_label_colors():
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT source, label, device_type
+            SELECT source, label, device_type, fingerprint_confidence
             FROM {FINGERPRINT_VIEW}
             ORDER BY source, label, device_type
             """
         )
-        for source, label, device_type in cur.fetchall():
-            color = SOURCE_COLORS.get(source)
+        for source, label, device_type, confidence in cur.fetchall():
+            color = (
+                CONFIDENCE_COLORS.get(confidence)
+                if source == "predicted_irrad" else SOURCE_COLORS.get(source)
+            )
             if color:
                 colors[source_series_label(source, label, device_type)] = color
+    colors.update(CONFIDENCE_COLORS)
     return colors
 
 
@@ -400,11 +455,16 @@ def coverage_table_params():
             "pair_type", "comparability_status", "device_type",
             "n_left_fingerprints", "n_right_fingerprints",
             "comparable_pair_count", "comparable_right_count",
-            "best_distance", "comparable_axis_labels",
+            "best_distance", "best_eligible_distance",
+            "strong_match_count", "usable_match_count",
+            "eligible_match_count", "weak_match_count",
+            "comparable_axis_labels",
             "left_dvth_fingerprints", "right_dvth_fingerprints",
             "left_drds_fingerprints", "right_drds_fingerprints",
             "prediction_count", "strong_prediction_count",
             "weak_prediction_count",
+            "max_prediction_axis_count", "has_predicted_dbv",
+            "equivalence_basis",
         ],
         "metrics": [],
         "groupby": [],
@@ -416,6 +476,79 @@ def coverage_table_params():
         "row_limit": 10000,
         "include_time": False,
         "table_timestamp_format": "smart_date",
+    }
+
+
+def validation_table_params():
+    return {
+        "query_mode": "raw",
+        "all_columns": [
+            "model_run_id", "model_version", "is_latest_model_run",
+            "validation_mode_used", "reference_tier", "stress_type",
+            "target_label", "device_type", "ion_species",
+            "validation_gate_status", "validation_pairs",
+            "supported_pairs", "unsupported_pairs", "supported_fraction",
+            "median_abs_residual", "p90_abs_residual",
+            "gate_min_supported_validation_pairs",
+            "gate_median_abs_residual_max",
+            "gate_p90_abs_residual_max",
+            "interval_evaluable_count", "observed_interval_coverage",
+            "median_prediction_interval_width",
+        ],
+        "metrics": [],
+        "groupby": [],
+        "order_by_cols": [
+            json.dumps(["is_latest_model_run", False]),
+            json.dumps(["validation_gate_status", True]),
+            json.dumps(["device_type", True]),
+        ],
+        "row_limit": 10000,
+        "include_time": False,
+        "table_timestamp_format": "smart_date",
+    }
+
+
+def support_reason_table_params():
+    return {
+        "query_mode": "raw",
+        "all_columns": [
+            "record_type", "model_run_id", "model_version",
+            "is_latest_model_run", "validation_mode_used",
+            "reference_tier", "stress_type", "target_label",
+            "device_type", "ion_species", "confidence_level",
+            "support_status", "support_reason", "n_records",
+        ],
+        "metrics": [],
+        "groupby": [],
+        "order_by_cols": [
+            json.dumps(["is_latest_model_run", False]),
+            json.dumps(["n_records", False]),
+        ],
+        "row_limit": 10000,
+        "include_time": False,
+        "table_timestamp_format": "smart_date",
+    }
+
+
+def confidence_bar_params():
+    return {
+        "x_axis": "fingerprint_confidence",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "COUNT(*)",
+            "label": "Fingerprints",
+        }],
+        "groupby": ["source", "validation_mode_used", "reference_tier"],
+        "row_limit": 1000,
+        "show_legend": True,
+        "rich_tooltip": True,
+        "x_axis_title": "Confidence",
+        "y_axis_title": "Fingerprints",
+        "y_axis_format": "SMART_NUMBER",
+        "stack": True,
+        "label_colors": {**SOURCE_COLORS, **CONFIDENCE_COLORS},
     }
 
 
@@ -431,6 +564,8 @@ def match_table_params():
             "right_fingerprint_confidence", "right_prediction_count",
             "right_strong_prediction_count", "right_weak_prediction_count",
             "right_dvth_prediction_count", "right_drds_prediction_count",
+            "right_prediction_axis_count", "right_has_predicted_dbv",
+            "right_equivalence_basis",
             "right_median_confidence_score", "right_median_donor_count",
             "right_median_donor_distance",
             "right_median_validation_supported_fraction",
@@ -477,6 +612,8 @@ def fingerprint_table_params():
             "n_samples", "measured_sample_count", "prediction_count",
             "strong_prediction_count", "weak_prediction_count",
             "dvth_prediction_count", "drds_prediction_count",
+            "dbv_prediction_count", "prediction_axis_count",
+            "has_predicted_dbv", "equivalence_basis",
             "median_confidence_score", "median_donor_count",
             "median_donor_distance", "median_validation_supported_fraction",
             "median_validation_supported_pairs",
@@ -524,9 +661,13 @@ def main():
     match_ds_id = find_or_create_dataset(session, db_id, MATCH_VIEW)
     coverage_ds_id = find_or_create_dataset(session, db_id, COVERAGE_VIEW)
     segment_ds_id = find_or_create_dataset(session, db_id, SEGMENT_VIEW)
-    if not all([fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id]):
+    validation_ds_id = find_or_create_dataset(session, db_id, VALIDATION_VIEW)
+    support_ds_id = find_or_create_dataset(session, db_id, SUPPORT_REASON_VIEW)
+    if not all([fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id,
+                validation_ds_id, support_ds_id]):
         sys.exit("   ERROR: dataset registration failed")
-    for ds_id in (fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id):
+    for ds_id in (fp_ds_id, match_ds_id, coverage_ds_id, segment_ds_id,
+                  validation_ds_id, support_ds_id):
         refresh_dataset_columns(session, ds_id)
 
     print("\n5. Creating charts ...")
@@ -541,6 +682,51 @@ def main():
         coverage_table_params(),
     )
     charts["coverage"] = (cid, cuuid, "Predicted Damage Coverage", 12, 28)
+
+    cid, cuuid = create_chart(
+        session,
+        "Predicted Validation Calibration",
+        validation_ds_id,
+        "table",
+        validation_table_params(),
+    )
+    charts["validation"] = (
+        cid,
+        cuuid,
+        "Predicted Validation Calibration",
+        12,
+        36,
+    )
+
+    cid, cuuid = create_chart(
+        session,
+        "Predicted Fingerprint Confidence Mix",
+        fp_ds_id,
+        "echarts_timeseries_bar",
+        confidence_bar_params(),
+    )
+    charts["confidence"] = (
+        cid,
+        cuuid,
+        "Predicted Fingerprint Confidence Mix",
+        12,
+        30,
+    )
+
+    cid, cuuid = create_chart(
+        session,
+        "Predicted Unsupported Reasons",
+        support_ds_id,
+        "table",
+        support_reason_table_params(),
+    )
+    charts["support"] = (
+        cid,
+        cuuid,
+        "Predicted Unsupported Reasons",
+        12,
+        36,
+    )
 
     cid, cuuid = create_chart(
         session,
@@ -616,6 +802,7 @@ def main():
     position_json = build_dashboard_layout(charts)
     source_chart_ids = [
         charts["scatter_rds"][0],
+        charts["confidence"][0],
         charts["fingerprints"][0],
     ]
     source_chart_ids = [cid for cid in source_chart_ids if cid is not None]
@@ -627,15 +814,25 @@ def main():
     coverage_chart_ids = [
         charts["coverage"][0],
     ] if charts["coverage"][0] is not None else []
+    validation_chart_ids = [
+        charts["validation"][0],
+    ] if charts["validation"][0] is not None else []
+    support_chart_ids = [
+        charts["support"][0],
+    ] if charts["support"][0] is not None else []
     native_filters = build_native_filters(
         chart_ids,
         fp_ds_id,
         match_ds_id,
         coverage_ds_id,
         segment_ds_id,
+        validation_ds_id,
+        support_ds_id,
         source_chart_ids,
         match_chart_ids,
         coverage_chart_ids,
+        validation_chart_ids,
+        support_chart_ids,
     )
     json_metadata = build_json_metadata(chart_ids, native_filters)
     json_metadata["label_colors"] = source_label_colors

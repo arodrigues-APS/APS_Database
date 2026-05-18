@@ -62,25 +62,25 @@ from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 # Map from raw filename chip ID -> (normalized_part_number, device_category, manufacturer, voltage, rdson/current, package, notes)
 RAW_TO_DEVICE = {
     # ── Wolfspeed Gen 3 MOSFETs ──
-    "CPM312000075A":  ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200 V", "75", None, "bare_die", None),
-    "CPM3120075A":    ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200 V", "75", None, "bare_die", None),
-    "CM312000075A":   ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200 V", "75", None, "bare_die",
+    "CPM312000075A":  ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200", "75", None, "bare_die", None),
+    "CPM3120075A":    ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200", "75", None, "bare_die", None),
+    "CM312000075A":   ("CPM3-1200-0075A", "MOSFET", "Wolfspeed", "1200", "75", None, "bare_die",
                        "Raw ID missing 'P'; confirmed CPM3-1200-0075A"),
 
     # ── Wolfspeed Gen 2 MOSFETs ──
-    "CPM212000080A":  ("CPM2-1200-0080A", "MOSFET", "Wolfspeed", "1200 V", "80", None, "bare_die", None),
+    "CPM212000080A":  ("CPM2-1200-0080A", "MOSFET", "Wolfspeed", "1200", "80", None, "bare_die", None),
 
     # ── Wolfspeed Diodes (1700V) ──
-    "CPW51700Z050A":  ("CPW5-1700-Z050A", "Diode", "Wolfspeed", "1700 V", None, "50", "bare_die", None),
-    "CPW517000Z050B": ("CPW5-1700-Z050B", "Diode", "Wolfspeed", "1700 V", None, "50", "bare_die",
+    "CPW51700Z050A":  ("CPW5-1700-Z050A", "Diode", "Wolfspeed", "1700", None, "50", "bare_die", None),
+    "CPW517000Z050B": ("CPW5-1700-Z050B", "Diode", "Wolfspeed", "1700", None, "50", "bare_die",
                        "Extra '0' in raw ID; confirmed CPW5-1700-Z050B"),
 
     # ── Wolfspeed Diodes (1200V) ──
-    "CPW412000010B":  ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200 V", None, "33", "bare_die", None),
-    "CPW41200010B":   ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200 V", None, "33", "bare_die", None),
-    "CPW4-1200-010B": ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200 V", None, "33", "bare_die",
+    "CPW412000010B":  ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200", None, "33", "bare_die", None),
+    "CPW41200010B":   ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200", None, "33", "bare_die", None),
+    "CPW4-1200-010B": ("CPW4-1200-S010B", "Diode", "Wolfspeed", "1200", None, "33", "bare_die",
                        "Missing 'S' in raw ID"),
-    "CPW412000020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed", "1200 V", None, "91", "bare_die", None),
+    "CPW412000020B":  ("CPW4-1200-S020B", "Diode", "Wolfspeed", "1200", None, "91", "bare_die", None),
 
     # ── Infineon Trench MOSFETs ──
     "IFX Trench":     ("IFX-Trench", "MOSFET", "Infineon", None, None, None, "bare_die",
