@@ -96,20 +96,21 @@ class CeleryConfig:
 
 CELERY_CONFIG = CeleryConfig
 
-FEATURE_FLAGS = {"ALERT_REPORTS": True}
+FEATURE_FLAGS = {
+    "ALERT_REPORTS": True,
+    "DASHBOARD_RBAC": True,
+}
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
 WEBDRIVER_BASEURL = "http://superset:8088/"
 
 # ---------------------------------------------------------------------------
-# Public (anonymous) read-only access
+# Public dashboard viewing
 # ---------------------------------------------------------------------------
-# Allow unauthenticated users to access Superset with the "Public" role.
-# The Public role is given permissions equivalent to the built-in "Alpha" role,
-# which includes all_datasource_access so new datasets are automatically
-# accessible without manual permission grants.
+# Anonymous Superset users are still protected by nginx Basic Auth. Keep their
+# Superset permissions read-only and grant dashboard visibility explicitly.
 AUTH_TYPE = AUTH_DB
 AUTH_ROLE_PUBLIC = "Public"
-PUBLIC_ROLE_LIKE = "Alpha"
+PUBLIC_ROLE_LIKE = "Gamma"
 
 # Send unauthenticated visitors straight to the dashboard list
 # (they can still navigate to /login to get admin privileges)
@@ -128,15 +129,44 @@ CUSTOM_CSS = """
 
 
 def FLASK_APP_MUTATOR(app):
-    """Ensure the Public role always has all_datasource_access."""
+    """Keep public dashboard access read-only and dashboard-scoped."""
     with app.app_context():
+        from superset.extensions import db
         from superset.extensions import security_manager as sm
-        public_role = sm.find_role("Public")
-        pvm = sm.find_permission_view_menu(
-            "all_datasource_access", "all_datasource_access"
+        from superset.models.dashboard import Dashboard
+
+        public_role = sm.find_role(AUTH_ROLE_PUBLIC)
+        if not public_role:
+            return
+
+        changed = False
+        gamma_role = sm.find_role("Gamma")
+        if gamma_role:
+            gamma_permissions = list(gamma_role.permissions)
+            current_ids = {pvm.id for pvm in public_role.permissions}
+            gamma_ids = {pvm.id for pvm in gamma_permissions}
+            if current_ids != gamma_ids:
+                public_role.permissions = gamma_permissions
+                changed = True
+
+        for permission_name in ("all_datasource_access", "all_database_access"):
+            pvm = sm.find_permission_view_menu(permission_name, permission_name)
+            if pvm and pvm in public_role.permissions:
+                public_role.permissions.remove(pvm)
+                changed = True
+
+        published_dashboards = (
+            db.session.query(Dashboard)
+            .filter(Dashboard.published.is_(True))
+            .all()
         )
-        if public_role and pvm:
-            sm.add_permission_role(public_role, pvm)
+        for dashboard in published_dashboards:
+            if public_role not in dashboard.roles:
+                dashboard.roles.append(public_role)
+                changed = True
+
+        if changed:
+            db.session.commit()
 
 #
 # Optionally import superset_config_docker.py (which will have been included on

@@ -192,6 +192,107 @@ def create_chart(session, name, datasource_id, viz_type, params):
 
 # ── Dashboard Management ────────────────────────────────────────────────────
 
+PUBLIC_DASHBOARD_ROLE = "Public"
+
+
+def _result_items(payload):
+    result = payload.get("result", payload) if isinstance(payload, dict) else payload
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        for key in ("data", "result", "roles"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return value
+        return [result]
+    return []
+
+
+def _item_id(item):
+    if isinstance(item, int):
+        return item
+    if isinstance(item, str) and item.isdigit():
+        return int(item)
+    if not isinstance(item, dict):
+        return None
+    for key in ("id", "value", "pk"):
+        value = item.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _find_role_id(session, role_name=PUBLIC_DASHBOARD_ROLE):
+    """Return a role id when the Superset API exposes role choices."""
+    url = _url(session)
+    filters = {
+        "filters": [{"col": "name", "opr": "eq", "value": role_name}],
+        "page_size": 100,
+    }
+    lookups = (
+        (f"{url}/api/v1/dashboard/related/roles", {"q": json.dumps(filters)}),
+        (f"{url}/api/v1/security/roles/search/", {"q": json.dumps(filters)}),
+    )
+    for endpoint, params in lookups:
+        resp = session.get(endpoint, params=params)
+        if not resp.ok:
+            continue
+        for item in _result_items(resp.json()):
+            if not isinstance(item, dict):
+                continue
+            names = {item.get("name"), item.get("text"), item.get("label")}
+            if role_name in names:
+                role_id = _item_id(item)
+                if role_id is not None:
+                    return role_id
+    return None
+
+
+def _dashboard_role_ids(session, dashboard_id):
+    url = _url(session)
+    resp = session.get(f"{url}/api/v1/dashboard/{dashboard_id}")
+    if not resp.ok:
+        return []
+    result = resp.json().get("result", {})
+    return [
+        role_id
+        for role_id in (_item_id(role) for role in result.get("roles", []))
+        if role_id is not None
+    ]
+
+
+def _public_dashboard_role_ids(session, dashboard_id=None):
+    role_ids = set(_dashboard_role_ids(session, dashboard_id) if dashboard_id else [])
+    public_role_id = _find_role_id(session)
+    if public_role_id is None:
+        print(
+            "  WARNING: Public role id not available through the API; "
+            "Superset startup sync will assign dashboard access after restart"
+        )
+    else:
+        role_ids.add(public_role_id)
+    return sorted(role_ids)
+
+
+def _save_dashboard(session, method, endpoint, payload):
+    request = session.put if method == "put" else session.post
+    resp = request(endpoint, json=payload)
+    if resp.ok or "roles" not in payload or resp.status_code not in (400, 403, 422):
+        return resp
+
+    fallback = dict(payload)
+    fallback.pop("roles", None)
+    retry = request(endpoint, json=fallback)
+    if retry.ok:
+        print(
+            "  WARNING: dashboard saved without immediate Public role "
+            "assignment; Superset startup sync will repair it"
+        )
+    return retry
+
+
 def create_or_update_dashboard(session, title, position_json, json_metadata,
                                slug):
     """Create or update a dashboard by slug. Returns dashboard id."""
@@ -217,24 +318,27 @@ def create_or_update_dashboard(session, title, position_json, json_metadata,
         "position_json": json.dumps(position_json),
         "json_metadata": json.dumps(json_metadata),
     }
+    role_ids = _public_dashboard_role_ids(session, existing_id)
+    if role_ids:
+        payload["roles"] = role_ids
 
     if existing_id:
-        resp = session.put(
-            f"{url}/api/v1/dashboard/{existing_id}", json=payload
+        resp = _save_dashboard(
+            session, "put", f"{url}/api/v1/dashboard/{existing_id}", payload
         )
         if resp.ok:
             print(f"  Updated dashboard (id={existing_id})")
             return existing_id
         print(f"  ERROR updating: {resp.status_code} {resp.text[:300]}")
         return existing_id
-    else:
-        resp = session.post(f"{url}/api/v1/dashboard/", json=payload)
-        if resp.ok:
-            dash_id = resp.json()["id"]
-            print(f"  Created dashboard (id={dash_id})")
-            return dash_id
-        print(f"  ERROR creating: {resp.status_code} {resp.text[:300]}")
-        return None
+
+    resp = _save_dashboard(session, "post", f"{url}/api/v1/dashboard/", payload)
+    if resp.ok:
+        dash_id = resp.json()["id"]
+        print(f"  Created dashboard (id={dash_id})")
+        return dash_id
+    print(f"  ERROR creating: {resp.status_code} {resp.text[:300]}")
+    return None
 
 
 def build_json_metadata(chart_ids, native_filters):
