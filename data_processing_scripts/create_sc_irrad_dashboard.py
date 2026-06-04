@@ -16,9 +16,8 @@ with median ΔVth / ΔRds(on) / ΔV(BR)DSS, their IQR, and sample counts.
 
 Dashboard contents:
   1. Table   — Device comparability coverage
-  2. Scatter — ΔVth vs ΔV(BR)DSS, source-colored across all three sources
-  3. Scatter — ΔVth vs ΔRds(on), source-colored across all three sources
-  4. Line    — Rank-1 strong/usable equivalent links in each damage plane
+  2. Scatter — source-colored damage fingerprints in all three 2D projections
+  3. Line    — Rank-1 strong/usable equivalent links in all three projections
   5. Table   — Ranked nearest equivalents for each comparison pair
   6. Table   — Raw fingerprint summary with full columns (sortable)
 
@@ -113,13 +112,21 @@ def build_dashboard_layout(chart_tuples):
         },
         "ROW-scatter": {
             "type": "ROW", "id": "ROW-scatter",
-            "children": ["CHART-scatter-bv", "CHART-scatter-rds"],
+            "children": [
+                "CHART-scatter-bv",
+                "CHART-scatter-rds",
+                "CHART-scatter-rds-bv",
+            ],
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         },
         "ROW-links": {
             "type": "ROW", "id": "ROW-links",
-            "children": ["CHART-link-bv", "CHART-link-rds"],
+            "children": [
+                "CHART-link-bv",
+                "CHART-link-rds",
+                "CHART-link-rds-bv",
+            ],
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         },
@@ -140,8 +147,10 @@ def build_dashboard_layout(chart_tuples):
         "coverage":     ("CHART-coverage", "ROW-coverage"),
         "bv":           ("CHART-scatter-bv", "ROW-scatter"),
         "rds":          ("CHART-scatter-rds", "ROW-scatter"),
+        "rds_bv":       ("CHART-scatter-rds-bv", "ROW-scatter"),
         "link_bv":      ("CHART-link-bv", "ROW-links"),
         "link_rds":     ("CHART-link-rds", "ROW-links"),
+        "link_rds_bv":  ("CHART-link-rds-bv", "ROW-links"),
         "matches":      ("CHART-matches", "ROW-matches"),
         "fingerprints": ("CHART-fingerprints", "ROW-fingerprints"),
     }
@@ -546,7 +555,7 @@ def main():
     charts["bv"] = (
         cid, cuuid,
         "Damage: ΔVth vs ΔV(BR)DSS (source-colored)",
-        6, 50,
+        4, 50,
     )
 
     cid, cuuid = create_chart(
@@ -561,7 +570,22 @@ def main():
     charts["rds"] = (
         cid, cuuid,
         "Damage: ΔVth vs ΔRds(on) (source-colored)",
-        6, 50,
+        4, 50,
+    )
+
+    cid, cuuid = create_chart(
+        session, "Damage: ΔRds(on) vs ΔV(BR)DSS (source-colored)",
+        fp_ds_id,
+        "echarts_timeseries_scatter",
+        scatter_params(
+            "drds", "dbv", "ΔRds(on) (mΩ)", "ΔV(BR)DSS (V)",
+            source_label_colors,
+        ),
+    )
+    charts["rds_bv"] = (
+        cid, cuuid,
+        "Damage: ΔRds(on) vs ΔV(BR)DSS (source-colored)",
+        4, 50,
     )
 
     cid, cuuid = create_chart(
@@ -570,7 +594,7 @@ def main():
         match_link_params("dvth", "dbv", "ΔVth (V)", "ΔV(BR)DSS (V)"),
     )
     charts["link_bv"] = (
-        cid, cuuid, "Usable Match Links: ΔVth vs ΔV(BR)DSS", 6, 45
+        cid, cuuid, "Usable Match Links: ΔVth vs ΔV(BR)DSS", 4, 45
     )
 
     cid, cuuid = create_chart(
@@ -579,7 +603,16 @@ def main():
         match_link_params("dvth", "drds", "ΔVth (V)", "ΔRds(on) (mΩ)"),
     )
     charts["link_rds"] = (
-        cid, cuuid, "Usable Match Links: ΔVth vs ΔRds(on)", 6, 45
+        cid, cuuid, "Usable Match Links: ΔVth vs ΔRds(on)", 4, 45
+    )
+
+    cid, cuuid = create_chart(
+        session, "Usable Match Links: ΔRds(on) vs ΔV(BR)DSS", segment_ds_id,
+        "echarts_timeseries_line",
+        match_link_params("drds", "dbv", "ΔRds(on) (mΩ)", "ΔV(BR)DSS (V)"),
+    )
+    charts["link_rds_bv"] = (
+        cid, cuuid, "Usable Match Links: ΔRds(on) vs ΔV(BR)DSS", 4, 45
     )
 
     cid, cuuid = create_chart(
@@ -606,6 +639,7 @@ def main():
         charts["matches"][0],
         charts["link_bv"][0],
         charts["link_rds"][0],
+        charts["link_rds_bv"][0],
     ]
     match_chart_ids = [cid for cid in match_chart_ids if cid is not None]
     coverage_chart_ids = [
@@ -614,6 +648,7 @@ def main():
     source_chart_ids = [
         charts["bv"][0],
         charts["rds"][0],
+        charts["rds_bv"][0],
         charts["fingerprints"][0],
     ]
     source_chart_ids = [cid for cid in source_chart_ids if cid is not None]

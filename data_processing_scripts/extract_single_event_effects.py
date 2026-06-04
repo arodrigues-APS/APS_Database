@@ -2,24 +2,32 @@
 """
 Extract SEB / SELC-I / SELC-II events from irradiation monitor waveforms.
 
-The detector is intentionally path-first:
+The detector is intentionally source-aware and path-first:
   * it estimates per-file noise from robust current differences;
   * it extracts positive leakage-current steps or short ramps;
-  * it classifies the leakage path from coupled Id/Ig slopes and deltas;
+  * it classifies the electrical leakage path from coupled Id/Ig slopes
+    and deltas;
+  * it maps that path to a radiation-effect label only when the radiation
+    source supports that mechanism;
   * it only promotes an event to SEB when there is independent hard-failure
-    evidence beyond "the currents reached mA";
+    evidence beyond "the currents reached mA", except for high-energy proton
+    SEB campaigns where an abrupt high-field drain-current step is the
+    relevant single-event signature;
   * it stores both event rows and per-file rates so Superset can plot event
     frequency against LET.
 
 Definitions used here:
-  * SELCI: drain-gate / gate-oxide path. |Id| and |Ig| rise together with
-    comparable slope/delta.
-  * SELCII: drain-source path. |Id| rises far more strongly than |Ig|, or
-    gate current is absent/flat.
+  * DRAIN_GATE path: |Id| and |Ig| rise together with comparable slope/delta.
+  * DRAIN_SOURCE path: |Id| rises far more strongly than |Ig|, or gate
+    current is absent/flat.
+  * SELCI / SELCII: heavy-ion single-event leakage-current mechanisms mapped
+    from DRAIN_GATE / DRAIN_SOURCE paths.
+  * Low-energy proton campaigns are TID/DD campaigns, not SELC campaigns.
+  * High-energy proton campaigns are SEB campaigns, not SELC campaigns.
   * SEB: catastrophic hard-failure label. Requires a major drain jump plus
     hard-failure evidence such as Vds collapse, trace abort, or 10 mA-scale
-    drain current. Gate-coupled SELC-I is preserved as SELC-I unless the hard
-    failure evidence is overwhelming; mA current alone is not SEB.
+    drain current for heavy ions. For high-energy proton campaigns, a robust
+    high-field drain-current step is labeled SEB.
 
 Usage:
     python3 extract_single_event_effects.py --dry-run
@@ -50,7 +58,7 @@ from common import apply_schema
 from db_config import get_connection
 
 
-DETECTOR_VERSION = "single_event_detector_v2_path_first"
+DETECTOR_VERSION = "single_event_detector_v3_source_aware"
 EVENT_TYPES = ("SEB", "SELCI", "SELCII", "MIXED", "UNKNOWN")
 
 
@@ -79,6 +87,14 @@ class DetectorConfig:
     trace_abort_points: int = 5
     min_fluence_span_for_rate: float = 1.0
     include_unknown: bool = False
+    proton_seb_energy_min_mev: float = 100.0
+    proton_seb_min_vds_v: float = 20.0
+
+
+DRAIN_GATE_PATH = "DRAIN_GATE"
+DRAIN_SOURCE_PATH = "DRAIN_SOURCE"
+MIXED_PATH = "MIXED"
+UNKNOWN_PATH = "UNKNOWN"
 
 
 CREATE_VIEWS_SQL = """
@@ -144,6 +160,219 @@ JOIN irradiation_single_event_file_summary s ON s.metadata_id = e.metadata_id
 JOIN baselines_metadata md ON md.id = e.metadata_id
 JOIN irradiation_campaigns ic ON ic.id = md.irrad_campaign_id
 LEFT JOIN irradiation_runs ir ON ir.id = md.irrad_run_id;
+
+
+CREATE OR REPLACE VIEW irradiation_single_event_energy_view AS
+WITH event_rows AS (
+    SELECT
+        e.id AS event_id,
+        e.metadata_id,
+        e.event_index,
+        e.event_type,
+        e.path_type,
+        e.severity,
+        e.is_catastrophic,
+        e.confidence,
+        e.point_index_start,
+        e.point_index_peak,
+        e.point_index_end,
+        e.cluster_width_points,
+        e.time_start,
+        e.time_peak,
+        e.time_end,
+        e.fluence_start,
+        e.fluence_peak,
+        e.fluence_end,
+        e.vds_before_v,
+        e.vds_after_v,
+        e.vds_delta_v,
+        e.id_before_a,
+        e.id_after_a,
+        e.ig_before_a,
+        e.ig_after_a,
+        e.delta_id_abs_a,
+        e.delta_ig_abs_a,
+        e.delta_id_signed_a,
+        e.delta_ig_signed_a,
+        e.id_slope_a_per_s,
+        e.ig_slope_a_per_s,
+        e.id_to_ig_delta_ratio,
+        e.id_to_ig_slope_ratio,
+        e.gate_delta_fraction,
+        e.residual_id_minus_ig_a,
+        e.id_threshold_a,
+        e.ig_threshold_a,
+        e.evidence,
+        s.detector_version,
+        s.analyzed_at,
+        s.fluence_span,
+        s.event_rate_per_1e5_fluence,
+        COALESCE(s.seb_count, 0) AS seb_count,
+        COALESCE(s.selc_i_count, 0) AS selc_i_count,
+        COALESCE(s.selc_ii_count, 0) AS selc_ii_count,
+        CASE
+            WHEN s.status IS NULL THEN 'Not analyzed'
+            WHEN s.status <> 'analyzed' THEN INITCAP(s.status)
+            WHEN COALESCE(s.seb_count, 0) > 0 THEN 'Yes'
+            ELSE 'No'
+        END AS seb_detected,
+        CASE
+            WHEN s.status IS NULL THEN 'Not analyzed'
+            WHEN s.status <> 'analyzed' THEN INITCAP(s.status)
+            WHEN COALESCE(s.selc_i_count, 0) > 0 THEN 'Yes'
+            ELSE 'No'
+        END AS selc_i_detected,
+        CASE
+            WHEN s.status IS NULL THEN 'Not analyzed'
+            WHEN s.status <> 'analyzed' THEN INITCAP(s.status)
+            WHEN COALESCE(s.selc_ii_count, 0) > 0 THEN 'Yes'
+            ELSE 'No'
+        END AS selc_ii_detected,
+        md.experiment,
+        md.device_id,
+        md.device_type,
+        md.manufacturer,
+        md.filename,
+        md.irrad_role AS test_condition,
+        ic.campaign_name,
+        ic.facility,
+        COALESCE(ir.beam_type, ic.beam_type) AS beam_type,
+        ir.ion_species,
+        ir.beam_energy_mev,
+        ir.let_surface AS let_mev_cm2_mg,
+        ir.range_um,
+        md.fluence_at_meas,
+        CASE
+            WHEN e.time_start IS NOT NULL AND e.time_end IS NOT NULL
+            THEN GREATEST(e.time_end - e.time_start, 0.0)
+        END AS event_duration_s,
+        CASE
+            WHEN e.vds_before_v IS NOT NULL
+             AND e.delta_id_abs_a IS NOT NULL
+             AND e.time_start IS NOT NULL
+             AND e.time_end IS NOT NULL
+            THEN ABS(e.vds_before_v)
+               * e.delta_id_abs_a
+               * GREATEST(e.time_end - e.time_start, 0.0)
+        END AS event_energy_proxy_j
+    FROM irradiation_single_events e
+    JOIN irradiation_single_event_file_summary s ON s.metadata_id = e.metadata_id
+    JOIN baselines_metadata md ON md.id = e.metadata_id
+    JOIN irradiation_campaigns ic ON ic.id = md.irrad_campaign_id
+    LEFT JOIN irradiation_runs ir ON ir.id = md.irrad_run_id
+),
+event_points AS (
+    SELECT
+        e.event_id,
+        e.metadata_id,
+        m.point_index,
+        CASE WHEN m.time_val IS NOT NULL AND ABS(m.time_val) < 1e30
+             THEN m.time_val END AS time_s,
+        CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
+             THEN m.v_drain END AS vds,
+        CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
+             THEN m.i_drain END AS id_drain
+    FROM event_rows e
+    JOIN baselines_measurements m ON m.metadata_id = e.metadata_id
+    WHERE e.time_start IS NOT NULL
+      AND e.time_end IS NOT NULL
+      AND m.time_val IS NOT NULL
+      AND m.time_val BETWEEN LEAST(e.time_start, e.time_end)
+                         AND GREATEST(e.time_start, e.time_end)
+),
+event_ordered AS (
+    SELECT
+        p.*,
+        LAG(time_s) OVER event_order AS prev_time_s,
+        LAG(vds) OVER event_order AS prev_vds,
+        LAG(id_drain) OVER event_order AS prev_id_drain
+    FROM event_points p
+    WINDOW event_order AS (
+        PARTITION BY event_id
+        ORDER BY time_s NULLS LAST, point_index NULLS LAST
+    )
+),
+event_segments AS (
+    SELECT
+        *,
+        CASE
+            WHEN time_s IS NOT NULL
+             AND prev_time_s IS NOT NULL
+             AND vds IS NOT NULL
+             AND id_drain IS NOT NULL
+             AND prev_vds IS NOT NULL
+             AND prev_id_drain IS NOT NULL
+            THEN GREATEST(time_s - prev_time_s, 0.0)
+        END AS dt_s,
+        CASE
+            WHEN time_s IS NOT NULL
+             AND prev_time_s IS NOT NULL
+             AND vds IS NOT NULL
+             AND id_drain IS NOT NULL
+             AND prev_vds IS NOT NULL
+             AND prev_id_drain IS NOT NULL
+            THEN (
+                GREATEST(prev_vds * prev_id_drain, 0.0)
+              + GREATEST(vds * id_drain, 0.0)
+            ) / 2.0 * GREATEST(time_s - prev_time_s, 0.0)
+        END AS event_energy_vds_id_segment_j,
+        CASE
+            WHEN time_s IS NOT NULL
+             AND prev_time_s IS NOT NULL
+             AND vds IS NOT NULL
+             AND id_drain IS NOT NULL
+             AND prev_vds IS NOT NULL
+             AND prev_id_drain IS NOT NULL
+            THEN (
+                ABS(prev_vds * prev_id_drain)
+              + ABS(vds * id_drain)
+            ) / 2.0 * GREATEST(time_s - prev_time_s, 0.0)
+        END AS event_energy_abs_segment_j
+    FROM event_ordered
+),
+event_energy AS (
+    SELECT
+        event_id,
+        COUNT(*) FILTER (
+            WHERE time_s IS NOT NULL AND vds IS NOT NULL AND id_drain IS NOT NULL
+        ) AS event_integrated_power_points,
+        COUNT(*) FILTER (WHERE dt_s IS NOT NULL)
+            AS event_integrated_power_segments,
+        SUM(event_energy_vds_id_segment_j) FILTER (WHERE dt_s IS NOT NULL)
+            AS event_energy_vds_id_j,
+        SUM(event_energy_abs_segment_j) FILTER (WHERE dt_s IS NOT NULL)
+            AS event_energy_abs_j
+    FROM event_segments
+    GROUP BY event_id
+)
+SELECT
+    e.*,
+    COALESCE(ee.event_integrated_power_points, 0)
+        AS event_integrated_power_points,
+    COALESCE(ee.event_integrated_power_segments, 0)
+        AS event_integrated_power_segments,
+    ee.event_energy_vds_id_j,
+    ee.event_energy_vds_id_j AS event_energy_put_into_device_j,
+    ee.event_energy_abs_j,
+    ee.event_energy_vds_id_j IS NOT NULL AS has_integrated_event_energy,
+    ee.event_energy_vds_id_j IS NULL
+        AND e.event_energy_proxy_j IS NOT NULL AS has_event_energy_proxy_only,
+    CASE
+        WHEN ee.event_energy_vds_id_j IS NOT NULL THEN 'integrated_waveform'
+        WHEN e.event_energy_proxy_j IS NOT NULL THEN 'proxy_rectangular_only'
+        ELSE 'missing_energy'
+    END AS event_energy_basis,
+    CASE
+        WHEN e.vds_before_v IS NOT NULL
+         AND e.delta_id_abs_a IS NOT NULL
+        THEN ABS(e.vds_before_v) * e.delta_id_abs_a
+    END AS event_proxy_power_w,
+    CASE
+        WHEN e.vds_before_v IS NOT NULL AND ABS(e.vds_before_v) > 0.0
+        THEN GREATEST(-e.vds_delta_v, 0.0) / ABS(e.vds_before_v)
+    END AS vds_collapse_fraction
+FROM event_rows e
+LEFT JOIN event_energy ee ON ee.event_id = e.event_id;
 
 CREATE OR REPLACE VIEW irradiation_single_event_file_frequency_view AS
 WITH event_types(event_type) AS (
@@ -371,9 +600,33 @@ def confidence_for_ratio(ratio, low, high):
     return max(0.55, min(0.95, 0.95 - 0.35 * center_distance / span))
 
 
+def norm_ion_species(ion_species):
+    return (ion_species or "").strip().lower()
+
+
+def finite_float(value):
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def radiation_context_label(ion_species, beam_energy_mev, cfg):
+    ion = norm_ion_species(ion_species)
+    energy = finite_float(beam_energy_mev)
+    if ion == "proton":
+        if energy is not None and energy >= cfg.proton_seb_energy_min_mev:
+            return "high_energy_proton_seb"
+        return "low_energy_proton_tid_dd"
+    return "heavy_ion_see"
+
+
 def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
                    vds_before, vds_after, points_after_event, id_thr, ig_thr,
-                   cfg):
+                   cfg, ion_species=None, beam_energy_mev=None):
     delta_id = max(0.0, delta_id or 0.0)
     delta_ig = max(0.0, delta_ig or 0.0)
     id_after = id_after or 0.0
@@ -414,7 +667,8 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
     hard_drain_level = id_after >= cfg.seb_hard_id_abs_min_a
     hard_drain_jump = delta_id >= cfg.seb_hard_id_abs_min_a
 
-    path_type = "UNKNOWN"
+    source_context = radiation_context_label(ion_species, beam_energy_mev, cfg)
+    path_type = UNKNOWN_PATH
     confidence = 0.50
     path_evidence = {
         "id_signal": id_signal,
@@ -425,6 +679,9 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
         "primary_ratio": primary_ratio,
         "primary_ratio_kind": primary_ratio_kind,
         "gate_delta_fraction": gate_delta_fraction,
+        "ion_species": ion_species,
+        "beam_energy_mev": finite_float(beam_energy_mev),
+        "source_context": source_context,
     }
     coupled_gate_signal = (
         ig_signal
@@ -438,7 +695,7 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
 
     if id_signal and coupled_gate_signal and primary_ratio is not None:
         if cfg.selc_i_ratio_min <= primary_ratio <= cfg.selc_i_ratio_max:
-            path_type = "SELCI"
+            path_type = DRAIN_GATE_PATH
             confidence = confidence_for_ratio(
                 primary_ratio, cfg.selc_i_ratio_min, cfg.selc_i_ratio_max)
             if not ig_signal:
@@ -446,15 +703,15 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
                 path_evidence["weak_gate_coupling"] = True
             path_evidence["ratio_band"] = "selc_i"
         elif primary_ratio >= cfg.selc_ii_ratio_min:
-            path_type = "SELCII"
+            path_type = DRAIN_SOURCE_PATH
             confidence = 0.82
             path_evidence["ratio_band"] = "selc_ii"
         else:
-            path_type = "MIXED"
+            path_type = MIXED_PATH
             confidence = 0.65
             path_evidence["ratio_band"] = "between_selc_i_and_selc_ii"
     elif id_signal:
-        path_type = "SELCII"
+        path_type = DRAIN_SOURCE_PATH
         confidence = 0.76
         path_evidence["gate_absent_or_flat"] = True
 
@@ -475,21 +732,57 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
     )
     is_catastrophic = drain_jump_ma and hard_failure_evidence
 
-    # Current in the mA range is not enough to call SEB.  A gate-coupled
-    # SELC-I event is only promoted if it also has collapse, abort, and a
-    # 10 mA-scale drain signature.
-    selc_i_promotable_to_seb = (
-        path_type == "SELCI"
+    # Current in the mA range is not enough to call heavy-ion SEB. A
+    # gate-coupled event is only promoted if it also has collapse, abort, and
+    # a 10 mA-scale drain signature. Proton campaigns are handled separately:
+    # low-energy protons are TID/DD, while high-energy protons are SEB tests.
+    drain_gate_promotable_to_seb = (
+        path_type == DRAIN_GATE_PATH
         and vds_collapse
         and trace_abort
         and (hard_drain_jump or hard_drain_level)
     )
-    event_type = path_type
-    if is_catastrophic and (path_type != "SELCI" or selc_i_promotable_to_seb):
-        event_type = "SEB"
-        confidence = 0.92 if hard_drain_jump or hard_drain_level else 0.82
-        if trace_abort:
-            confidence = min(0.98, confidence + 0.04)
+    proton_high_field = (
+        vds_before is not None
+        and abs(vds_before) >= cfg.proton_seb_min_vds_v
+    )
+    proton_seb_signature = (
+        source_context == "high_energy_proton_seb"
+        and id_signal
+        and proton_high_field
+    )
+
+    if source_context == "low_energy_proton_tid_dd":
+        event_type = "UNKNOWN"
+        confidence = min(confidence, 0.40)
+        path_evidence["source_suppressed_event_label"] = (
+            "low_energy_proton_tid_dd_not_selc"
+        )
+    elif source_context == "high_energy_proton_seb":
+        if proton_seb_signature:
+            event_type = "SEB"
+            is_catastrophic = True
+            confidence = max(confidence, 0.86)
+        else:
+            event_type = "UNKNOWN"
+            confidence = min(confidence, 0.45)
+            path_evidence["source_suppressed_event_label"] = (
+                "high_energy_proton_without_high_field_drain_step"
+            )
+    else:
+        path_event_map = {
+            DRAIN_GATE_PATH: "SELCI",
+            DRAIN_SOURCE_PATH: "SELCII",
+            MIXED_PATH: "MIXED",
+            UNKNOWN_PATH: "UNKNOWN",
+        }
+        event_type = path_event_map.get(path_type, "UNKNOWN")
+        if is_catastrophic and (
+                path_type != DRAIN_GATE_PATH or drain_gate_promotable_to_seb):
+            event_type = "SEB"
+            confidence = 0.92 if hard_drain_jump or hard_drain_level else 0.82
+            if trace_abort:
+                confidence = min(0.98, confidence + 0.04)
 
     if is_catastrophic:
         severity = "catastrophic"
@@ -515,8 +808,10 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
         "catastrophic_score": catastrophic_score,
         "hard_failure_evidence": hard_failure_evidence,
         "catastrophic_evidence": is_catastrophic,
-        "selc_i_promotable_to_seb": selc_i_promotable_to_seb,
-        "path_preserved_as_event_type": event_type == path_type,
+        "drain_gate_promotable_to_seb": drain_gate_promotable_to_seb,
+        "proton_high_field": proton_high_field,
+        "proton_seb_signature": proton_seb_signature,
+        "path_mapped_to_event_type": event_type,
         "path_before_catastrophic_override": path_type,
     }
     return {
@@ -532,7 +827,7 @@ def classify_event(delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
     }
 
 
-def build_event(cluster, arrays, signals, thresholds, cfg):
+def build_event(cluster, arrays, signals, thresholds, cfg, metadata_context=None):
     start, end = cluster
     n = len(arrays["id_abs"])
     id_thr, ig_thr = thresholds
@@ -599,9 +894,12 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
     id_slope = safe_div(max(0.0, delta_id or 0.0), dt)
     ig_slope = safe_div(max(0.0, delta_ig or 0.0), dt)
 
+    metadata_context = metadata_context or {}
     classification = classify_event(
         delta_id, delta_ig, id_after, ig_after, id_slope, ig_slope,
-        vds_before, vds_after, n - end - 1, id_thr, ig_thr, cfg)
+        vds_before, vds_after, n - end - 1, id_thr, ig_thr, cfg,
+        ion_species=metadata_context.get("ion_species"),
+        beam_energy_mev=metadata_context.get("beam_energy_mev"))
     evidence = classification["evidence"]
     evidence.update({
         "id_signal_peak_a": signals["id"][peak],
@@ -610,6 +908,8 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
         "ig_threshold_a": ig_thr,
         "context_points": cfg.context_points,
         "ramp_window_points": cfg.ramp_window_points,
+        "campaign_name": metadata_context.get("campaign_name"),
+        "beam_type": metadata_context.get("beam_type"),
     })
 
     residual = None
@@ -655,7 +955,7 @@ def build_event(cluster, arrays, signals, thresholds, cfg):
     }
 
 
-def detect_events_for_file(points, cfg):
+def detect_events_for_file(points, cfg, metadata_context=None):
     arrays = {
         "point_index": [],
         "time": [],
@@ -710,7 +1010,8 @@ def detect_events_for_file(points, cfg):
 
     events = []
     for cluster in cluster_indices(candidates, cfg.merge_gap_points):
-        event = build_event(cluster, arrays, signals, (id_thr, ig_thr), cfg)
+        event = build_event(
+            cluster, arrays, signals, (id_thr, ig_thr), cfg, metadata_context)
         if event is None:
             continue
         if event["event_type"] == "UNKNOWN" and not cfg.include_unknown:
@@ -801,9 +1102,9 @@ def detect_events_for_file(points, cfg):
 
 def ensure_views(cur):
     cur.execute("""
+        DROP VIEW IF EXISTS irradiation_single_event_energy_view;
         DROP VIEW IF EXISTS irradiation_single_event_let_frequency_view;
         DROP VIEW IF EXISTS irradiation_single_event_file_frequency_view;
-        DROP VIEW IF EXISTS irradiation_single_event_view;
     """)
     cur.execute(CREATE_VIEWS_SQL)
 
@@ -826,9 +1127,11 @@ def fetch_metadata(cur, args):
 
     cur.execute(f"""
         SELECT md.id, ic.campaign_name, md.device_type, md.device_id,
-               md.filename
+               md.filename, ir.ion_species, ir.beam_energy_mev,
+               COALESCE(ir.beam_type, ic.beam_type) AS beam_type
         FROM baselines_metadata md
         JOIN irradiation_campaigns ic ON ic.id = md.irrad_campaign_id
+        LEFT JOIN irradiation_runs ir ON ir.id = md.irrad_run_id
         WHERE {' AND '.join(where)}
         ORDER BY ic.campaign_name, md.id
     """, params)
@@ -962,6 +1265,12 @@ def main():
                     default=DetectorConfig.seb_hard_id_abs_min_a)
     ap.add_argument("--include-unknown", action="store_true",
                     help="Persist UNKNOWN diagnostic events in addition to named classes")
+    ap.add_argument("--proton-seb-energy-min-mev", type=float,
+                    default=DetectorConfig.proton_seb_energy_min_mev,
+                    help="Minimum proton energy treated as a high-energy SEB campaign")
+    ap.add_argument("--proton-seb-min-vds-v", type=float,
+                    default=DetectorConfig.proton_seb_min_vds_v,
+                    help="Minimum |Vds| for a high-energy proton drain step to be labeled SEB")
     args = ap.parse_args()
 
     cfg = DetectorConfig(
@@ -977,6 +1286,8 @@ def main():
         seb_ig_delta_min_a=args.seb_ig_delta_min_a,
         seb_hard_id_abs_min_a=args.seb_hard_id_abs_min_a,
         include_unknown=args.include_unknown,
+        proton_seb_energy_min_mev=args.proton_seb_energy_min_mev,
+        proton_seb_min_vds_v=args.proton_seb_min_vds_v,
     )
 
     t0 = perf_counter()
@@ -1008,13 +1319,21 @@ def main():
             skipped_existing = 0
 
             for idx, (metadata_id, campaign_name, device_type, device_id,
-                      filename) in enumerate(records, start=1):
+                      filename, ion_species, beam_energy_mev, beam_type
+                      ) in enumerate(records, start=1):
                 if metadata_id in skip_existing:
                     skipped_existing += 1
                     continue
 
                 points = fetch_points(cur, metadata_id)
-                summary, file_events = detect_events_for_file(points, cfg)
+                metadata_context = {
+                    "campaign_name": campaign_name,
+                    "ion_species": ion_species,
+                    "beam_energy_mev": beam_energy_mev,
+                    "beam_type": beam_type,
+                }
+                summary, file_events = detect_events_for_file(
+                    points, cfg, metadata_context)
                 summary["metadata_id"] = metadata_id
                 summary["detector_version"] = DETECTOR_VERSION
                 summary["settings"] = json_ready_config(cfg)

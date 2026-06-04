@@ -2174,6 +2174,9 @@ def main():
             plot_pair(fps, "dvth", "dbv",
                       "ΔVth (V)", "ΔV(BR)DSS (V)",
                       OUT_DIR / "damage_scatter_dvth_dbv.png")
+            plot_pair(fps, "dbv", "drds",
+                      "ΔV(BR)DSS (V)", "ΔRds(on) (mΩ)",
+                      OUT_DIR / "damage_scatter_dbv_drds.png")
 
         if args.ion or args.energy or args.let:
             if not args.device_type:

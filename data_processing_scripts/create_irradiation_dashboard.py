@@ -15,6 +15,8 @@ extract_single_event_effects.py):
   3. irradiation_campaign_overview   – summary counts per campaign
   4. irradiation_single_event_let_frequency_view
                                      – SEB/SELCI/SELCII counts by LET
+  5. irradiation_single_event_energy_view
+                                     – per-event integrated energy
 
 Tabs:
   1. Campaign Overview       – summary tables and bar charts
@@ -23,7 +25,8 @@ Tabs:
   4. Cross-Campaign          – compare degradation across ion species
   5. Individual Runs         – per-file curves with full metadata
 
-Filters (13 total; 10 metadata/IV filters + 3 waveform event filters):
+Filters (15 total; 10 metadata/IV filters + 3 waveform file filters +
+2 event-energy filters):
   1. Ion Species             – proton / Au / Ca / etc.
   2. Beam Energy (MeV)       – cascades from Ion Species
   3. Beam Type               – broad_beam / micro_beam
@@ -34,9 +37,11 @@ Filters (13 total; 10 metadata/IV filters + 3 waveform event filters):
   8. Measurement Category    – IdVg, IdVd, Blocking, etc.
   9. V_Drain Bias (V)        – range slider; IdVg / Subthreshold charts only
  10. V_Gate Bias (V)         – range slider; IdVd / Blocking charts only
- 11. SEB Detected            – Waveform Viewer only
- 12. SELC-I Detected         – Waveform Viewer only
- 13. SELC-II Detected        – Waveform Viewer only
+ 11. SEB Detected            – Waveform and event-energy charts
+ 12. SELC-I Detected         – Waveform and event-energy charts
+ 13. SELC-II Detected        – Waveform and event-energy charts
+ 14. Single Event Type       – Event energy charts only
+ 15. Event Energy Basis      – Event energy charts only
 
 Usage:
     source /home/apsadmin/py3/bin/activate
@@ -122,7 +127,8 @@ def build_dashboard_layout(tab_defs):
 
 def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
                          overview_ds_id=None, waveform_ds_id=None,
-                         event_let_ds_id=None, waveform_chart_ids=None,
+                         event_let_ds_id=None, event_energy_ds_id=None,
+                         waveform_chart_ids=None, event_energy_chart_ids=None,
                          v_drain_chart_ids=None, v_gate_chart_ids=None):
     """Build native filters for the Irradiation dashboard.
 
@@ -144,6 +150,8 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
     seb_fid  = "NATIVE_FILTER-irrad-seb-detected"
     s1_fid   = "NATIVE_FILTER-irrad-selc-i-detected"
     s2_fid   = "NATIVE_FILTER-irrad-selc-ii-detected"
+    evt_fid  = "NATIVE_FILTER-irrad-event-type"
+    eng_fid  = "NATIVE_FILTER-irrad-event-energy-basis"
 
     v_drain_chart_ids = v_drain_chart_ids or []
     v_gate_chart_ids  = v_gate_chart_ids  or []
@@ -169,15 +177,19 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
         if waveform_ds_id:
             targets.append({"datasetId": waveform_ds_id,
                             "column": {"name": col}})
-        if event_let_ds_id and col in {
+        event_metadata_cols = {
             "ion_species",
             "beam_energy_mev",
             "beam_type",
             "campaign_name",
             "manufacturer",
             "device_type",
-        }:
+        }
+        if event_let_ds_id and col in event_metadata_cols:
             targets.append({"datasetId": event_let_ds_id,
+                            "column": {"name": col}})
+        if event_energy_ds_id and col in event_metadata_cols | {"test_condition"}:
+            targets.append({"datasetId": event_energy_ds_id,
                             "column": {"name": col}})
         return targets
 
@@ -301,31 +313,60 @@ def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
 
     if waveform_ds_id:
         waveform_scope = waveform_chart_ids or all_chart_ids
+        event_energy_scope = event_energy_chart_ids or []
+        detected_scope = list(dict.fromkeys(waveform_scope + event_energy_scope))
         waveform_tab = ["TAB-waveform"]
+
+        def detected_targets(col):
+            targets = [{"datasetId": waveform_ds_id, "column": {"name": col}}]
+            if event_energy_ds_id:
+                targets.append({"datasetId": event_energy_ds_id,
+                                "column": {"name": col}})
+            return targets
+
         filters.extend([
             make_filter(
                 seb_fid, "SEB Detected", "seb_detected",
                 description="Waveform files with at least one SEB detected",
-                targets=[{"datasetId": waveform_ds_id,
-                          "column": {"name": "seb_detected"}}],
-                chart_scope=waveform_scope,
+                targets=detected_targets("seb_detected"),
+                chart_scope=detected_scope,
                 tab_scope=waveform_tab,
             ),
             make_filter(
                 s1_fid, "SELC-I Detected", "selc_i_detected",
                 description="Waveform files with at least one SELC-I detected",
-                targets=[{"datasetId": waveform_ds_id,
-                          "column": {"name": "selc_i_detected"}}],
-                chart_scope=waveform_scope,
+                targets=detected_targets("selc_i_detected"),
+                chart_scope=detected_scope,
                 tab_scope=waveform_tab,
             ),
             make_filter(
                 s2_fid, "SELC-II Detected", "selc_ii_detected",
                 description="Waveform files with at least one SELC-II detected",
-                targets=[{"datasetId": waveform_ds_id,
-                          "column": {"name": "selc_ii_detected"}}],
-                chart_scope=waveform_scope,
+                targets=detected_targets("selc_ii_detected"),
+                chart_scope=detected_scope,
                 tab_scope=waveform_tab,
+            ),
+        ])
+
+    if event_energy_ds_id:
+        event_energy_scope = event_energy_chart_ids or all_chart_ids
+        event_energy_tab = ["TAB-waveform"]
+        filters.extend([
+            make_filter(
+                evt_fid, "Single Event Type", "event_type",
+                description="SEB / SELC-I / SELC-II event labels",
+                targets=[{"datasetId": event_energy_ds_id,
+                          "column": {"name": "event_type"}}],
+                chart_scope=event_energy_scope,
+                tab_scope=event_energy_tab,
+            ),
+            make_filter(
+                eng_fid, "Event Energy Basis", "event_energy_basis",
+                description="Integrated waveform energy or proxy-only estimate",
+                targets=[{"datasetId": event_energy_ds_id,
+                          "column": {"name": "event_energy_basis"}}],
+                chart_scope=event_energy_scope,
+                tab_scope=event_energy_tab,
             ),
         ])
 
@@ -468,6 +509,115 @@ def non_null_filter(col):
     }
 
 
+def sql_filter(sql):
+    """Generic SQL WHERE filter for Superset chart params."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": sql,
+        "clause": "WHERE",
+    }
+
+
+def event_energy_scatter_params():
+    """Scatter params for per-event integrated energy."""
+    return {
+        "x_axis": "time_peak",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(event_energy_put_into_device_j)",
+            "label": "Energy put into device (J)",
+        }],
+        "groupby": [
+            "event_type", "device_type", "device_id",
+            "metadata_id", "event_index", "event_energy_basis",
+        ],
+        "adhoc_filters": [
+            sql_filter("event_type IN ('SEB', 'SELCI', 'SELCII')"),
+            sql_filter("event_energy_put_into_device_j IS NOT NULL"),
+        ],
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Event time (s)",
+        "y_axis_title": "Energy put into device (J)",
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": True,
+        "markerSize": 12,
+        "zoomable": True,
+        "series_limit": 100,
+    }
+
+
+def event_operating_points_params():
+    """Scatter params for per-event Vds/Ids operating points."""
+    return {
+        "x_axis": "vds_before_v",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(id_after_a)",
+            "label": "Ids after event (A)",
+        }],
+        "groupby": ["event_type"],
+        "adhoc_filters": [
+            sql_filter("event_type IN ('SEB', 'SELCI', 'SELCII')"),
+            sql_filter("vds_before_v IS NOT NULL"),
+            sql_filter("id_after_a IS NOT NULL"),
+        ],
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Vds before Event (V)",
+        "y_axis_title": "Ids after event (A)",
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": True,
+        "markerSize": 12,
+        "zoomable": True,
+        "series_limit": 100,
+    }
+
+
+def event_energy_table_params():
+    """Raw table params for one row per detected SELC/SEB event."""
+    return {
+        "query_mode": "raw",
+        "all_columns": [
+            "event_id", "event_type", "path_type", "severity",
+            "is_catastrophic", "confidence", "device_type",
+            "device_id", "metadata_id", "filename", "campaign_name",
+            "ion_species", "beam_energy_mev", "let_mev_cm2_mg",
+            "seb_detected", "selc_i_detected", "selc_ii_detected",
+            "fluence_peak", "time_start", "time_peak", "time_end",
+            "event_duration_s", "event_energy_put_into_device_j",
+            "event_energy_vds_id_j", "event_energy_abs_j",
+            "event_energy_proxy_j", "event_energy_basis",
+            "event_integrated_power_points",
+            "event_integrated_power_segments", "vds_before_v",
+            "vds_after_v", "vds_delta_v", "vds_collapse_fraction",
+            "id_before_a", "id_after_a", "delta_id_abs_a",
+            "ig_before_a", "ig_after_a", "delta_ig_abs_a",
+            "gate_delta_fraction",
+        ],
+        "order_by_cols": [json.dumps(["time_peak", True])],
+        "row_limit": 1000,
+        "include_time": False,
+        "table_timestamp_format": "smart_date",
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -499,12 +649,18 @@ def main():
     event_let_ds = find_or_create_dataset(
         session, db_id, "irradiation_single_event_let_frequency_view"
     )
+    event_energy_ds = find_or_create_dataset(
+        session, db_id, "irradiation_single_event_energy_view"
+    )
     if not main_ds:
         print("  FATAL: Could not create irradiation_view dataset.")
         print("  Run seed_irradiation_campaigns.py first to create the views.")
         sys.exit(1)
 
-    for ds_id in [main_ds, degrad_ds, overview_ds, waveform_ds, event_let_ds]:
+    for ds_id in [
+        main_ds, degrad_ds, overview_ds, waveform_ds, event_let_ds,
+        event_energy_ds,
+    ]:
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -871,6 +1027,34 @@ def main():
             ),
         ]
 
+    if event_energy_ds:
+        tab3_chart_defs.extend([
+            # 7 – Per-event integrated energy scatter
+            (
+                "Irrad – SE Event Energy vs Time",
+                event_energy_ds,
+                "echarts_timeseries_scatter",
+                event_energy_scatter_params(),
+                12, 60,
+            ),
+            # 8 – Per-event Vds/Ids operating point scatter
+            (
+                "Irrad – SE Event Operating Points (Vds vs Ids)",
+                event_energy_ds,
+                "echarts_timeseries_scatter",
+                event_operating_points_params(),
+                12, 60,
+            ),
+            # 9 – One row per detected SELC/SEB event with energy columns
+            (
+                "Irrad – SE Event Energy Detail",
+                event_energy_ds,
+                "table",
+                event_energy_table_params(),
+                12, 65,
+            ),
+        ])
+
     # ── Tab 4: Cross-Campaign Comparison ────────────────────────────────
     print("   Tab 4: Cross-Campaign Comparison...")
 
@@ -1187,13 +1371,33 @@ def main():
     tab1_info = create_tab_charts(tab1_chart_defs)
     tab2_info = create_tab_charts(tab2_chart_defs)
     tab3_info = create_tab_charts(tab3_chart_defs)
-    waveform_chart_ids = [cid for cid, *_ in tab3_info if cid]
     tab4_info = create_tab_charts(tab4_chart_defs)
     tab5_info = create_tab_charts(tab5_chart_defs)
 
-    # Resolve bias-filter chart scopes by chart name (robust to reordering)
+    # Resolve filter chart scopes by chart name (robust to reordering)
     def named_cid(info, name):
         return next((c[0] for c in info if c[2] == name), None)
+
+    waveform_chart_names = [
+        "Irrad – Waveform: Vds vs Time",
+        "Irrad – Waveform: Id vs Time",
+        "Irrad – Waveform: Vgs vs Time",
+        "Irrad – Waveform: Igs vs Time",
+        "Irrad – Waveform: |Id| vs Time (log)",
+        "Irrad – Waveform: |Igs| vs Time (log)",
+        "Irrad – Waveform Event Summary",
+    ]
+    event_energy_chart_names = [
+        "Irrad – SE Event Energy vs Time",
+        "Irrad – SE Event Operating Points (Vds vs Ids)",
+        "Irrad – SE Event Energy Detail",
+    ]
+    waveform_chart_ids = list(filter(None, [
+        named_cid(tab3_info, name) for name in waveform_chart_names
+    ]))
+    event_energy_chart_ids = list(filter(None, [
+        named_cid(tab3_info, name) for name in event_energy_chart_names
+    ]))
 
     v_drain_chart_ids = list(filter(None, [
         named_cid(tab2_info, "Irrad – IdVg Transfer Curves"),
@@ -1230,7 +1434,9 @@ def main():
         overview_ds_id=overview_ds,
         waveform_ds_id=waveform_ds,
         event_let_ds_id=event_let_ds,
+        event_energy_ds_id=event_energy_ds,
         waveform_chart_ids=waveform_chart_ids,
+        event_energy_chart_ids=event_energy_chart_ids,
         v_drain_chart_ids=v_drain_chart_ids,
         v_gate_chart_ids=v_gate_chart_ids,
     )
@@ -1274,9 +1480,11 @@ def main():
         print("    8. Measurement Category  (IdVg, IdVd, Blocking, etc.)")
         print(f"   9. V_Drain Bias (V)      (range; {len(v_drain_chart_ids)} charts)")
         print(f"  10. V_Gate Bias (V)       (range; {len(v_gate_chart_ids)} charts)")
-        print("   11. SEB Detected          (Waveform Viewer)")
-        print("   12. SELC-I Detected       (Waveform Viewer)")
-        print("   13. SELC-II Detected      (Waveform Viewer)")
+        print("   11. SEB Detected          (waveform/event charts)")
+        print("   12. SELC-I Detected       (waveform/event charts)")
+        print("   13. SELC-II Detected      (waveform/event charts)")
+        print("   14. Single Event Type     (event energy charts)")
+        print("   15. Event Energy Basis    (event energy charts)")
     else:
         print("Dashboard creation failed — see errors above.")
     print("=" * 70)

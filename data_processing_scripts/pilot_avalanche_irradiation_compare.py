@@ -5,7 +5,7 @@ Pilot avalanche vs irradiation comparison for the overlapping C2M0080120D data.
 This is deliberately a case-study script, not a production equivalence model.
 It compares:
   * C2M0080120D / D3 UIS avalanche waveforms
-  * C2M0080120D proton SELCII irradiation events
+  * C2M0080120D high-energy proton SEB irradiation events
   * C2M0080120D heavy-ion SEB irradiation events as a hard-failure contrast
 
 Outputs land in out/avalanche_irrad_pilot/.
@@ -154,7 +154,7 @@ def irradiation_event_features(events: pd.DataFrame) -> pd.DataFrame:
 
         ion = str(row["ion_species"]).lower() if pd.notna(row["ion_species"]) else "unknown"
         if ion == "proton":
-            cohort = "irradiation_proton_selcii"
+            cohort = "irradiation_proton_seb"
         elif row["event_type"] == "SEB":
             cohort = "irradiation_heavy_ion_seb"
         else:
@@ -264,13 +264,13 @@ def plot_event_space(features: pd.DataFrame, out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     colors = {
         "avalanche_d3_uis_waveform": "#1f77b4",
-        "irradiation_proton_selcii": "#d62728",
+        "irradiation_proton_seb": "#d62728",
         "irradiation_heavy_ion_seb": "#2ca02c",
         "irradiation_other_c2m_event": "#7f7f7f",
     }
     markers = {
         "avalanche_d3_uis_waveform": "s",
-        "irradiation_proton_selcii": "o",
+        "irradiation_proton_seb": "o",
         "irradiation_heavy_ion_seb": "^",
         "irradiation_other_c2m_event": ".",
     }
@@ -323,7 +323,7 @@ def plot_avalanche_waveforms(waveforms: pd.DataFrame, out_path: Path) -> None:
 
 
 def write_readme(summary: pd.DataFrame, damage: pd.DataFrame, out_path: Path) -> None:
-    proton = summary[summary["cohort"] == "irradiation_proton_selcii"]
+    proton = summary[summary["cohort"] == "irradiation_proton_seb"]
     avalanche = summary[summary["cohort"] == "avalanche_d3_uis_waveform"]
     seb = summary[summary["cohort"] == "irradiation_heavy_ion_seb"]
 
@@ -358,20 +358,20 @@ def write_readme(summary: pd.DataFrame, damage: pd.DataFrame, out_path: Path) ->
 Scope: C2M0080120D only.
 
 This pilot intentionally does not claim UIS/proton failure equivalence. The
-available proton C2M0080120D events are SELCII leakage events, not SEB.
+available proton C2M0080120D events are high-energy proton SEB-labeled drain-source events.
 
 ## Cohorts
 
 - Avalanche D3 UIS waveforms: {value(avalanche, 'n_files')} files.
-- Proton irradiation SELCII events: {value(proton, 'n_events')} events across {value(proton, 'n_files')} files.
+- High-energy proton irradiation SEB events: {value(proton, 'n_events')} events across {value(proton, 'n_files')} files.
 - Heavy-ion irradiation SEB contrast: {value(seb, 'n_events')} events across {value(seb, 'n_files')} files.
 
 ## Key Descriptors
 
 - Avalanche D3 median pulse/current amplitude: {value(avalanche, 'delta_id_abs_a_median')} A.
 - Avalanche D3 median Vds collapse fraction: {value(avalanche, 'vds_collapse_fraction_median')}.
-- Proton SELCII median delta |Id|: {value(proton, 'delta_id_abs_a_median')} A.
-- Proton SELCII median Vds collapse fraction: {value(proton, 'vds_collapse_fraction_median')}.
+- High-energy proton SEB median delta |Id|: {value(proton, 'delta_id_abs_a_median')} A.
+- High-energy proton SEB median Vds collapse fraction: {value(proton, 'vds_collapse_fraction_median')}.
 - Heavy-ion SEB median delta |Id|: {value(seb, 'delta_id_abs_a_median')} A.
 - Heavy-ion SEB median Vds collapse fraction: {value(seb, 'vds_collapse_fraction_median')}.
 
@@ -383,11 +383,11 @@ The probable C2M0080120D D3/d3 mapping has one pre/post avalanche IV pair:
 
 ## Interpretation
 
-The proton subset does not show a UIS-burnout analogue in this pilot: it has
-small drain-source leakage steps and essentially no Vds collapse. The heavy-ion
-SEB contrast is the irradiation cohort that shares the hard-collapse descriptor
-with the UIS waveforms, although its current scale is still instrument- and
-stress-regime dependent.
+The proton subset is now labeled according to source mechanism rather than
+SELC path heuristics. In this pilot it has drain-source current steps with
+essentially no instantaneous Vds collapse, while the heavy-ion SEB contrast is
+the irradiation cohort that shares the hard-collapse descriptor with the UIS
+waveforms. Current scale remains instrument- and stress-regime dependent.
 
 Treat this as a capability check and case study, not population-level evidence.
 """

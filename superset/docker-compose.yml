@@ -11,6 +11,8 @@ x-superset-volumes: &superset-volumes
 services:
   redis:
     image: redis:7
+    labels:
+      - wud.tag.include=^7\..*$
     container_name: superset_cache
     restart: unless-stopped
     healthcheck:
@@ -22,6 +24,8 @@ services:
   db:
     env_file: .env
     image: postgres:15
+    labels:
+      - wud.tag.include=^15(\.\d+)?$
     container_name: superset_db
     restart: unless-stopped
     volumes:
@@ -75,6 +79,8 @@ services:
 
   postgresqlv2:
     image: postgres:15
+    labels:
+      - wud.tag.include=^15(\.\d+)?$
     container_name: postgresqlv2
     restart: unless-stopped
     ports:

@@ -112,8 +112,8 @@ AUTH_TYPE = AUTH_DB
 AUTH_ROLE_PUBLIC = "Public"
 PUBLIC_ROLE_LIKE = "Gamma"
 
-# Send unauthenticated visitors straight to the dashboard list
-# (they can still navigate to /login to get admin privileges)
+# nginx redirects the bare domain to /dashboard/list/.
+# Visitors can still navigate to /login to get admin privileges.
 TALISMAN_ENABLED = False
 # The base URL for the email report hyperlinks.
 WEBDRIVER_BASEURL_USER_FRIENDLY = WEBDRIVER_BASEURL
