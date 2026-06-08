@@ -242,24 +242,122 @@ WITH event_rows AS (
         ir.let_surface AS let_mev_cm2_mg,
         ir.range_um,
         md.fluence_at_meas,
+        w.active_start_s AS file_active_start_s,
+        w.active_end_s AS file_active_end_s,
+        w.energy_start_s AS file_energy_start_s,
+        w.energy_end_s AS file_energy_end_s,
+        COALESCE(w.active_window_basis, 'not_analyzed') AS active_window_basis,
+        w.active_window_confidence,
+        COALESCE(w.energy_censored_reason, 'not_analyzed')
+            AS file_energy_censored_reason,
+        w.compliance_source,
+        w.compliance_current_a,
+        w.failure_time_s,
+        COALESCE(w.energy_is_comparable, FALSE)
+            AS file_energy_is_comparable,
         CASE
             WHEN e.time_start IS NOT NULL AND e.time_end IS NOT NULL
             THEN GREATEST(e.time_end - e.time_start, 0.0)
-        END AS event_duration_s,
-        CASE
-            WHEN e.vds_before_v IS NOT NULL
-             AND e.delta_id_abs_a IS NOT NULL
-             AND e.time_start IS NOT NULL
-             AND e.time_end IS NOT NULL
-            THEN ABS(e.vds_before_v)
-               * e.delta_id_abs_a
-               * GREATEST(e.time_end - e.time_start, 0.0)
-        END AS event_energy_proxy_j
+        END AS event_detected_duration_s
     FROM irradiation_single_events e
     JOIN irradiation_single_event_file_summary s ON s.metadata_id = e.metadata_id
     JOIN baselines_metadata md ON md.id = e.metadata_id
     JOIN irradiation_campaigns ic ON ic.id = md.irrad_campaign_id
     LEFT JOIN irradiation_runs ir ON ir.id = md.irrad_run_id
+    LEFT JOIN irradiation_waveform_windows w ON w.metadata_id = e.metadata_id
+),
+event_windows AS (
+    SELECT
+        e.*,
+        CASE
+            WHEN e.time_start IS NOT NULL
+             AND e.time_end IS NOT NULL
+             AND e.file_energy_start_s IS NOT NULL
+             AND e.file_energy_end_s IS NOT NULL
+            THEN GREATEST(
+                LEAST(e.time_start, e.time_end),
+                LEAST(e.file_energy_start_s, e.file_energy_end_s)
+            )
+        END AS event_energy_start_s,
+        CASE
+            WHEN e.time_start IS NOT NULL
+             AND e.time_end IS NOT NULL
+             AND e.file_energy_start_s IS NOT NULL
+             AND e.file_energy_end_s IS NOT NULL
+            THEN LEAST(
+                GREATEST(e.time_start, e.time_end),
+                GREATEST(e.file_energy_start_s, e.file_energy_end_s),
+                CASE
+                    WHEN e.is_catastrophic
+                     AND e.time_peak IS NOT NULL
+                    THEN e.time_peak
+                    ELSE GREATEST(e.time_start, e.time_end)
+                END
+            )
+        END AS raw_event_energy_end_s
+    FROM event_rows e
+),
+event_energy_rows AS (
+    SELECT
+        e.*,
+        CASE
+            WHEN e.event_energy_start_s IS NOT NULL
+             AND e.raw_event_energy_end_s IS NOT NULL
+             AND e.raw_event_energy_end_s >= e.event_energy_start_s
+            THEN e.raw_event_energy_end_s
+        END AS event_energy_end_s,
+        CASE
+            WHEN e.active_window_basis = 'not_analyzed'
+                THEN 'active_window_not_analyzed'
+            WHEN e.file_energy_start_s IS NULL
+              OR e.file_energy_end_s IS NULL
+                THEN COALESCE(NULLIF(e.file_energy_censored_reason, 'none'),
+                              e.active_window_basis,
+                              'active_window_unknown')
+            WHEN e.raw_event_energy_end_s IS NULL
+              OR e.event_energy_start_s IS NULL
+                THEN 'event_window_unknown'
+            WHEN e.raw_event_energy_end_s < e.event_energy_start_s
+                THEN 'event_outside_active_window'
+            WHEN e.is_catastrophic
+              AND e.time_peak IS NOT NULL
+              AND e.time_peak < GREATEST(e.time_start, e.time_end)
+              AND e.time_peak <= GREATEST(e.file_energy_start_s, e.file_energy_end_s)
+                THEN 'failure_cutoff'
+            ELSE COALESCE(e.file_energy_censored_reason, 'none')
+        END AS energy_censored_reason,
+        CASE
+            WHEN e.event_energy_start_s IS NOT NULL
+             AND e.raw_event_energy_end_s IS NOT NULL
+             AND e.raw_event_energy_end_s >= e.event_energy_start_s
+            THEN GREATEST(e.raw_event_energy_end_s - e.event_energy_start_s, 0.0)
+        END AS event_duration_s,
+        CASE
+            WHEN e.vds_before_v IS NOT NULL
+             AND e.delta_id_abs_a IS NOT NULL
+             AND e.event_energy_start_s IS NOT NULL
+             AND e.raw_event_energy_end_s IS NOT NULL
+             AND e.raw_event_energy_end_s >= e.event_energy_start_s
+            THEN ABS(e.vds_before_v)
+               * e.delta_id_abs_a
+               * GREATEST(e.raw_event_energy_end_s - e.event_energy_start_s, 0.0)
+        END AS event_energy_proxy_j,
+        CASE
+            WHEN e.file_energy_is_comparable
+             AND e.event_energy_start_s IS NOT NULL
+             AND e.raw_event_energy_end_s IS NOT NULL
+             AND e.raw_event_energy_end_s >= e.event_energy_start_s
+             AND COALESCE(e.file_energy_censored_reason, 'none') = 'none'
+            THEN TRUE
+            ELSE FALSE
+        END AS energy_is_comparable,
+        CASE
+            WHEN e.file_energy_start_s IS NOT NULL
+             AND e.file_energy_end_s IS NOT NULL
+            THEN 'event'
+            ELSE 'unknown'
+        END AS energy_level
+    FROM event_windows e
 ),
 event_points AS (
     SELECT
@@ -272,13 +370,13 @@ event_points AS (
              THEN m.v_drain END AS vds,
         CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
              THEN m.i_drain END AS id_drain
-    FROM event_rows e
+    FROM event_energy_rows e
     JOIN baselines_measurements m ON m.metadata_id = e.metadata_id
-    WHERE e.time_start IS NOT NULL
-      AND e.time_end IS NOT NULL
+    WHERE e.event_energy_start_s IS NOT NULL
+      AND e.event_energy_end_s IS NOT NULL
       AND m.time_val IS NOT NULL
-      AND m.time_val BETWEEN LEAST(e.time_start, e.time_end)
-                         AND GREATEST(e.time_start, e.time_end)
+      AND m.time_val BETWEEN e.event_energy_start_s
+                         AND e.event_energy_end_s
 ),
 event_ordered AS (
     SELECT
@@ -352,14 +450,20 @@ SELECT
     COALESCE(ee.event_integrated_power_segments, 0)
         AS event_integrated_power_segments,
     ee.event_energy_vds_id_j,
+    ee.event_energy_vds_id_j AS event_electrical_terminal_energy_j,
     ee.event_energy_vds_id_j AS event_energy_put_into_device_j,
     ee.event_energy_abs_j,
     ee.event_energy_vds_id_j IS NOT NULL AS has_integrated_event_energy,
     ee.event_energy_vds_id_j IS NULL
         AND e.event_energy_proxy_j IS NOT NULL AS has_event_energy_proxy_only,
     CASE
-        WHEN ee.event_energy_vds_id_j IS NOT NULL THEN 'integrated_waveform'
-        WHEN e.event_energy_proxy_j IS NOT NULL THEN 'proxy_rectangular_only'
+        WHEN ee.event_energy_vds_id_j IS NOT NULL
+         AND e.energy_is_comparable
+            THEN 'integrated_active_event_window'
+        WHEN ee.event_energy_vds_id_j IS NOT NULL
+            THEN 'integrated_censored_or_uncertain_window'
+        WHEN e.event_energy_proxy_j IS NOT NULL
+            THEN 'proxy_rectangular_only'
         ELSE 'missing_energy'
     END AS event_energy_basis,
     CASE
@@ -371,7 +475,7 @@ SELECT
         WHEN e.vds_before_v IS NOT NULL AND ABS(e.vds_before_v) > 0.0
         THEN GREATEST(-e.vds_delta_v, 0.0) / ABS(e.vds_before_v)
     END AS vds_collapse_fraction
-FROM event_rows e
+FROM event_energy_rows e
 LEFT JOIN event_energy ee ON ee.event_id = e.event_id;
 
 CREATE OR REPLACE VIEW irradiation_single_event_file_frequency_view AS

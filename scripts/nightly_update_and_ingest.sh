@@ -161,7 +161,9 @@ run_py ingestion_sc.py
 run_py seed_irradiation_campaigns.py
 run_py ingestion_irradiation.py
 run_py parse_logbooks_assign_runs.py
+run_py irradiation_energy_windows.py
 run_py extract_single_event_effects.py
+run_py radiation_stress_dose.py
 run_py ingestion_avalanche.py
 run_py -c "from db_config import get_connection; conn=get_connection(); cur=conn.cursor(); cur.execute('REFRESH MATERIALIZED VIEW baselines_run_max_current'); conn.commit(); cur.close(); conn.close(); print('refreshed baselines_run_max_current')"
 run_py extract_damage_metrics.py

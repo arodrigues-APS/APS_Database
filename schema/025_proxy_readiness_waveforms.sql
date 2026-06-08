@@ -699,98 +699,8 @@ CREATE MATERIALIZED VIEW stress_waveform_event_features AS
 WITH irrad_event_base AS (
     SELECT
         e.*,
-        CASE
-            WHEN e.vds_before_v IS NOT NULL
-             AND e.delta_id_abs_a IS NOT NULL
-             AND e.time_start IS NOT NULL
-             AND e.time_end IS NOT NULL
-            THEN ABS(e.vds_before_v)
-               * e.delta_id_abs_a
-               * GREATEST(e.time_end - e.time_start, 0.0)
-        END AS rectangular_event_energy_proxy_j
-    FROM irradiation_single_event_view e
-),
-irrad_event_points AS (
-    SELECT
-        e.event_id,
-        e.metadata_id,
-        m.point_index,
-        CASE WHEN m.time_val IS NOT NULL AND ABS(m.time_val) < 1e30
-             THEN m.time_val END AS time_s,
-        CASE WHEN m.v_drain IS NOT NULL AND ABS(m.v_drain) < 1e30
-             THEN m.v_drain END AS vds,
-        CASE WHEN m.i_drain IS NOT NULL AND ABS(m.i_drain) < 1e30
-             THEN m.i_drain END AS id_drain
-    FROM irrad_event_base e
-    JOIN baselines_measurements m ON m.metadata_id = e.metadata_id
-    WHERE e.time_start IS NOT NULL
-      AND e.time_end IS NOT NULL
-      AND m.time_val IS NOT NULL
-      AND m.time_val BETWEEN LEAST(e.time_start, e.time_end)
-                         AND GREATEST(e.time_start, e.time_end)
-),
-irrad_event_ordered AS (
-    SELECT
-        p.*,
-        LAG(time_s) OVER event_order AS prev_time_s,
-        LAG(vds) OVER event_order AS prev_vds,
-        LAG(id_drain) OVER event_order AS prev_id_drain
-    FROM irrad_event_points p
-    WINDOW event_order AS (
-        PARTITION BY event_id
-        ORDER BY time_s NULLS LAST, point_index NULLS LAST
-    )
-),
-irrad_event_segments AS (
-    SELECT
-        *,
-        CASE
-            WHEN time_s IS NOT NULL
-             AND prev_time_s IS NOT NULL
-             AND vds IS NOT NULL
-             AND id_drain IS NOT NULL
-             AND prev_vds IS NOT NULL
-             AND prev_id_drain IS NOT NULL
-            THEN GREATEST(time_s - prev_time_s, 0.0)
-        END AS dt_s,
-        CASE
-            WHEN time_s IS NOT NULL
-             AND prev_time_s IS NOT NULL
-             AND vds IS NOT NULL
-             AND id_drain IS NOT NULL
-             AND prev_vds IS NOT NULL
-             AND prev_id_drain IS NOT NULL
-            THEN (
-                GREATEST(prev_vds * prev_id_drain, 0.0)
-              + GREATEST(vds * id_drain, 0.0)
-            ) / 2.0 * GREATEST(time_s - prev_time_s, 0.0)
-        END AS event_energy_vds_id_segment_j,
-        CASE
-            WHEN time_s IS NOT NULL
-             AND prev_time_s IS NOT NULL
-             AND vds IS NOT NULL
-             AND id_drain IS NOT NULL
-             AND prev_vds IS NOT NULL
-             AND prev_id_drain IS NOT NULL
-            THEN (
-                ABS(prev_vds * prev_id_drain)
-              + ABS(vds * id_drain)
-            ) / 2.0 * GREATEST(time_s - prev_time_s, 0.0)
-        END AS event_energy_abs_segment_j
-    FROM irrad_event_ordered
-),
-irrad_event_energy AS (
-    SELECT
-        event_id,
-        COUNT(*) FILTER (
-            WHERE time_s IS NOT NULL AND vds IS NOT NULL AND id_drain IS NOT NULL
-        ) AS event_integrated_power_points,
-        SUM(event_energy_vds_id_segment_j) FILTER (WHERE dt_s IS NOT NULL)
-            AS event_energy_vds_id_j,
-        SUM(event_energy_abs_segment_j) FILTER (WHERE dt_s IS NOT NULL)
-            AS event_energy_abs_j
-    FROM irrad_event_segments
-    GROUP BY event_id
+        e.event_energy_proxy_j AS rectangular_event_energy_proxy_j
+    FROM irradiation_single_event_energy_view e
 )
 SELECT
     f.source,
@@ -834,10 +744,17 @@ SELECT
     f.time_end_s,
     f.duration_s AS event_duration_s,
     f.energy_vds_id_j AS event_energy_vds_id_j,
+    f.energy_vds_id_j AS event_electrical_terminal_energy_j,
     f.energy_abs_j AS event_energy_abs_j,
     NULL::double precision AS event_energy_proxy_j,
     f.energy_vds_id_j AS file_energy_vds_id_j,
     f.commanded_or_stored_energy_j,
+    (f.energy_vds_id_j IS NOT NULL OR f.commanded_or_stored_energy_j IS NOT NULL)
+        AS energy_is_comparable,
+    'full_file_waveform'::text AS energy_window_basis,
+    'none'::text AS energy_censored_reason,
+    1.0::double precision AS active_window_confidence,
+    'file'::text AS energy_level,
     f.peak_abs_id_a,
     f.peak_abs_ig_a,
     f.peak_abs_power_w,
@@ -912,13 +829,18 @@ SELECT
     e.time_start AS time_start_s,
     e.time_peak AS time_peak_s,
     e.time_end AS time_end_s,
-    CASE WHEN e.time_start IS NOT NULL AND e.time_end IS NOT NULL
-         THEN GREATEST(e.time_end - e.time_start, 0.0) END AS event_duration_s,
-    ee.event_energy_vds_id_j,
-    ee.event_energy_abs_j,
+    e.event_duration_s,
+    e.event_energy_vds_id_j,
+    e.event_energy_vds_id_j AS event_electrical_terminal_energy_j,
+    e.event_energy_abs_j,
     e.rectangular_event_energy_proxy_j AS event_energy_proxy_j,
-    f.energy_vds_id_j AS file_energy_vds_id_j,
+    NULL::double precision AS file_energy_vds_id_j,
     NULL::double precision AS commanded_or_stored_energy_j,
+    COALESCE(e.energy_is_comparable, FALSE) AS energy_is_comparable,
+    COALESCE(e.active_window_basis, 'not_analyzed') AS energy_window_basis,
+    COALESCE(e.energy_censored_reason, 'not_analyzed') AS energy_censored_reason,
+    e.active_window_confidence,
+    COALESCE(e.energy_level, 'unknown') AS energy_level,
     GREATEST(ABS(e.id_before_a), ABS(e.id_after_a)) AS peak_abs_id_a,
     GREATEST(ABS(e.ig_before_a), ABS(e.ig_after_a)) AS peak_abs_ig_a,
     CASE
@@ -947,25 +869,35 @@ SELECT
     COALESCE(f.family_post_iv_axis_count, 0) AS family_post_iv_axis_count,
     COALESCE(f.exact_post_iv_companion_files, 0) AS exact_post_iv_companion_files,
     COALESCE(f.exact_post_iv_axis_count, 0) AS exact_post_iv_axis_count,
-    ee.event_energy_vds_id_j IS NOT NULL AS has_energy,
-    ee.event_energy_vds_id_j IS NULL
+    e.event_energy_vds_id_j IS NOT NULL
+        AND COALESCE(e.energy_is_comparable, FALSE) AS has_energy,
+    e.event_energy_vds_id_j IS NULL
         AND e.rectangular_event_energy_proxy_j IS NOT NULL AS has_energy_proxy_only,
     e.vds_delta_v IS NOT NULL AS has_collapse,
     e.gate_delta_fraction IS NOT NULL AS has_gate,
-    ee.event_energy_vds_id_j IS NOT NULL
+    e.event_energy_vds_id_j IS NOT NULL
+        AND COALESCE(e.energy_is_comparable, FALSE)
         AND e.vds_delta_v IS NOT NULL
         AND e.gate_delta_fraction IS NOT NULL AS has_full_waveform,
     COALESCE(f.has_condition_post_iv, FALSE) AS has_condition_post_iv,
     COALESCE(f.has_exact_sample_post_iv, FALSE) AS has_exact_sample_post_iv,
     COALESCE(f.has_family_post_iv, FALSE) AS has_family_post_iv,
-    ee.event_energy_vds_id_j IS NOT NULL
+    e.event_energy_vds_id_j IS NOT NULL
+        AND COALESCE(e.energy_is_comparable, FALSE)
         AND COALESCE(f.has_condition_post_iv, FALSE)
         AS has_waveform_plus_post_iv,
     ARRAY_REMOVE(ARRAY[
-        CASE WHEN ee.event_energy_vds_id_j IS NOT NULL THEN 'energy_available' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NULL
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'energy_available' END,
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND NOT COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'event_energy_not_comparable' END,
+        CASE WHEN e.event_energy_vds_id_j IS NULL
                AND e.rectangular_event_energy_proxy_j IS NOT NULL
              THEN 'event_energy_proxy_only' END,
+        CASE WHEN COALESCE(e.energy_censored_reason, 'none') <> 'none'
+             THEN 'energy_censored_' || e.energy_censored_reason END,
         CASE WHEN e.vds_delta_v IS NOT NULL THEN 'collapse_available' END,
         CASE WHEN e.gate_delta_fraction IS NOT NULL THEN 'gate_available' END,
         CASE WHEN COALESCE(f.has_condition_post_iv, FALSE)
@@ -973,73 +905,103 @@ SELECT
         CASE WHEN COALESCE(f.has_exact_sample_post_iv, FALSE)
              THEN 'exact_post_iv_companion_available' END,
         CASE WHEN COALESCE(f.has_condition_post_iv, FALSE)
-               AND ee.event_energy_vds_id_j IS NOT NULL
+               AND e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
              THEN 'waveform_plus_post_iv' END
     ], NULL)::text[] AS available_basis_flags,
     ARRAY_REMOVE(ARRAY[
-        CASE WHEN ee.event_energy_vds_id_j IS NOT NULL THEN 'energy_available' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NULL
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'energy_available' END,
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND NOT COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'event_energy_not_comparable' END,
+        CASE WHEN e.event_energy_vds_id_j IS NULL
                AND e.rectangular_event_energy_proxy_j IS NOT NULL
              THEN 'event_energy_proxy_only' END,
         CASE WHEN e.vds_delta_v IS NOT NULL THEN 'collapse_available' END,
         CASE WHEN e.gate_delta_fraction IS NOT NULL THEN 'gate_coupled' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NOT NULL
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
                AND e.vds_delta_v IS NOT NULL
                AND e.gate_delta_fraction IS NOT NULL
              THEN 'full_waveform' END,
         CASE WHEN COALESCE(f.has_condition_post_iv, FALSE)
-               AND ee.event_energy_vds_id_j IS NOT NULL
+               AND e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
              THEN 'waveform_plus_post_iv' END
     ], NULL)::text[] AS match_basis_flags,
     ARRAY_TO_STRING(ARRAY_REMOVE(ARRAY[
-        CASE WHEN ee.event_energy_vds_id_j IS NOT NULL THEN 'energy_available' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NULL
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'energy_available' END,
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND NOT COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'event_energy_not_comparable' END,
+        CASE WHEN e.event_energy_vds_id_j IS NULL
                AND e.rectangular_event_energy_proxy_j IS NOT NULL
              THEN 'event_energy_proxy_only' END,
         CASE WHEN e.vds_delta_v IS NOT NULL THEN 'collapse_available' END,
         CASE WHEN e.gate_delta_fraction IS NOT NULL THEN 'gate_coupled' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NOT NULL
+        CASE WHEN e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
                AND e.vds_delta_v IS NOT NULL
                AND e.gate_delta_fraction IS NOT NULL
              THEN 'full_waveform' END,
         CASE WHEN COALESCE(f.has_condition_post_iv, FALSE)
-               AND ee.event_energy_vds_id_j IS NOT NULL
+               AND e.event_energy_vds_id_j IS NOT NULL
+               AND COALESCE(e.energy_is_comparable, FALSE)
              THEN 'waveform_plus_post_iv' END
     ], NULL), ', ') AS match_basis_labels,
     CASE
-        WHEN ee.event_energy_vds_id_j IS NOT NULL
+        WHEN e.event_energy_vds_id_j IS NOT NULL
+         AND COALESCE(e.energy_is_comparable, FALSE)
          AND COALESCE(f.has_condition_post_iv, FALSE)
             THEN 'waveform_plus_post_iv'
-        WHEN ee.event_energy_vds_id_j IS NOT NULL
+        WHEN e.event_energy_vds_id_j IS NOT NULL
+         AND COALESCE(e.energy_is_comparable, FALSE)
          AND e.vds_delta_v IS NOT NULL
          AND e.gate_delta_fraction IS NOT NULL
             THEN 'full_waveform'
-        WHEN ee.event_energy_vds_id_j IS NOT NULL
+        WHEN e.event_energy_vds_id_j IS NOT NULL
+         AND COALESCE(e.energy_is_comparable, FALSE)
          AND e.vds_delta_v IS NOT NULL
             THEN 'energy_plus_collapse'
-        WHEN ee.event_energy_vds_id_j IS NULL
+        WHEN e.event_energy_vds_id_j IS NOT NULL
+         AND NOT COALESCE(e.energy_is_comparable, FALSE)
+            THEN 'event_energy_not_comparable'
+        WHEN e.event_energy_vds_id_j IS NULL
          AND e.rectangular_event_energy_proxy_j IS NOT NULL
             THEN 'event_energy_proxy_only'
         WHEN e.gate_delta_fraction IS NOT NULL
             THEN 'gate_metric_only'
-        WHEN ee.event_energy_vds_id_j IS NOT NULL
-            THEN 'energy_only'
         WHEN e.vds_delta_v IS NOT NULL
             THEN 'collapse_only'
         ELSE 'no_waveform_basis'
     END AS match_basis_class,
     ARRAY_REMOVE(COALESCE(f.quality_flags, ARRAY[]::text[]) || ARRAY[
         CASE WHEN e.event_type IS NULL THEN 'missing_event_type' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NULL
+        CASE WHEN NOT COALESCE(e.energy_is_comparable, FALSE)
+             THEN 'event_energy_not_comparable' END,
+        CASE WHEN COALESCE(e.energy_level, 'unknown') <> 'event'
+             THEN 'event_energy_not_event_level' END,
+        CASE WHEN COALESCE(e.energy_censored_reason, 'none') <> 'none'
+             THEN 'event_energy_censored_' || e.energy_censored_reason END,
+        CASE WHEN e.active_window_confidence IS NOT NULL
+               AND e.active_window_confidence < 0.80
+             THEN 'low_active_window_confidence' END,
+        CASE WHEN e.event_energy_vds_id_j IS NULL
                AND e.rectangular_event_energy_proxy_j IS NOT NULL
              THEN 'event_energy_not_integrated_proxy_only' END,
-        CASE WHEN ee.event_energy_vds_id_j IS NULL
+        CASE WHEN e.event_energy_vds_id_j IS NULL
                AND e.rectangular_event_energy_proxy_j IS NULL
              THEN 'missing_event_energy' END
     ]::text[], NULL)::text[] AS quality_flags,
     CASE
         WHEN e.device_type IS NULL THEN 'metadata_blocked'
         WHEN e.event_type IS NULL THEN 'event_label_blocked'
+        WHEN NOT COALESCE(e.energy_is_comparable, FALSE)
+          THEN 'energy_not_comparable'
         WHEN COALESCE(f.has_condition_post_iv, FALSE) = FALSE
           THEN 'no_condition_post_iv_context'
         ELSE 'ready_for_descriptive_matching'
@@ -1047,9 +1009,7 @@ SELECT
 FROM irrad_event_base e
 LEFT JOIN stress_waveform_file_features f
   ON f.source = 'irradiation'
- AND f.metadata_id = e.metadata_id
-LEFT JOIN irrad_event_energy ee
-  ON ee.event_id = e.event_id;
+ AND f.metadata_id = e.metadata_id;
 
 CREATE INDEX idx_stress_waveform_event_features_source
     ON stress_waveform_event_features(source);
@@ -1320,22 +1280,138 @@ SELECT
 FROM summary;
 
 CREATE MATERIALIZED VIEW stress_test_context_view AS
-WITH event_base AS (
+WITH radiation_rollup AS (
+    SELECT *
+    FROM radiation_stress_dose_summary_view
+    WHERE dose_scope IN ('event_window', 'single_particle')
+),
+event_base AS (
     SELECT
         e.*,
-        COALESCE(
-            e.event_energy_vds_id_j,
-            e.event_energy_proxy_j,
-            e.file_energy_vds_id_j,
-            e.commanded_or_stored_energy_j
-        ) AS stress_energy_j,
         CASE
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+            THEN CASE
+                WHEN COALESCE(e.energy_is_comparable, FALSE)
+                 AND e.energy_level = 'event'
+                 AND e.event_energy_vds_id_j IS NOT NULL
+                THEN e.event_energy_vds_id_j
+            END
+            ELSE COALESCE(
+                e.event_energy_vds_id_j,
+                e.event_energy_proxy_j,
+                e.file_energy_vds_id_j,
+                e.commanded_or_stored_energy_j
+            )
+        END AS electrical_terminal_energy_j,
+        CASE
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND COALESCE(e.energy_is_comparable, FALSE)
+             AND e.energy_level = 'event'
+             AND e.event_energy_vds_id_j IS NOT NULL
+                THEN 'integrated_event_vds_id'
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND e.event_energy_vds_id_j IS NOT NULL
+                THEN 'non_comparable_integrated_event'
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND e.event_energy_proxy_j IS NOT NULL
+                THEN 'proxy_event_rectangular_excluded'
+            WHEN e.event_energy_vds_id_j IS NOT NULL THEN 'integrated_event_vds_id'
+            WHEN e.event_energy_proxy_j IS NOT NULL THEN 'proxy_event_rectangular'
+            WHEN e.file_energy_vds_id_j IS NOT NULL THEN 'integrated_file_vds_id'
+            WHEN e.commanded_or_stored_energy_j IS NOT NULL THEN 'commanded_or_stored'
+            ELSE 'missing'
+        END AS electrical_terminal_energy_basis,
+        CASE
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+            THEN CASE
+                WHEN COALESCE(e.energy_is_comparable, FALSE)
+                 AND e.energy_level = 'event'
+                 AND e.event_energy_vds_id_j IS NOT NULL
+                THEN e.event_energy_vds_id_j
+            END
+            ELSE COALESCE(
+                e.event_energy_vds_id_j,
+                e.event_energy_proxy_j,
+                e.file_energy_vds_id_j,
+                e.commanded_or_stored_energy_j
+            )
+        END AS stress_energy_j,
+        CASE
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND COALESCE(e.energy_is_comparable, FALSE)
+             AND e.energy_level = 'event'
+             AND e.event_energy_vds_id_j IS NOT NULL
+                THEN 'integrated_event_vds_id'
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND e.event_energy_vds_id_j IS NOT NULL
+                THEN 'non_comparable_integrated_event'
+            WHEN e.source = 'irradiation'
+             AND e.event_record_type = 'detected_single_event'
+             AND e.event_energy_proxy_j IS NOT NULL
+                THEN 'proxy_event_rectangular_excluded'
             WHEN e.event_energy_vds_id_j IS NOT NULL THEN 'integrated_event_vds_id'
             WHEN e.event_energy_proxy_j IS NOT NULL THEN 'proxy_event_rectangular'
             WHEN e.file_energy_vds_id_j IS NOT NULL THEN 'integrated_file_vds_id'
             WHEN e.commanded_or_stored_energy_j IS NOT NULL THEN 'commanded_or_stored'
             ELSE 'missing'
         END AS stress_energy_basis,
+        COALESCE(rad_event.dose_scope, rad_single.dose_scope)
+            AS radiation_dose_scope,
+        COALESCE(rad_event.fluence_basis, rad_single.fluence_basis)
+            AS radiation_fluence_basis,
+        COALESCE(rad_event.radiation_energy_basis,
+                 rad_single.radiation_energy_basis)
+            AS radiation_energy_basis,
+        COALESCE(rad_event.radiation_deposited_energy_j,
+                 rad_single.radiation_deposited_energy_j)
+            AS radiation_deposited_energy_j,
+        COALESCE(rad_event.radiation_deposited_energy_electronic_j,
+                 rad_single.radiation_deposited_energy_electronic_j)
+            AS radiation_deposited_energy_electronic_j,
+        COALESCE(rad_event.radiation_deposited_energy_nuclear_j,
+                 rad_single.radiation_deposited_energy_nuclear_j)
+            AS radiation_deposited_energy_nuclear_j,
+        COALESCE(rad_event.radiation_deposited_energy_total_j,
+                 rad_single.radiation_deposited_energy_total_j)
+            AS radiation_deposited_energy_total_j,
+        COALESCE(rad_event.radiation_dose_electronic_gy,
+                 rad_single.radiation_dose_electronic_gy)
+            AS radiation_dose_electronic_gy,
+        COALESCE(rad_event.radiation_dose_nuclear_gy,
+                 rad_single.radiation_dose_nuclear_gy)
+            AS radiation_dose_nuclear_gy,
+        COALESCE(rad_event.radiation_dose_total_gy,
+                 rad_single.radiation_dose_total_gy)
+            AS radiation_dose_total_gy,
+        COALESCE(rad_event.radiation_dose_gy, rad_single.radiation_dose_gy)
+            AS radiation_dose_gy,
+        COALESCE(rad_event.radiation_total_dose_gy,
+                 rad_single.radiation_total_dose_gy)
+            AS radiation_total_dose_gy,
+        COALESCE(rad_event.layer_count, rad_single.layer_count)
+            AS radiation_layer_count,
+        COALESCE(rad_event.calculated_layer_count,
+                 rad_single.calculated_layer_count)
+            AS radiation_calculated_layer_count,
+        COALESCE(rad_event.modeled_mass_kg, rad_single.modeled_mass_kg)
+            AS radiation_modeled_mass_kg,
+        COALESCE(rad_event.min_energy_in_mev, rad_single.min_energy_in_mev)
+            AS radiation_min_energy_in_mev,
+        COALESCE(rad_event.min_energy_out_mev, rad_single.min_energy_out_mev)
+            AS radiation_min_energy_out_mev,
+        COALESCE(rad_event.stopped_in_any_layer,
+                 rad_single.stopped_in_any_layer)
+            AS radiation_stopped_in_any_layer,
+        COALESCE(rad_event.min_range_margin_um,
+                 rad_single.min_range_margin_um)
+            AS radiation_min_range_margin_um,
         CASE
             WHEN e.event_duration_s IS NOT NULL AND e.event_duration_s > 0.0
                 THEN e.event_duration_s
@@ -1343,6 +1419,14 @@ WITH event_base AS (
                 THEN e.sc_duration_us / 1000000.0
         END AS stress_duration_s
     FROM stress_waveform_event_features e
+    LEFT JOIN radiation_rollup rad_event
+      ON rad_event.dose_scope = 'event_window'
+     AND rad_event.event_id IS NOT DISTINCT FROM e.event_id
+     AND rad_event.metadata_id IS NOT DISTINCT FROM e.metadata_id
+    LEFT JOIN radiation_rollup rad_single
+      ON rad_single.dose_scope = 'single_particle'
+     AND rad_single.event_id IS NOT DISTINCT FROM e.event_id
+     AND rad_single.metadata_id IS NOT DISTINCT FROM e.metadata_id
 ),
 rated AS (
     SELECT
@@ -1390,7 +1474,7 @@ scored AS (
     SELECT
         n.*,
         (
-            CASE WHEN n.stress_energy_j IS NOT NULL THEN 1.0 ELSE 0.0 END
+            CASE WHEN n.electrical_terminal_energy_j IS NOT NULL THEN 1.0 ELSE 0.0 END
           + CASE WHEN n.vds_collapse_fraction IS NOT NULL THEN 0.75 ELSE 0.0 END
           + CASE WHEN n.gate_delta_fraction IS NOT NULL THEN 0.50 ELSE 0.0 END
           + CASE WHEN n.has_condition_post_iv THEN 0.75 ELSE 0.0 END
@@ -1434,8 +1518,34 @@ SELECT
     s.time_peak_s,
     s.time_end_s,
     s.stress_duration_s,
+    s.electrical_terminal_energy_j,
+    s.electrical_terminal_energy_basis,
     s.stress_energy_j,
     s.stress_energy_basis,
+    s.radiation_dose_scope,
+    s.radiation_fluence_basis,
+    s.radiation_energy_basis,
+    s.radiation_deposited_energy_j,
+    s.radiation_deposited_energy_electronic_j,
+    s.radiation_deposited_energy_nuclear_j,
+    s.radiation_deposited_energy_total_j,
+    s.radiation_dose_electronic_gy,
+    s.radiation_dose_nuclear_gy,
+    s.radiation_dose_total_gy,
+    s.radiation_dose_gy,
+    s.radiation_total_dose_gy,
+    s.radiation_layer_count,
+    s.radiation_calculated_layer_count,
+    s.radiation_modeled_mass_kg,
+    s.radiation_min_energy_in_mev,
+    s.radiation_min_energy_out_mev,
+    s.radiation_stopped_in_any_layer,
+    s.radiation_min_range_margin_um,
+    s.energy_is_comparable,
+    s.energy_window_basis,
+    s.energy_censored_reason,
+    s.active_window_confidence,
+    s.energy_level,
     s.event_energy_vds_id_j,
     s.event_energy_proxy_j,
     s.file_energy_vds_id_j,
@@ -1530,8 +1640,28 @@ SELECT
         CASE WHEN s.device_type IS NULL THEN 'missing_device_type' END,
         CASE WHEN s.rated_voltage_v IS NULL THEN 'missing_device_voltage_rating' END,
         CASE WHEN s.rated_current_a IS NULL THEN 'missing_device_current_rating' END,
-        CASE WHEN s.stress_energy_j IS NULL THEN 'missing_energy' END,
+        CASE WHEN s.electrical_terminal_energy_j IS NULL THEN 'missing_electrical_terminal_energy' END,
         CASE WHEN s.has_energy_proxy_only THEN 'energy_proxy_only' END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.event_record_type = 'detected_single_event'
+               AND NOT COALESCE(s.energy_is_comparable, FALSE)
+             THEN 'energy_not_comparable' END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.event_record_type = 'detected_single_event'
+               AND COALESCE(s.energy_level, 'unknown') <> 'event'
+             THEN 'irradiation_energy_not_event_level' END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.event_record_type = 'detected_single_event'
+               AND COALESCE(s.energy_censored_reason, 'none') <> 'none'
+             THEN 'energy_censored_' || s.energy_censored_reason END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.event_record_type = 'detected_single_event'
+               AND s.active_window_confidence IS NOT NULL
+               AND s.active_window_confidence < 0.80
+             THEN 'low_active_window_confidence' END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.radiation_deposited_energy_j IS NULL
+             THEN 'missing_radiation_deposition' END,
         CASE WHEN s.vds_collapse_fraction IS NULL THEN 'missing_vds_collapse' END,
         CASE WHEN s.gate_delta_fraction IS NULL THEN 'missing_gate_coupling' END,
         CASE WHEN NOT s.has_condition_post_iv THEN 'missing_condition_post_iv' END,
@@ -1557,17 +1687,21 @@ WITH targets AS (
     SELECT *
     FROM stress_test_context_view
     WHERE source = 'irradiation'
+      AND event_record_type = 'detected_single_event'
       AND device_type IS NOT NULL
-      AND stress_energy_j IS NOT NULL
-      AND stress_energy_j > 0.0
+      AND COALESCE(energy_is_comparable, FALSE)
+      AND energy_level = 'event'
+      AND electrical_terminal_energy_basis = 'integrated_event_vds_id'
+      AND electrical_terminal_energy_j IS NOT NULL
+      AND electrical_terminal_energy_j > 0.0
 ),
 candidates AS (
     SELECT *
     FROM stress_test_context_view
     WHERE source IN ('sc', 'avalanche')
       AND device_type IS NOT NULL
-      AND stress_energy_j IS NOT NULL
-      AND stress_energy_j > 0.0
+      AND electrical_terminal_energy_j IS NOT NULL
+      AND electrical_terminal_energy_j > 0.0
 ),
 pairs AS (
     SELECT
@@ -1587,6 +1721,23 @@ pairs AS (
         t.beam_energy_mev AS target_beam_energy_mev,
         t.let_surface AS target_let_surface,
         t.fluence_at_meas AS target_fluence_at_meas,
+        t.radiation_dose_scope AS target_radiation_dose_scope,
+        t.radiation_fluence_basis AS target_radiation_fluence_basis,
+        t.radiation_energy_basis AS target_radiation_energy_basis,
+        t.radiation_deposited_energy_j AS target_radiation_deposited_energy_j,
+        t.radiation_deposited_energy_electronic_j AS target_radiation_deposited_energy_electronic_j,
+        t.radiation_deposited_energy_nuclear_j AS target_radiation_deposited_energy_nuclear_j,
+        t.radiation_deposited_energy_total_j AS target_radiation_deposited_energy_total_j,
+        t.radiation_dose_electronic_gy AS target_radiation_dose_electronic_gy,
+        t.radiation_dose_nuclear_gy AS target_radiation_dose_nuclear_gy,
+        t.radiation_dose_total_gy AS target_radiation_dose_total_gy,
+        t.radiation_dose_gy AS target_radiation_dose_gy,
+        t.radiation_total_dose_gy AS target_radiation_total_dose_gy,
+        t.radiation_layer_count AS target_radiation_layer_count,
+        t.radiation_min_energy_in_mev AS target_radiation_min_energy_in_mev,
+        t.radiation_min_energy_out_mev AS target_radiation_min_energy_out_mev,
+        t.radiation_stopped_in_any_layer AS target_radiation_stopped_in_any_layer,
+        t.radiation_min_range_margin_um AS target_radiation_min_range_margin_um,
         t.stress_regime AS target_stress_regime,
         t.soa_relation AS target_soa_relation,
         t.test_method_class AS target_test_method_class,
@@ -1594,8 +1745,13 @@ pairs AS (
         t.radiation_mechanism_class AS target_radiation_mechanism_class,
         t.response_reversibility AS target_response_reversibility,
         t.application_likeness AS target_application_likeness,
-        t.stress_energy_j AS target_energy_j,
-        t.stress_energy_basis AS target_energy_basis,
+        t.electrical_terminal_energy_j AS target_energy_j,
+        t.electrical_terminal_energy_basis AS target_energy_basis,
+        t.energy_is_comparable AS target_energy_is_comparable,
+        t.energy_window_basis AS target_energy_window_basis,
+        t.energy_censored_reason AS target_energy_censored_reason,
+        t.active_window_confidence AS target_active_window_confidence,
+        t.energy_level AS target_energy_level,
         t.stress_duration_s AS target_duration_s,
         t.peak_abs_id_a AS target_peak_abs_id_a,
         t.peak_abs_ig_a AS target_peak_abs_ig_a,
@@ -1630,8 +1786,13 @@ pairs AS (
         c.test_timescale_class AS candidate_timescale_class,
         c.response_reversibility AS candidate_response_reversibility,
         c.application_likeness AS candidate_application_likeness,
-        c.stress_energy_j AS candidate_energy_j,
-        c.stress_energy_basis AS candidate_energy_basis,
+        c.electrical_terminal_energy_j AS candidate_energy_j,
+        c.electrical_terminal_energy_basis AS candidate_energy_basis,
+        c.energy_is_comparable AS candidate_energy_is_comparable,
+        c.energy_window_basis AS candidate_energy_window_basis,
+        c.energy_censored_reason AS candidate_energy_censored_reason,
+        c.active_window_confidence AS candidate_active_window_confidence,
+        c.energy_level AS candidate_energy_level,
         c.stress_duration_s AS candidate_duration_s,
         c.peak_abs_id_a AS candidate_peak_abs_id_a,
         c.peak_abs_ig_a AS candidate_peak_abs_ig_a,
@@ -1644,7 +1805,7 @@ pairs AS (
         c.has_condition_post_iv AS candidate_has_condition_post_iv,
         c.post_iv_axis_count AS candidate_post_iv_axis_count,
         c.context_flags AS candidate_context_flags,
-        ABS(LN(c.stress_energy_j) - LN(t.stress_energy_j)) AS log_energy_delta,
+        ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) AS log_energy_delta,
         CASE
             WHEN c.vds_collapse_fraction IS NOT NULL
              AND t.vds_collapse_fraction IS NOT NULL
@@ -1676,7 +1837,7 @@ pairs AS (
         END AS path_penalty
     FROM targets t
     JOIN candidates c ON c.device_type = t.device_type
-    WHERE ABS(LN(c.stress_energy_j) - LN(t.stress_energy_j)) <= 5.0
+    WHERE ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= 5.0
 ),
 distances AS (
     SELECT
@@ -1855,7 +2016,19 @@ classified AS (
             CASE WHEN e.candidate_energy_basis LIKE '%proxy%'
                  THEN 'candidate_energy_proxy_basis' END,
             CASE WHEN e.target_energy_basis LIKE '%proxy%'
-                 THEN 'target_energy_proxy_basis' END
+                 THEN 'target_energy_proxy_basis' END,
+            CASE WHEN NOT COALESCE(e.target_energy_is_comparable, FALSE)
+                 THEN 'target_energy_not_comparable' END,
+            CASE WHEN COALESCE(e.target_energy_level, 'unknown') <> 'event'
+                 THEN 'target_energy_not_event_level' END,
+            CASE WHEN COALESCE(e.target_energy_censored_reason, 'none') <> 'none'
+                 THEN 'target_energy_censored_' || e.target_energy_censored_reason END,
+            CASE WHEN e.target_energy_window_basis IN (
+                    'unknown_no_fluence',
+                    'fluence_reset_artifact',
+                    'fluence_static_or_missing_progression',
+                    'not_analyzed'
+                 ) THEN 'target_energy_window_uncertain' END
         ], NULL)::text[] AS candidate_blockers
     FROM evidence e
 ),
@@ -1926,6 +2099,23 @@ SELECT
     target_beam_energy_mev,
     target_let_surface,
     target_fluence_at_meas,
+    target_radiation_dose_scope,
+    target_radiation_fluence_basis,
+    target_radiation_energy_basis,
+    target_radiation_deposited_energy_j,
+    target_radiation_deposited_energy_electronic_j,
+    target_radiation_deposited_energy_nuclear_j,
+    target_radiation_deposited_energy_total_j,
+    target_radiation_dose_electronic_gy,
+    target_radiation_dose_nuclear_gy,
+    target_radiation_dose_total_gy,
+    target_radiation_dose_gy,
+    target_radiation_total_dose_gy,
+    target_radiation_layer_count,
+    target_radiation_min_energy_in_mev,
+    target_radiation_min_energy_out_mev,
+    target_radiation_stopped_in_any_layer,
+    target_radiation_min_range_margin_um,
     target_stress_regime,
     target_soa_relation,
     target_test_method_class,
@@ -1935,6 +2125,11 @@ SELECT
     target_application_likeness,
     target_energy_j,
     target_energy_basis,
+    target_energy_is_comparable,
+    target_energy_window_basis,
+    target_energy_censored_reason,
+    target_active_window_confidence,
+    target_energy_level,
     target_duration_s,
     target_peak_abs_id_a,
     target_peak_abs_ig_a,
@@ -1972,6 +2167,11 @@ SELECT
     candidate_application_likeness,
     candidate_energy_j,
     candidate_energy_basis,
+    candidate_energy_is_comparable,
+    candidate_energy_window_basis,
+    candidate_energy_censored_reason,
+    candidate_active_window_confidence,
+    candidate_energy_level,
     candidate_duration_s,
     candidate_peak_abs_id_a,
     candidate_peak_abs_ig_a,

@@ -10,6 +10,13 @@
 *.xlsx
 data/
 
+# Local reference library
+docs/relevant_papers/
+
+# Generated analysis outputs
+# Existing tracked files under out/ stay tracked.
+out/
+
 # Python
 __pycache__/
 *.pyc
