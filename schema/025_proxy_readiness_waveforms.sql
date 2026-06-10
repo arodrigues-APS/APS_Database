@@ -1904,25 +1904,37 @@ pairs AS (
 ),
 distances AS (
     SELECT
-        p.*,
-        SQRT(
-            POWER(COALESCE(p.collapse_delta, 0.75) / 0.25, 2)
-          + POWER(COALESCE(p.gate_delta, 0.25) / 0.20, 2)
-          + POWER(p.path_penalty, 2)
-        ) AS phenotype_distance,
-        SQRT(
-            POWER(p.log_energy_delta, 2)
-          + POWER(
+        scored.*,
+        CASE
+            WHEN scored.phenotype_axes_used > 0 THEN
+                SQRT(scored.phenotype_axis_distance_sq
+                     + POWER(scored.path_penalty, 2))
+        END AS phenotype_distance,
+        CASE
+            WHEN scored.phenotype_axes_used > 0 THEN
                 SQRT(
-                    POWER(COALESCE(p.collapse_delta, 0.75) / 0.25, 2)
-                  + POWER(COALESCE(p.gate_delta, 0.25) / 0.20, 2)
-                  + POWER(p.path_penalty, 2)
-                ),
-                2
-            )
-          + 0.01 * POWER(COALESCE(p.duration_log_delta, 1.0), 2)
-        ) AS waveform_distance
-    FROM pairs p
+                    POWER(scored.log_energy_delta, 2)
+                  + scored.phenotype_axis_distance_sq
+                  + POWER(scored.path_penalty, 2)
+                  + 0.01 * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
+                )
+        END AS waveform_distance
+    FROM (
+        SELECT
+            p.*,
+            ((CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
+             + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END))
+                AS phenotype_axes_used,
+            (
+                COALESCE(POWER(p.collapse_delta / 0.25, 2), 0.0)
+              + COALESCE(POWER(p.gate_delta / 0.20, 2), 0.0)
+            ) / NULLIF(
+                (CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
+              + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END),
+                0
+            ) AS phenotype_axis_distance_sq
+        FROM pairs p
+    ) scored
 ),
 evidence AS (
     SELECT
@@ -1930,6 +1942,8 @@ evidence AS (
         dm.comparability_status AS measured_comparability_status,
         dm.comparable_axes AS measured_comparable_axes,
         dm.comparable_axis_labels AS measured_comparable_axis_labels,
+        dm.sign_mismatch_axis_count AS measured_sign_mismatch_axis_count,
+        dm.sign_mismatch_axes AS measured_sign_mismatch_axes,
         dm.nearest_distance AS measured_damage_distance,
         dm.match_rank AS measured_match_rank,
         dm.match_scope AS measured_match_scope,
@@ -1941,6 +1955,8 @@ evidence AS (
         pm.comparability_status AS prediction_comparability_status,
         pm.comparable_axes AS prediction_comparable_axes,
         pm.comparable_axis_labels AS prediction_comparable_axis_labels,
+        pm.sign_mismatch_axis_count AS prediction_sign_mismatch_axis_count,
+        pm.sign_mismatch_axes AS prediction_sign_mismatch_axes,
         pm.nearest_distance AS prediction_damage_distance,
         pm.right_fingerprint_confidence AS prediction_fingerprint_confidence,
         pm.right_median_confidence_score AS prediction_median_confidence_score,
@@ -1957,6 +1973,8 @@ evidence AS (
             m.comparability_status,
             m.comparable_axes,
             m.comparable_axis_labels,
+            m.sign_mismatch_axis_count,
+            m.sign_mismatch_axes,
             m.nearest_distance,
             m.match_rank,
             CASE
@@ -2011,6 +2029,8 @@ evidence AS (
             p.comparability_status,
             p.comparable_axes,
             p.comparable_axis_labels,
+            p.sign_mismatch_axis_count,
+            p.sign_mismatch_axes,
             p.nearest_distance,
             p.right_fingerprint_confidence,
             p.right_median_confidence_score,
@@ -2043,6 +2063,7 @@ classified AS (
             AS combined_screening_distance,
         CASE
             WHEN e.log_energy_delta > 4.0 THEN 'energy_out_of_range'
+            WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap'
             WHEN e.phenotype_distance > 2.50 THEN 'phenotype_mismatch'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
              AND e.measured_match_scope = 'exact_condition'
@@ -2060,6 +2081,7 @@ classified AS (
         END AS candidate_status,
         ARRAY_REMOVE(ARRAY[
             CASE WHEN e.log_energy_delta > 4.0 THEN 'energy_far_out_of_range' END,
+            CASE WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap' END,
             CASE WHEN e.phenotype_distance > 2.50 THEN 'phenotype_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
             CASE WHEN e.gate_delta IS NULL THEN 'missing_gate_overlap' END,
@@ -2106,6 +2128,7 @@ ranked AS (
             WHEN 'waveform_only_candidate' THEN 5
             WHEN 'inspect_manually' THEN 6
             WHEN 'missing_damage_context' THEN 5
+            WHEN 'missing_phenotype_overlap' THEN 6
             WHEN 'phenotype_mismatch' THEN 6
             ELSE 7
         END AS candidate_status_priority,
@@ -2135,6 +2158,7 @@ ranked AS (
                     WHEN 'waveform_only_candidate' THEN 5
                     WHEN 'inspect_manually' THEN 6
                     WHEN 'missing_damage_context' THEN 5
+                    WHEN 'missing_phenotype_overlap' THEN 6
                     WHEN 'phenotype_mismatch' THEN 6
                     ELSE 7
                 END,
@@ -2252,11 +2276,14 @@ SELECT
     gate_delta,
     duration_log_delta,
     path_penalty,
+    phenotype_axes_used,
     phenotype_distance,
     waveform_distance,
     measured_comparability_status,
     measured_comparable_axes,
     measured_comparable_axis_labels,
+    measured_sign_mismatch_axis_count,
+    measured_sign_mismatch_axes,
     measured_damage_distance,
     measured_match_rank,
     measured_match_scope,
@@ -2268,6 +2295,8 @@ SELECT
     prediction_comparability_status,
     prediction_comparable_axes,
     prediction_comparable_axis_labels,
+    prediction_sign_mismatch_axis_count,
+    prediction_sign_mismatch_axes,
     prediction_damage_distance,
     prediction_fingerprint_confidence,
     prediction_median_confidence_score,

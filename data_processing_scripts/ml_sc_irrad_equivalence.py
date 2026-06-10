@@ -476,7 +476,7 @@ pairs_raw AS (
               AND rf.device_type = lf.device_type
     JOIN axis_scales ax ON ax.device_type = lf.device_type
 ),
-pairs AS (
+axis_scored AS (
     SELECT pr.*,
            (has_dvth + has_drds + has_dbv) AS comparable_axes,
            CONCAT_WS(', ',
@@ -484,6 +484,27 @@ pairs AS (
              CASE WHEN has_drds = 1 THEN 'ΔRds(on)' END,
              CASE WHEN has_dbv = 1 THEN 'ΔV(BR)DSS' END
            ) AS comparable_axis_labels,
+           CASE
+             WHEN has_dvth = 1
+              AND ABS(right_dvth) >= (dvth_scale / 10.0)
+              AND ABS(left_dvth) >= (dvth_scale / 10.0)
+              AND SIGN(right_dvth) <> SIGN(left_dvth)
+               THEN 1 ELSE 0
+           END AS dvth_sign_mismatch,
+           CASE
+             WHEN has_drds = 1
+              AND ABS(right_drds) >= (drds_scale / 10.0)
+              AND ABS(left_drds) >= (drds_scale / 10.0)
+              AND SIGN(right_drds) <> SIGN(left_drds)
+               THEN 1 ELSE 0
+           END AS drds_sign_mismatch,
+           CASE
+             WHEN has_dbv = 1
+              AND ABS(right_dbv) >= (dbv_scale / 10.0)
+              AND ABS(left_dbv) >= (dbv_scale / 10.0)
+              AND SIGN(right_dbv) <> SIGN(left_dbv)
+               THEN 1 ELSE 0
+           END AS dbv_sign_mismatch,
            SQRT(
              (
                COALESCE(dvth_weight
@@ -499,64 +520,36 @@ pairs AS (
                + COALESCE(dbv_weight, 0.0),
                0.0
              )
-           ) AS nearest_distance,
-           CASE
-             WHEN (has_dvth + has_drds + has_dbv) >= 3
-                  AND SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 0.75
-               THEN 1
-             WHEN (has_dvth + has_drds + has_dbv) >= 2
-                  AND SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 1.5
-               THEN 2
-             WHEN SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 2.5
-               THEN 3
-             ELSE 4
-           END AS comparability_rank
+           ) AS nearest_distance
     FROM pairs_raw pr
+),
+rank_inputs AS (
+    SELECT s.*,
+           (dvth_sign_mismatch + drds_sign_mismatch + dbv_sign_mismatch)
+             AS sign_mismatch_axis_count,
+           NULLIF(CONCAT_WS(', ',
+             CASE WHEN dvth_sign_mismatch = 1 THEN 'ΔVth' END,
+             CASE WHEN drds_sign_mismatch = 1 THEN 'ΔRds(on)' END,
+             CASE WHEN dbv_sign_mismatch = 1 THEN 'ΔV(BR)DSS' END
+           ), '') AS sign_mismatch_axes,
+           CASE
+             WHEN comparable_axes >= 3 AND nearest_distance <= 0.75 THEN 1
+             WHEN comparable_axes >= 2 AND nearest_distance <= 1.5 THEN 2
+             WHEN nearest_distance <= 2.5 THEN 3
+             ELSE 4
+           END AS base_comparability_rank
+    FROM axis_scored s
+),
+pairs AS (
+    SELECT ri.*,
+           CASE
+             WHEN sign_mismatch_axis_count > 0
+              AND sign_mismatch_axis_count = comparable_axes THEN 4
+             WHEN sign_mismatch_axis_count > 0
+               THEN GREATEST(base_comparability_rank, 3)
+             ELSE base_comparability_rank
+           END AS comparability_rank
+    FROM rank_inputs ri
 ),
 ranked AS (
     SELECT p.*,
@@ -1310,7 +1303,7 @@ pairs_raw AS (
      AND ax.validation_mode_used = rf.validation_mode_used
      AND ax.device_type = rf.device_type
 ),
-pairs AS (
+axis_scored AS (
     SELECT pr.*,
            (has_dvth + has_drds + has_dbv) AS comparable_axes,
            CONCAT_WS(', ',
@@ -1318,6 +1311,27 @@ pairs AS (
              CASE WHEN has_drds = 1 THEN 'ΔRds(on)' END,
              CASE WHEN has_dbv = 1 THEN 'ΔV(BR)DSS' END
            ) AS comparable_axis_labels,
+           CASE
+             WHEN has_dvth = 1
+              AND ABS(right_dvth) >= (dvth_scale / 10.0)
+              AND ABS(left_dvth) >= (dvth_scale / 10.0)
+              AND SIGN(right_dvth) <> SIGN(left_dvth)
+               THEN 1 ELSE 0
+           END AS dvth_sign_mismatch,
+           CASE
+             WHEN has_drds = 1
+              AND ABS(right_drds) >= (drds_scale / 10.0)
+              AND ABS(left_drds) >= (drds_scale / 10.0)
+              AND SIGN(right_drds) <> SIGN(left_drds)
+               THEN 1 ELSE 0
+           END AS drds_sign_mismatch,
+           CASE
+             WHEN has_dbv = 1
+              AND ABS(right_dbv) >= (dbv_scale / 10.0)
+              AND ABS(left_dbv) >= (dbv_scale / 10.0)
+              AND SIGN(right_dbv) <> SIGN(left_dbv)
+               THEN 1 ELSE 0
+           END AS dbv_sign_mismatch,
            SQRT(
              (
                COALESCE(dvth_weight
@@ -1333,64 +1347,36 @@ pairs AS (
                + COALESCE(dbv_weight, 0.0),
                0.0
              )
-           ) AS nearest_distance,
-           CASE
-             WHEN (has_dvth + has_drds + has_dbv) >= 3
-                  AND SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 0.75
-               THEN 1
-             WHEN (has_dvth + has_drds + has_dbv) >= 2
-                  AND SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 1.5
-               THEN 2
-             WHEN SQRT(
-                    (
-                      COALESCE(dvth_weight
-                        * POWER((right_dvth - left_dvth) / dvth_scale, 2), 0.0)
-                      + COALESCE(drds_weight
-                        * POWER((right_drds - left_drds) / drds_scale, 2), 0.0)
-                      + COALESCE(dbv_weight
-                        * POWER((right_dbv - left_dbv) / dbv_scale, 2), 0.0)
-                    )
-                    / NULLIF(
-                      COALESCE(dvth_weight, 0.0)
-                      + COALESCE(drds_weight, 0.0)
-                      + COALESCE(dbv_weight, 0.0),
-                      0.0
-                    )
-                  ) <= 2.5
-               THEN 3
-             ELSE 4
-           END AS comparability_rank
+           ) AS nearest_distance
     FROM pairs_raw pr
+),
+rank_inputs AS (
+    SELECT s.*,
+           (dvth_sign_mismatch + drds_sign_mismatch + dbv_sign_mismatch)
+             AS sign_mismatch_axis_count,
+           NULLIF(CONCAT_WS(', ',
+             CASE WHEN dvth_sign_mismatch = 1 THEN 'ΔVth' END,
+             CASE WHEN drds_sign_mismatch = 1 THEN 'ΔRds(on)' END,
+             CASE WHEN dbv_sign_mismatch = 1 THEN 'ΔV(BR)DSS' END
+           ), '') AS sign_mismatch_axes,
+           CASE
+             WHEN comparable_axes >= 3 AND nearest_distance <= 0.75 THEN 1
+             WHEN comparable_axes >= 2 AND nearest_distance <= 1.5 THEN 2
+             WHEN nearest_distance <= 2.5 THEN 3
+             ELSE 4
+           END AS base_comparability_rank
+    FROM axis_scored s
+),
+pairs AS (
+    SELECT ri.*,
+           CASE
+             WHEN sign_mismatch_axis_count > 0
+              AND sign_mismatch_axis_count = comparable_axes THEN 4
+             WHEN sign_mismatch_axis_count > 0
+               THEN GREATEST(base_comparability_rank, 3)
+             ELSE base_comparability_rank
+           END AS comparability_rank
+    FROM rank_inputs ri
 ),
 ranked AS (
     SELECT p.*,
@@ -1837,6 +1823,11 @@ GROUP BY pp.model_run_id, mr.id, mr.model_version, mr.algorithm, mr.model_status
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "out" / "sc_irrad_equivalence"
 DAMAGE_AXES = ("dvth", "drds", "dbv")
+DAMAGE_AXIS_LABELS = {
+    "dvth": "ΔVth",
+    "drds": "ΔRds(on)",
+    "dbv": "ΔV(BR)DSS",
+}
 SOURCE_PLOT_COLORS = {
     "sc": "#1f77b4",
     "irrad": "#d55e00",
@@ -1920,11 +1911,23 @@ def _axis_reliability(fp, axis):
     return n_term * iqr_term
 
 
+def _base_comparability_rank(distance, n_dims):
+    """Numeric rank before sign-agreement demotion."""
+    if n_dims >= 3 and distance <= 0.75:
+        return 1
+    if n_dims >= 2 and distance <= 1.5:
+        return 2
+    if distance <= 2.5:
+        return 3
+    return 4
+
+
 def _damage_space_distance(ir_fp, sc_fp, axis_scales):
-    """Reliability-weighted distance between one irrad and one SC fingerprint."""
+    """Reliability-weighted distance and sign agreement for one candidate."""
     weighted_sq = 0.0
     total_w = 0.0
     n_dims = 0
+    sign_mismatch_axes = []
     for axis in DAMAGE_AXES:
         iv = ir_fp.get(axis)
         sv = sc_fp.get(axis)
@@ -1933,7 +1936,13 @@ def _damage_space_distance(ir_fp, sc_fp, axis_scales):
         scale = axis_scales.get(axis, 1.0)
         if scale <= 0:
             scale = 1.0
-        delta = (float(iv) - float(sv)) / scale
+        ivf = float(iv)
+        svf = float(sv)
+        deadband = scale / 10.0
+        if abs(ivf) >= deadband and abs(svf) >= deadband:
+            if np.sign(ivf) != np.sign(svf):
+                sign_mismatch_axes.append(DAMAGE_AXIS_LABELS[axis])
+        delta = (ivf - svf) / scale
         w = np.sqrt(_axis_reliability(ir_fp, axis) *
                     _axis_reliability(sc_fp, axis))
         weighted_sq += w * delta * delta
@@ -1941,8 +1950,8 @@ def _damage_space_distance(ir_fp, sc_fp, axis_scales):
         n_dims += 1
 
     if n_dims == 0 or total_w <= 0.0:
-        return None, 0
-    return float(np.sqrt(weighted_sq / total_w)), n_dims
+        return None, 0, []
+    return float(np.sqrt(weighted_sq / total_w)), n_dims, sign_mismatch_axes
 
 
 def compute_matches(fps, k=3):
@@ -1952,7 +1961,8 @@ def compute_matches(fps, k=3):
     Distance is computed over axis intersection (ΔVth/ΔRds/ΔBV) and each
     axis is normalized by a robust per-device_type scale.
 
-    Returns list of {irrad_fp, matches: [(sc_fp, distance, n_dims)]}.
+    Returns list of {irrad_fp, matches: [(sc_fp, distance, n_dims,
+    sign_mismatch_axes, comparability_rank, comparability_status)]}.
     """
     per_dev = {}
     for fp in fps:
@@ -1970,11 +1980,30 @@ def compute_matches(fps, k=3):
         for irfp in ir:
             dists = []
             for scfp in sc:
-                d, n_dims = _damage_space_distance(irfp, scfp, axis_scales)
+                d, n_dims, sign_mismatch_axes = _damage_space_distance(
+                    irfp, scfp, axis_scales
+                )
                 if d is None:
                     continue
-                dists.append((scfp, d, n_dims))
-            dists.sort(key=lambda t: t[1])
+                base_rank = _base_comparability_rank(d, n_dims)
+                mismatch_count = len(sign_mismatch_axes)
+                if mismatch_count > 0 and mismatch_count == n_dims:
+                    rank = 4
+                elif mismatch_count > 0:
+                    rank = max(base_rank, 3)
+                else:
+                    rank = base_rank
+                status = {
+                    1: "strong",
+                    2: "usable",
+                    3: "weak",
+                    4: "inspect manually",
+                }[rank]
+                dists.append((scfp, d, n_dims, sign_mismatch_axes,
+                              rank, status))
+            dists.sort(
+                key=lambda t: (t[4], -t[2], t[1], t[0].get("label") or "")
+            )
             results.append({"irrad": irfp, "matches": dists[:k]})
     return results
 
@@ -1986,6 +2015,8 @@ def write_csv(results, path):
         "irrad_n_samples",
         "nearest_sc_voltage_v", "nearest_sc_duration_us",
         "nearest_distance", "nearest_n_dims",
+        "nearest_comparability_rank", "nearest_comparability_status",
+        "nearest_sign_mismatch_axes",
         "sc_dvth", "sc_drds", "sc_dbv", "sc_n_samples",
         "k3_alternatives",
     ]
@@ -1999,7 +2030,9 @@ def write_csv(results, path):
                 continue
             first = r["matches"][0]
             alts = "; ".join(
-                f"{m[0]['sc_voltage_v']}V/{m[0]['sc_duration_us']}us (d={m[1]:.2f})"
+                f"{m[0]['sc_voltage_v']}V/{m[0]['sc_duration_us']}us "
+                f"({m[5]}, d={m[1]:.2f}, "
+                f"sign_mismatch={', '.join(m[3]) or 'none'})"
                 for m in r["matches"][1:]
             )
             w.writerow({
@@ -2016,6 +2049,9 @@ def write_csv(results, path):
                 "nearest_sc_duration_us":first[0]["sc_duration_us"],
                 "nearest_distance":      round(first[1], 3),
                 "nearest_n_dims":        first[2],
+                "nearest_comparability_rank": first[4],
+                "nearest_comparability_status": first[5],
+                "nearest_sign_mismatch_axes": ", ".join(first[3]),
                 "sc_dvth":          first[0]["dvth"],
                 "sc_drds":          first[0]["drds"],
                 "sc_dbv":           first[0]["dbv"],
@@ -2111,7 +2147,7 @@ def print_cli_prediction(conn, ion, energy, let, device_type):
         sys.exit(1)
 
     first = match["matches"][0]
-    scfp, dist, n_dims = first
+    scfp, dist, n_dims, sign_mismatch_axes, rank, status = first
     print(f"\nClosest irradiation fingerprint in the view:")
     print(f"  {target['label']}  (device_type={target['device_type']})")
     print(f"  ΔVth={target['dvth']}, ΔRds={target['drds']}, ΔBV={target['dbv']}, "
@@ -2119,16 +2155,21 @@ def print_cli_prediction(conn, ion, energy, let, device_type):
     print("\nNearest SC condition (reliability-weighted damage-space distance):")
     print(f"  {scfp['sc_voltage_v']:g} V × {scfp['sc_duration_us']:g} µs")
     print(f"  distance = {dist:.3f}  (over {n_dims} damage axes)")
+    print(f"  comparability = {status} (rank {rank})")
+    if sign_mismatch_axes:
+        print(f"  sign mismatch axes = {', '.join(sign_mismatch_axes)}")
     print(f"  SC ΔVth={scfp['dvth']}, ΔRds={scfp['drds']}, ΔBV={scfp['dbv']}, "
           f"n_samples={scfp['n_samples']}")
-    if dist > 1.5:
-        print("\n  WARNING: distance > 1.5 — this is a weak match. "
+    if status not in {"strong", "usable"}:
+        print("\n  WARNING: this is not a strong/usable match after sign checks. "
               f"Check IQR and consider extending the dataset.")
     if len(match["matches"]) > 1:
         print(f"\nAlternatives (k=3):")
-        for scfp2, d2, nd2 in match["matches"][1:]:
+        for scfp2, d2, nd2, sm2, rank2, status2 in match["matches"][1:]:
+            sign_note = f", sign mismatch={', '.join(sm2)}" if sm2 else ""
             print(f"  {scfp2['sc_voltage_v']:g} V × {scfp2['sc_duration_us']:g} µs  "
-                  f"(distance={d2:.3f}, {nd2} axes)")
+                  f"({status2}, rank={rank2}, distance={d2:.3f}, "
+                  f"{nd2} axes{sign_note})")
 
 
 def main():
