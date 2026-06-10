@@ -14,6 +14,44 @@ DROP MATERIALIZED VIEW IF EXISTS stress_waveform_basis_feature_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_waveform_event_features CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_waveform_file_features CASCADE;
 
+CREATE TABLE IF NOT EXISTS stress_mechanism_compatibility (
+    target_event_type text NOT NULL,
+    candidate_source text NOT NULL,
+    min_candidate_collapse double precision NOT NULL DEFAULT 0.0,
+    mechanism_match_class text NOT NULL,
+    path_penalty double precision NOT NULL,
+    status_ceiling text,
+    rationale text,
+    PRIMARY KEY (target_event_type, candidate_source, min_candidate_collapse)
+);
+
+INSERT INTO stress_mechanism_compatibility (
+    target_event_type,
+    candidate_source,
+    min_candidate_collapse,
+    mechanism_match_class,
+    path_penalty,
+    status_ceiling,
+    rationale
+)
+VALUES
+    ('SEB', 'avalanche', 0.30, 'thermal_runaway_pair', 0.15, NULL,
+     'Avalanche collapse is a first-order electrical analog for SEB thermal runaway.'),
+    ('SEB', 'sc', 0.0, 'thermal_runaway_pair_secondary', 0.25, NULL,
+     'Short-circuit stress shares thermal runaway ingredients but has a less direct topology.'),
+    ('SELCI', 'sc', 0.0, 'gate_oxide_pair_repetitive_only', 0.50, 'analog_questionable',
+     'Short-circuit gate stress is only a repetitive/latent analog for SELCI leakage.'),
+    ('SELCII', 'any', 0.0, 'cumulative_defect_no_electrical_analog', 0.75, 'analog_questionable',
+     'SELCII is treated as cumulative defect leakage without a strong electrical analog.'),
+    ('MIXED', 'any', 0.0, 'cumulative_defect_no_electrical_analog', 0.75, 'analog_questionable',
+     'Mixed leakage/burnout signatures require manual analog review.')
+ON CONFLICT (target_event_type, candidate_source, min_candidate_collapse)
+DO UPDATE SET
+    mechanism_match_class = EXCLUDED.mechanism_match_class,
+    path_penalty = EXCLUDED.path_penalty,
+    status_ceiling = EXCLUDED.status_ceiling,
+    rationale = EXCLUDED.rationale;
+
 CREATE MATERIALIZED VIEW stress_waveform_file_features AS
 WITH file_metadata AS (
     SELECT
@@ -1747,16 +1785,41 @@ CREATE INDEX idx_stress_test_context_figure1_regime_family
 
 CREATE MATERIALIZED VIEW stress_proxy_candidate_view AS
 WITH targets AS (
-    SELECT *
-    FROM stress_test_context_view
-    WHERE source = 'irradiation'
-      AND event_record_type = 'detected_single_event'
-      AND device_type IS NOT NULL
-      AND COALESCE(energy_is_comparable, FALSE)
-      AND energy_level = 'event'
-      AND electrical_terminal_energy_basis = 'integrated_event_vds_id'
-      AND electrical_terminal_energy_j IS NOT NULL
-      AND electrical_terminal_energy_j > 0.0
+    SELECT
+        s.*,
+        'energy_comparable'::text AS target_match_tier,
+        NULL::double precision AS target_energy_floor_j
+    FROM stress_test_context_view s
+    WHERE s.source = 'irradiation'
+      AND s.event_record_type = 'detected_single_event'
+      AND s.device_type IS NOT NULL
+      AND COALESCE(s.energy_is_comparable, FALSE)
+      AND s.energy_level = 'event'
+      AND s.electrical_terminal_energy_basis = 'integrated_event_vds_id'
+      AND s.electrical_terminal_energy_j IS NOT NULL
+      AND s.electrical_terminal_energy_j > 0.0
+
+    UNION ALL
+
+    SELECT
+        s.*,
+        'energy_censored_phenotype_only'::text AS target_match_tier,
+        CASE
+            WHEN COALESCE(s.energy_censored_reason, 'none') = 'failure_cutoff'
+              THEN s.event_energy_vds_id_j
+        END AS target_energy_floor_j
+    FROM stress_test_context_view s
+    WHERE s.source = 'irradiation'
+      AND s.event_record_type = 'detected_single_event'
+      AND s.device_type IS NOT NULL
+      AND COALESCE(s.energy_censored_reason, 'none') <> 'none'
+      AND NOT (
+          COALESCE(s.energy_is_comparable, FALSE)
+          AND s.energy_level = 'event'
+          AND s.electrical_terminal_energy_basis = 'integrated_event_vds_id'
+          AND s.electrical_terminal_energy_j IS NOT NULL
+          AND s.electrical_terminal_energy_j > 0.0
+      )
 ),
 candidates AS (
     SELECT *
@@ -1777,6 +1840,7 @@ pairs AS (
         t.filename AS target_filename,
         t.stress_condition_label AS target_stress_condition_label,
         t.event_type AS target_event_type,
+        t.target_match_tier,
         t.path_type AS target_path_type,
         t.is_catastrophic AS target_is_catastrophic,
         t.irrad_run_id AS target_irrad_run_id,
@@ -1809,6 +1873,7 @@ pairs AS (
         t.response_reversibility AS target_response_reversibility,
         t.application_likeness AS target_application_likeness,
         t.electrical_terminal_energy_j AS target_energy_j,
+        t.target_energy_floor_j,
         t.electrical_terminal_energy_basis AS target_energy_basis,
         t.energy_is_comparable AS target_energy_is_comparable,
         t.energy_window_basis AS target_energy_window_basis,
@@ -1868,7 +1933,10 @@ pairs AS (
         c.has_condition_post_iv AS candidate_has_condition_post_iv,
         c.post_iv_axis_count AS candidate_post_iv_axis_count,
         c.context_flags AS candidate_context_flags,
-        ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) AS log_energy_delta,
+        CASE
+            WHEN t.target_match_tier = 'energy_comparable'
+              THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
+        END AS log_energy_delta,
         CASE
             WHEN c.vds_collapse_fraction IS NOT NULL
              AND t.vds_collapse_fraction IS NOT NULL
@@ -1885,22 +1953,47 @@ pairs AS (
             THEN ABS(LN(c.stress_duration_s) - LN(t.stress_duration_s))
         END AS duration_log_delta,
         CASE
+            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.mechanism_match_class
+            WHEN t.path_type IS NOT NULL
+             AND c.path_type IS NOT NULL
+             AND t.path_type = c.path_type THEN 'same_path_type'
+            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 'path_unknown'
+            ELSE 'mechanism_unknown'
+        END AS mechanism_match_class,
+        CASE
+            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.status_ceiling
+        END AS mechanism_status_ceiling,
+        CASE
+            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.rationale
+            WHEN t.path_type IS NOT NULL
+             AND c.path_type IS NOT NULL
+             AND t.path_type = c.path_type THEN 'Candidate and target share the same extracted conduction path.'
+            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 'Candidate or target path type is missing.'
+            ELSE 'No seeded mechanism compatibility rule matched this pair.'
+        END AS mechanism_rationale,
+        CASE
+            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.path_penalty
             WHEN t.path_type IS NOT NULL
              AND c.path_type IS NOT NULL
              AND t.path_type = c.path_type THEN 0.0
-            WHEN UPPER(COALESCE(t.event_type, '')) = 'SEB'
-             AND c.source = 'avalanche'
-             AND COALESCE(c.vds_collapse_fraction, 0.0) >= 0.30 THEN 0.15
-            WHEN UPPER(COALESCE(t.event_type, '')) = 'SEB'
-             AND c.source = 'sc' THEN 0.25
-            WHEN UPPER(COALESCE(t.event_type, '')) IN ('SELCI', 'SELCII', 'MIXED')
-             AND c.source = 'sc' THEN 0.50
             WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 0.25
             ELSE 0.75
         END AS path_penalty
     FROM targets t
     JOIN candidates c ON c.device_type = t.device_type
-    WHERE ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= 5.0
+    LEFT JOIN LATERAL (
+        SELECT mc.*
+        FROM stress_mechanism_compatibility mc
+        WHERE UPPER(mc.target_event_type) = UPPER(COALESCE(t.event_type, ''))
+          AND (mc.candidate_source = c.source OR mc.candidate_source = 'any')
+          AND COALESCE(c.vds_collapse_fraction, 0.0) >= mc.min_candidate_collapse
+        ORDER BY
+            CASE WHEN mc.candidate_source = c.source THEN 0 ELSE 1 END,
+            mc.min_candidate_collapse DESC
+        LIMIT 1
+    ) mech ON TRUE
+    WHERE t.target_match_tier <> 'energy_comparable'
+       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= 5.0
 ),
 distances AS (
     SELECT
@@ -1913,7 +2006,11 @@ distances AS (
         CASE
             WHEN scored.phenotype_axes_used > 0 THEN
                 SQRT(
-                    POWER(scored.log_energy_delta, 2)
+                    CASE
+                        WHEN scored.target_match_tier = 'energy_comparable'
+                          THEN POWER(scored.log_energy_delta, 2)
+                        ELSE 0.0
+                    END
                   + scored.phenotype_axis_distance_sq
                   + POWER(scored.path_penalty, 2)
                   + 0.01 * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
@@ -2055,14 +2152,20 @@ evidence AS (
         LIMIT 1
     ) pm ON TRUE
 ),
-classified AS (
+classified_raw AS (
     SELECT
         e.*,
+        CASE
+            WHEN e.target_energy_floor_j IS NOT NULL
+             AND e.candidate_energy_j < e.target_energy_floor_j THEN 1
+            ELSE 0
+        END AS candidate_rank_penalty,
         SQRT(POWER(e.waveform_distance, 2)
              + POWER(COALESCE(e.best_damage_distance, 2.50), 2))
             AS combined_screening_distance,
         CASE
-            WHEN e.log_energy_delta > 4.0 THEN 'energy_out_of_range'
+            WHEN e.target_match_tier = 'energy_comparable'
+             AND e.log_energy_delta > 4.0 THEN 'energy_out_of_range'
             WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap'
             WHEN e.phenotype_distance > 2.50 THEN 'phenotype_mismatch'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
@@ -2078,9 +2181,17 @@ classified AS (
             WHEN e.measured_comparability_status IS NULL
              AND e.prediction_comparability_status IS NULL THEN 'missing_damage_context'
             ELSE 'inspect_manually'
-        END AS candidate_status,
+        END AS uncapped_candidate_status,
         ARRAY_REMOVE(ARRAY[
-            CASE WHEN e.log_energy_delta > 4.0 THEN 'energy_far_out_of_range' END,
+            CASE WHEN e.target_match_tier = 'energy_comparable'
+                    AND e.log_energy_delta > 4.0 THEN 'energy_far_out_of_range' END,
+            CASE WHEN e.target_match_tier = 'energy_censored_phenotype_only'
+                 THEN 'target_energy_censored_phenotype_only' END,
+            CASE WHEN e.target_energy_floor_j IS NOT NULL
+                    AND e.candidate_energy_j < e.target_energy_floor_j
+                 THEN 'candidate_energy_below_censored_floor' END,
+            CASE WHEN e.mechanism_status_ceiling IS NOT NULL
+                 THEN 'mechanism_ceiling_' || e.mechanism_status_ceiling END,
             CASE WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap' END,
             CASE WHEN e.phenotype_distance > 2.50 THEN 'phenotype_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
@@ -2117,6 +2228,22 @@ classified AS (
         ], NULL)::text[] AS candidate_blockers
     FROM evidence e
 ),
+classified AS (
+    SELECT
+        cr.*,
+        CASE
+            WHEN cr.mechanism_status_ceiling = 'analog_questionable'
+             AND cr.uncapped_candidate_status IN (
+                'measured_damage_candidate',
+                'predicted_damage_candidate',
+                'device_run_measured_candidate',
+                'weak_measured_candidate',
+                'waveform_only_candidate'
+             ) THEN 'analog_questionable'
+            ELSE cr.uncapped_candidate_status
+        END AS candidate_status
+    FROM classified_raw cr
+),
 ranked AS (
     SELECT
         c.*,
@@ -2125,6 +2252,7 @@ ranked AS (
             WHEN 'predicted_damage_candidate' THEN 2
             WHEN 'device_run_measured_candidate' THEN 3
             WHEN 'weak_measured_candidate' THEN 4
+            WHEN 'analog_questionable' THEN 5
             WHEN 'waveform_only_candidate' THEN 5
             WHEN 'inspect_manually' THEN 6
             WHEN 'missing_damage_context' THEN 5
@@ -2143,6 +2271,8 @@ ranked AS (
                 THEN 'low_device_run_damage_screening_confidence'
             WHEN c.candidate_status = 'weak_measured_candidate'
                 THEN 'low_measured_damage_screening_confidence'
+            WHEN c.candidate_status = 'analog_questionable'
+                THEN 'analog_questionable_screening_confidence'
             WHEN c.candidate_status = 'waveform_only_candidate'
                 THEN 'low_waveform_only_confidence'
             ELSE 'blocked_or_manual_review'
@@ -2155,6 +2285,7 @@ ranked AS (
                     WHEN 'predicted_damage_candidate' THEN 2
                     WHEN 'device_run_measured_candidate' THEN 3
                     WHEN 'weak_measured_candidate' THEN 4
+                    WHEN 'analog_questionable' THEN 5
                     WHEN 'waveform_only_candidate' THEN 5
                     WHEN 'inspect_manually' THEN 6
                     WHEN 'missing_damage_context' THEN 5
@@ -2162,6 +2293,7 @@ ranked AS (
                     WHEN 'phenotype_mismatch' THEN 6
                     ELSE 7
                 END,
+                c.candidate_rank_penalty ASC,
                 c.combined_screening_distance ASC NULLS LAST,
                 c.waveform_distance ASC NULLS LAST,
                 c.candidate_source,
@@ -2179,6 +2311,7 @@ SELECT
     device_type,
     target_device_label,
     target_event_type,
+    target_match_tier,
     target_path_type,
     target_is_catastrophic,
     target_irrad_run_id,
@@ -2211,6 +2344,7 @@ SELECT
     target_response_reversibility,
     target_application_likeness,
     target_energy_j,
+    target_energy_floor_j,
     target_energy_basis,
     target_energy_is_comparable,
     target_energy_window_basis,
@@ -2275,6 +2409,9 @@ SELECT
     collapse_delta,
     gate_delta,
     duration_log_delta,
+    mechanism_match_class,
+    mechanism_status_ceiling,
+    mechanism_rationale,
     path_penalty,
     phenotype_axes_used,
     phenotype_distance,
@@ -2304,6 +2441,8 @@ SELECT
     best_damage_distance,
     damage_evidence_tier,
     combined_screening_distance,
+    candidate_rank_penalty,
+    uncapped_candidate_status,
     candidate_status,
     candidate_status_priority,
     replacement_confidence,
@@ -2329,9 +2468,11 @@ WITH top_candidates AS (
     WHERE candidate_rank = 1
 )
 SELECT
+    target_match_tier,
     candidate_source,
     target_event_type,
     target_path_type,
+    mechanism_match_class,
     candidate_status,
     replacement_confidence,
     COUNT(*) AS top_target_events,
@@ -2352,8 +2493,9 @@ SELECT
     STRING_AGG(DISTINCT device_type, ', ' ORDER BY device_type)
         AS device_types
 FROM top_candidates
-GROUP BY candidate_source, target_event_type, target_path_type,
-         candidate_status, replacement_confidence;
+GROUP BY target_match_tier, candidate_source, target_event_type,
+         target_path_type, mechanism_match_class, candidate_status,
+         replacement_confidence;
 
 CREATE INDEX idx_stress_proxy_candidate_summary_status
     ON stress_proxy_candidate_summary_view(candidate_status);
