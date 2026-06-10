@@ -55,16 +55,27 @@ except ImportError:
 try:
     import h5py
 except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py"])
-    import h5py
+    h5py = None
 
 try:
     from scipy.io import loadmat
 except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "scipy"])
-    from scipy.io import loadmat
+    loadmat = None
+
+
+def ensure_waveform_dependencies():
+    """Import waveform parsers only for full ingest, not --remap-only."""
+    global h5py, loadmat
+    if h5py is None:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py"])
+        import h5py as _h5py
+        h5py = _h5py
+    if loadmat is None:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "scipy"])
+        from scipy.io import loadmat as _loadmat
+        loadmat = _loadmat
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, NAS_ROOT
 from common import (apply_schema, compute_file_hash, load_device_library,
@@ -961,6 +972,73 @@ def value_or_none(arr, idx):
     return None if np.isnan(v) else float(v)
 
 
+def remap_existing_avalanche_rows(conn):
+    """
+    Re-run device_mapping_rules against already-ingested avalanche metadata.
+
+    The normal ingest path computes the device match from the grouped capture
+    paths before it decides a row already exists. For Phase 1 remapping, the
+    persisted csv_path has the same joined paths, so we can update device_type
+    and manufacturer without reopening HDF5/MAT waveform files.
+    """
+    cur = conn.cursor()
+    try:
+        device_library = load_device_library(cur)
+        rules = load_device_mapping_rules(cur, 'avalanche')
+        print(f"Device library entries:   {len(device_library)}")
+        print(f"Mapping rules loaded:     {len(rules)}")
+
+        cur.execute(
+            """
+            SELECT id, csv_path, filename, device_type, manufacturer
+            FROM baselines_metadata
+            WHERE data_source = 'avalanche'
+            ORDER BY id
+            """
+        )
+        rows = cur.fetchall()
+
+        updated = matched = unmatched = unchanged = 0
+        for metadata_id, csv_path, filename, old_device_type, old_manufacturer in rows:
+            match_path = csv_path or filename
+            device_type, manufacturer = match_device(
+                match_path, 'avalanche', rules, device_library
+            )
+            if not device_type:
+                unmatched += 1
+                continue
+
+            matched += 1
+            if old_device_type == device_type and old_manufacturer == manufacturer:
+                unchanged += 1
+                continue
+
+            cur.execute(
+                """
+                UPDATE baselines_metadata
+                SET device_type = %s,
+                    manufacturer = %s
+                WHERE id = %s
+                """,
+                (device_type, manufacturer, metadata_id),
+            )
+            updated += 1
+
+        conn.commit()
+        print("\nRefreshing avalanche view...")
+        cur.execute(AVALANCHE_VIEW_SQL)
+        conn.commit()
+
+        print("\nAvalanche remap summary:")
+        print(f"  Rows scanned:   {len(rows)}")
+        print(f"  Matched:        {matched}")
+        print(f"  Updated:        {updated}")
+        print(f"  Unchanged:      {unchanged}")
+        print(f"  Still unmapped: {unmatched}")
+    finally:
+        cur.close()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -974,6 +1052,8 @@ def main():
                     help="Only process first N grouped captures")
     ap.add_argument("--max-points", type=int, default=5000,
                     help="Maximum sampled points per grouped capture")
+    ap.add_argument("--remap-only", action="store_true",
+                    help="Only re-run device mapping on existing avalanche rows")
     args = ap.parse_args()
 
     t0 = perf_counter()
@@ -986,9 +1066,26 @@ def main():
     print(f"Dry run:    {args.dry_run}")
     print(f"Max points: {args.max_points}")
 
+    if args.remap_only:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+            user=DB_USER, password=DB_PASSWORD,
+        )
+        conn.autocommit = False
+        try:
+            apply_schema(conn)
+            remap_existing_avalanche_rows(conn)
+        finally:
+            conn.close()
+        elapsed = perf_counter() - t0
+        print(f"Elapsed: {elapsed:.1f}s")
+        return
+
     if not os.path.isdir(args.root):
         print(f"ERROR: root not found: {args.root}")
         sys.exit(1)
+
+    ensure_waveform_dependencies()
 
     unsupported_counts = count_unsupported_files(args.root)
     if unsupported_counts:

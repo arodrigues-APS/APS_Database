@@ -6,6 +6,7 @@ be retired in Phase 1.7:
   - _EXPERIMENT_RULES  (ingestion_baselines.py:120-125) -> scope='baselines'
   - DEVICE_DIR_MAP     (ingestion_sc.py:79-106)         -> scope='sc'
   - CHIP_ID_TO_DEVICE  (ingestion_irradiation.py:108-158) -> scope='irradiation'
+  - SELAM thesis/lab-code prefixes (ingestion_avalanche.py) -> scope='avalanche'
 
 Idempotent via UNIQUE (pattern, pattern_type, scope) + ON CONFLICT DO NOTHING.
 Safe to re-run.  Rules whose part_number isn't in device_library are
@@ -193,6 +194,40 @@ IRRADIATION_GENERIC_DIODE_RULES = [
 ]
 
 
+# -- Avalanche scope ---------------------------------------------------------
+# Selam avalanche files use lab sample-code prefixes rather than commercial
+# part numbers. The thesis identifies the devices tested in the relevant
+# chapters, while the local datasheet seeds preserve the prefix vocabulary:
+#
+#   * Thesis ch. 5 / Fig. 5.4: C2M0080120D and SCT2080KE planar MOSFETs,
+#     SCT3080KL trench MOSFET.
+#   * Thesis ch. 6 / Table 6.1: C2M0080120D, C3M0075120K 4-pin planar,
+#     SCT3080KL 3-pin trench.
+#   * datasheetrdson.py / datasheetgm.py: C2M->C2M0080120D,
+#     C3M->C3M0075120K, RP->SCT2080KE, RT->SCT3080KL.
+#
+# Only code-bearing Selam paths are mapped. Generic series1/2/3 .mat
+# captures and IFX I* captures remain unmapped until there is explicit
+# sample-to-part evidence for them.
+
+SELAM_AVALANCHE_REFERENCE = (
+    "ingestion_avalanche.py::SELAM_THESIS_PREFIX_RULES; "
+    "SELAM thesis ch.5 Fig.5.4/ch.6 Table 6.1; "
+    "data_processing_scripts/datasheetrdson.py and datasheetgm.py prefix seeds"
+)
+
+AVALANCHE_RULES = [
+    (r"SELAM.*[/\\]C4P\d", "regex", "C3M0075120K", 250,
+     "Selam 4-pin sample code C4P* -> Wolfspeed C3M0075120K"),
+    (r"SELAM.*[/\\]C(?!4P)\d", "regex", "C2M0080120D", 200,
+     "Selam 3-pin Wolfspeed sample code C* -> C2M0080120D"),
+    (r"SELAM.*[/\\]RP\d", "regex", "SCT2080KE", 200,
+     "Selam Rohm planar sample code RP* -> SCT2080KE"),
+    (r"SELAM.*[/\\]RT\d", "regex", "SCT3080KL", 200,
+     "Selam Rohm trench sample code RT* -> SCT3080KL"),
+]
+
+
 def _load_known_parts(cur):
     cur.execute("SELECT part_number FROM device_library")
     return {row[0] for row in cur.fetchall()}
@@ -238,7 +273,7 @@ def main():
         if deleted:
             print(f"Cleared {deleted} seed-managed rules prior to re-insert")
 
-        inserted = {"baselines": 0, "sc": 0, "irradiation": 0}
+        inserted = {"baselines": 0, "sc": 0, "irradiation": 0, "avalanche": 0}
         skipped = []
 
         # Baselines
@@ -276,6 +311,13 @@ def main():
                 "bidirectional substring test.  Observed result was "
                 "Cree-Diode-1200V; locked in here for determinism.",
                 known_parts, skipped)
+
+        # Avalanche
+        for pattern, pattern_type, part_number, priority, notes in AVALANCHE_RULES:
+            inserted["avalanche"] += _insert(
+                cur, pattern, pattern_type, "avalanche", priority, part_number,
+                SELAM_AVALANCHE_REFERENCE,
+                notes, known_parts, skipped)
 
         conn.commit()
 

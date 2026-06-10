@@ -82,6 +82,8 @@ DEVICES = [
     # ── Wolfspeed packaged TO-247 (Gen 3) ────────────────────────────────
     ("C3M0075120D", "MOSFET", "Wolfspeed",
      "1200", "75", None, "TO-247", None),
+    ("C3M0075120K", "MOSFET", "Wolfspeed",
+     "1200", "75", None, "TO-247-4", "4-pin Kelvin package"),
     ("C3M0065090D", "MOSFET", "Wolfspeed",
      "900", "65", None, "TO-247", None),
 
@@ -105,6 +107,8 @@ DEVICES = [
     ("SCT3030AL", "MOSFET", "Rohm",
      "1200", "30", None, "TO-247", None),
     ("SCT2080KE", "MOSFET", "Rohm",
+     "1200", "80", None, "TO-247", "Planar SiC MOSFET"),
+    ("SCT3080KL", "MOSFET", "Rohm",
      "1200", "80", None, "TO-247", "Trench SiC MOSFET"),
     ("SCT3080AL", "MOSFET", "Rohm",
      "1200", "80", None, "TO-247", "Planar SiC MOSFET"),
@@ -169,6 +173,14 @@ def main():
         else:
             skipped += 1
 
+    cur.execute("""
+        UPDATE device_library
+        SET notes = 'Planar SiC MOSFET'
+        WHERE part_number = 'SCT2080KE'
+          AND notes = 'Trench SiC MOSFET'
+    """)
+    corrected = cur.rowcount
+
     conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM device_library")
@@ -176,6 +188,7 @@ def main():
 
     print(f"\n  Inserted: {inserted}")
     print(f"  Skipped (already exist): {skipped}")
+    print(f"  Corrected metadata: {corrected}")
     print(f"  Total devices in table: {total}")
 
     print("\nTo manage devices, use Superset SQL Lab:")
