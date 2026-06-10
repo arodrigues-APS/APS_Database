@@ -14,6 +14,10 @@ import uuid
 import requests
 
 from db_config import SUPERSET_URL, SUPERSET_USER, SUPERSET_PASS
+from dashboard_png_export import (
+    export_chart_png,
+    register_dataset_for_png_export,
+)
 
 
 # ── Authentication ──────────────────────────────────────────────────────────
@@ -116,6 +120,7 @@ def find_or_create_dataset(session, db_id, table_name, schema="public"):
     for ds in resp.json()["result"]:
         if ds.get("table_name") == table_name:
             print(f"  Dataset '{table_name}' exists (id={ds['id']})")
+            register_dataset_for_png_export(ds["id"], table_name, schema)
             return ds["id"]
 
     resp = session.post(f"{url}/api/v1/dataset/", json={
@@ -124,6 +129,7 @@ def find_or_create_dataset(session, db_id, table_name, schema="public"):
     if resp.ok:
         ds_id = resp.json()["id"]
         print(f"  Created dataset '{table_name}' (id={ds_id})")
+        register_dataset_for_png_export(ds_id, table_name, schema)
         return ds_id
     print(f"  ERROR creating dataset '{table_name}': "
           f"{resp.status_code} {resp.text[:200]}")
@@ -170,6 +176,7 @@ def create_chart(session, name, datasource_id, viz_type, params):
                 uid = detail.get("result", {}).get("uuid", str(uuid.uuid4()))
                 status = "updated" if update_resp.ok else "exists (update failed)"
                 print(f"  Chart '{name}' {status} (id={chart['id']})")
+                export_chart_png(name, datasource_id, viz_type, params)
                 return chart["id"], uid
 
     resp = session.post(f"{url}/api/v1/chart/", json={
@@ -184,6 +191,7 @@ def create_chart(session, name, datasource_id, viz_type, params):
         detail = session.get(f"{url}/api/v1/chart/{chart_id}").json()
         real_uuid = detail.get("result", {}).get("uuid", str(uuid.uuid4()))
         print(f"  Created chart '{name}' (id={chart_id})")
+        export_chart_png(name, datasource_id, viz_type, params)
         return chart_id, real_uuid
     print(f"  ERROR creating chart '{name}': "
           f"{resp.status_code} {resp.text[:300]}")

@@ -758,6 +758,24 @@ SELECT
     f.peak_abs_id_a,
     f.peak_abs_ig_a,
     f.peak_abs_power_w,
+    CASE
+        WHEN f.source = 'sc' THEN COALESCE(
+            CASE
+                WHEN f.max_vds_v IS NOT NULL OR f.min_vds_v IS NOT NULL
+                THEN GREATEST(
+                    COALESCE(ABS(f.max_vds_v), 0.0),
+                    COALESCE(ABS(f.min_vds_v), 0.0)
+                )
+            END,
+            ABS(f.sc_voltage_v)
+        )
+        WHEN f.source = 'avalanche'
+         AND (f.max_vds_v IS NOT NULL OR f.min_vds_v IS NOT NULL)
+        THEN GREATEST(
+            COALESCE(ABS(f.max_vds_v), 0.0),
+            COALESCE(ABS(f.min_vds_v), 0.0)
+        )
+    END AS stress_observed_abs_vds_v,
     f.initial_vds_v AS vds_before_v,
     f.final_vds_v AS vds_after_v,
     f.final_vds_v - f.initial_vds_v AS vds_delta_v,
@@ -848,6 +866,13 @@ SELECT
          AND e.delta_id_abs_a IS NOT NULL
         THEN ABS(e.vds_before_v) * e.delta_id_abs_a
     END AS peak_abs_power_w,
+    CASE
+        WHEN e.vds_before_v IS NOT NULL OR e.vds_after_v IS NOT NULL
+        THEN GREATEST(
+            COALESCE(ABS(e.vds_before_v), 0.0),
+            COALESCE(ABS(e.vds_after_v), 0.0)
+        )
+    END AS stress_observed_abs_vds_v,
     e.vds_before_v,
     e.vds_after_v,
     e.vds_delta_v,
@@ -1284,6 +1309,13 @@ WITH radiation_rollup AS (
     SELECT *
     FROM radiation_stress_dose_summary_view
     WHERE dose_scope IN ('event_window', 'single_particle')
+      AND (
+            dose_scope <> 'event_window'
+         OR radiation_deposited_energy_j IS NOT NULL
+         OR radiation_dose_gy IS NOT NULL
+         OR radiation_deposited_energy_total_j IS NOT NULL
+         OR radiation_dose_total_gy IS NOT NULL
+      )
 ),
 event_base AS (
     SELECT
@@ -1448,26 +1480,43 @@ rated AS (
 normalized AS (
     SELECT
         r.*,
-        CASE
-            WHEN r.vds_before_v IS NOT NULL OR r.vds_after_v IS NOT NULL THEN
-                GREATEST(
-                    COALESCE(ABS(r.vds_before_v), 0.0),
-                    COALESCE(ABS(r.vds_after_v), 0.0)
-                )
-        END AS observed_abs_vds_v,
+        COALESCE(
+            r.stress_observed_abs_vds_v,
+            CASE
+                WHEN r.vds_before_v IS NOT NULL OR r.vds_after_v IS NOT NULL THEN
+                    GREATEST(
+                        COALESCE(ABS(r.vds_before_v), 0.0),
+                        COALESCE(ABS(r.vds_after_v), 0.0)
+                    )
+            END
+        ) AS observed_abs_vds_v,
         CASE
             WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
-             AND (r.vds_before_v IS NOT NULL OR r.vds_after_v IS NOT NULL)
-            THEN GREATEST(
-                    COALESCE(ABS(r.vds_before_v), 0.0),
-                    COALESCE(ABS(r.vds_after_v), 0.0)
+             AND (
+                    r.stress_observed_abs_vds_v IS NOT NULL
+                 OR r.vds_before_v IS NOT NULL
+                 OR r.vds_after_v IS NOT NULL
+             )
+            THEN COALESCE(
+                    r.stress_observed_abs_vds_v,
+                    GREATEST(
+                        COALESCE(ABS(r.vds_before_v), 0.0),
+                        COALESCE(ABS(r.vds_after_v), 0.0)
+                    )
                  ) / r.rated_voltage_v
         END AS normalized_vds,
         CASE
             WHEN r.rated_current_a IS NOT NULL AND r.rated_current_a > 0.0
              AND r.peak_abs_id_a IS NOT NULL
             THEN r.peak_abs_id_a / r.rated_current_a
-        END AS normalized_current
+        END AS normalized_current,
+        CASE
+            WHEN r.stress_energy_j IS NOT NULL
+             AND r.stress_energy_j > 0.0
+             AND r.stress_duration_s IS NOT NULL
+             AND r.stress_duration_s > 0.0
+            THEN r.stress_energy_j / r.stress_duration_s
+        END AS average_terminal_power_w
     FROM rated r
 ),
 scored AS (
@@ -1522,6 +1571,7 @@ SELECT
     s.electrical_terminal_energy_basis,
     s.stress_energy_j,
     s.stress_energy_basis,
+    s.average_terminal_power_w,
     s.radiation_dose_scope,
     s.radiation_fluence_basis,
     s.radiation_energy_basis,
@@ -1590,6 +1640,17 @@ SELECT
         WHEN s.source = 'irradiation' THEN 'radiation_response_unspecified'
         ELSE 'unknown'
     END AS stress_regime,
+    'Figure 1: Stress Landscape'::text AS figure1_panel_label,
+    CASE
+        WHEN s.source IN ('sc', 'avalanche') THEN 'robustness'
+        WHEN s.source = 'irradiation' AND UPPER(COALESCE(s.event_type, '')) = 'SEB'
+            THEN 'robustness'
+        WHEN s.source = 'irradiation'
+         AND UPPER(COALESCE(s.event_type, '')) IN ('SELCI', 'SELCII', 'MIXED')
+            THEN 'reliability'
+        WHEN s.source = 'irradiation' THEN 'radiation'
+        ELSE 'unknown'
+    END AS figure1_regime_family,
     CASE
         WHEN s.source IN ('sc', 'avalanche') THEN 'outside_datasheet_soa'
         WHEN s.source = 'irradiation' AND UPPER(COALESCE(s.event_type, '')) = 'SEB'
@@ -1681,6 +1742,8 @@ CREATE INDEX idx_stress_test_context_record
     ON stress_test_context_view(stress_record_key);
 CREATE INDEX idx_stress_test_context_regime
     ON stress_test_context_view(stress_regime);
+CREATE INDEX idx_stress_test_context_figure1_regime_family
+    ON stress_test_context_view(figure1_regime_family);
 
 CREATE MATERIALIZED VIEW stress_proxy_candidate_view AS
 WITH targets AS (

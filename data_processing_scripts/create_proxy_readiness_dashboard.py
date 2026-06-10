@@ -97,6 +97,23 @@ def table_params(columns, row_limit=1000, order_by=None, filters=None) -> dict:
     }
 
 
+def big_number_params(label: str, sql_expression: str, subheader: str,
+                      number_format: str = "SMART_NUMBER") -> dict:
+    return {
+        "metric": metric(label, sql_expression),
+        "adhoc_filters": [],
+        "time_range": "No filter",
+        "header_font_size": 0.42,
+        "subheader_font_size": 0.16,
+        "y_axis_format": number_format,
+        "time_format": "smart_date",
+        "subheader": subheader,
+        "show_trend_line": False,
+        "start_y_axis_at_zero": True,
+        "conditional_formatting": [],
+    }
+
+
 def metric(label: str, sql_expression: str) -> dict:
     return {
         "expressionType": "SQL",
@@ -106,8 +123,9 @@ def metric(label: str, sql_expression: str) -> dict:
 
 
 def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
-                   groupby=None, filters=None, show_legend=False) -> dict:
-    return {
+                   groupby=None, filters=None, show_legend=False,
+                   log_x=False, log_y=False) -> dict:
+    params = {
         "x_axis": x_col,
         "time_grain_sqla": None,
         "x_axis_sort_asc": True,
@@ -138,10 +156,21 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
         "zoomable": True,
         "label_colors": CANDIDATE_COLORS,
     }
+    if log_x and log_y:
+        params["logAxis"] = "both"
+        params["x_axis_bounds"] = [1e-18, None]
+        params["y_axis_bounds"] = [1e-18, None]
+    elif log_x:
+        params["logAxis"] = "x"
+        params["x_axis_bounds"] = [1e-18, None]
+    elif log_y:
+        params["logAxis"] = "y"
+        params["y_axis_bounds"] = [1e-12, None]
+    return params
 
 
 def build_dashboard_layout(charts):
-    """Build a simple full-width dashboard layout."""
+    """Build a simple dashboard layout, packing narrow KPI cards into rows."""
     layout = {
         "DASHBOARD_VERSION_KEY": "v2",
         "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
@@ -158,32 +187,57 @@ def build_dashboard_layout(charts):
         },
     }
     row_children = []
-    for i, (cid, cuuid, cname, width, height) in enumerate(charts):
-        if cid is None:
-            continue
-        row_id = f"ROW-proxy-{i}"
-        chart_key = f"CHART-proxy-{i}"
+
+    def flush_row(row_index, row_items):
+        row_id = f"ROW-proxy-{row_index}"
         layout[row_id] = {
             "type": "ROW",
             "id": row_id,
-            "children": [chart_key],
+            "children": [],
             "parents": ["ROOT_ID", "GRID_ID"],
             "meta": {"background": "BACKGROUND_TRANSPARENT"},
         }
-        layout[chart_key] = {
-            "type": "CHART",
-            "id": chart_key,
-            "children": [],
-            "parents": ["ROOT_ID", "GRID_ID", row_id],
-            "meta": {
-                "chartId": cid,
-                "width": width,
-                "height": height,
-                "sliceName": cname,
-                "uuid": cuuid,
-            },
-        }
+        for chart_index, cid, cuuid, cname, width, height in row_items:
+            chart_key = f"CHART-proxy-{chart_index}"
+            layout[row_id]["children"].append(chart_key)
+            layout[chart_key] = {
+                "type": "CHART",
+                "id": chart_key,
+                "children": [],
+                "parents": ["ROOT_ID", "GRID_ID", row_id],
+                "meta": {
+                    "chartId": cid,
+                    "width": width,
+                    "height": height,
+                    "sliceName": cname,
+                    "uuid": cuuid,
+                },
+            }
         row_children.append(row_id)
+
+    current_row = []
+    current_width = 0
+    row_index = 0
+    for chart_index, (cid, cuuid, cname, width, height) in enumerate(charts):
+        if cid is None:
+            continue
+        width = max(1, min(int(width), 12))
+        if current_row and current_width + width > 12:
+            flush_row(row_index, current_row)
+            row_index += 1
+            current_row = []
+            current_width = 0
+        current_row.append((chart_index, cid, cuuid, cname, width, height))
+        current_width += width
+        if current_width >= 12:
+            flush_row(row_index, current_row)
+            row_index += 1
+            current_row = []
+            current_width = 0
+
+    if current_row:
+        flush_row(row_index, current_row)
+
     layout["GRID_ID"]["children"] = row_children
     return layout
 
@@ -480,6 +534,8 @@ def build_chart_defs(dataset_ids):
         "event_type",
         "path_type",
         "stress_regime",
+        "figure1_panel_label",
+        "figure1_regime_family",
         "soa_relation",
         "test_method_class",
         "test_timescale_class",
@@ -490,6 +546,8 @@ def build_chart_defs(dataset_ids):
         "electrical_terminal_energy_basis",
         "stress_energy_j",
         "stress_energy_basis",
+        "average_terminal_power_w",
+        "peak_abs_power_w",
         "radiation_dose_scope",
         "radiation_fluence_basis",
         "radiation_energy_basis",
@@ -549,24 +607,72 @@ def build_chart_defs(dataset_ids):
 
     return [
         (
-            "Proxy Readiness - Gate Zero Status",
+            "Proxy Readiness - Gate Zero Pass KPI",
             dataset_ids["gate_zero"],
-            "table",
-            table_params(gate_cols, row_limit=10),
-            12,
-            26,
+            "big_number_total",
+            big_number_params(
+                "Gate-Zero Pass",
+                "MAX(CASE WHEN gate_zero_pass THEN 1 ELSE 0 END)",
+                "1 means at least three candidate device families pass coverage",
+                number_format=",d",
+            ),
+            3,
+            20,
         ),
         (
-            "Proxy Readiness - Device Coverage",
+            "Proxy Readiness - Gate Zero Candidate Families KPI",
+            dataset_ids["gate_zero"],
+            "big_number_total",
+            big_number_params(
+                "Candidate Families",
+                "MAX(candidate_device_families)",
+                "Device families with proxy and irradiation waveform-plus-post-IV overlap",
+                number_format=",d",
+            ),
+            3,
+            20,
+        ),
+        (
+            "Proxy Readiness - Gate Zero Electrical Proxy Post-IV KPI",
+            dataset_ids["gate_zero"],
+            "big_number_total",
+            big_number_params(
+                "Electrical Proxy + Post-IV",
+                "MAX(device_families_with_electrical_proxy_post_iv_overlap)",
+                "Families where SC or UID/UIS waveforms overlap post-IV damage",
+                number_format=",d",
+            ),
+            3,
+            20,
+        ),
+        (
+            "Proxy Readiness - Gate Zero Irradiation Post-IV KPI",
+            dataset_ids["gate_zero"],
+            "big_number_total",
+            big_number_params(
+                "Irradiation + Post-IV",
+                "MAX(device_families_with_irradiation_post_iv_overlap)",
+                "Families where irradiation waveform/event coverage overlaps post-IV damage",
+                number_format=",d",
+            ),
+            3,
+            20,
+        ),
+        (
+            "Proxy Readiness - Device Coverage / Blocker Matrix",
             dataset_ids["readiness"],
             "table",
             table_params(
                 readiness_cols,
                 row_limit=200,
-                order_by=[["gate_zero_candidate", False], ["device_type_label", True]],
+                order_by=[
+                    ["gate_zero_candidate", False],
+                    ["proxy_readiness_status", True],
+                    ["device_type_label", True],
+                ],
             ),
             12,
-            42,
+            46,
         ),
         (
             "Proxy Readiness - Candidate Summary",
@@ -578,7 +684,7 @@ def build_chart_defs(dataset_ids):
                 order_by=[["top_target_events", False]],
             ),
             12,
-            42,
+            44,
         ),
         (
             "Proxy Readiness - Best Proxy Candidates",
@@ -594,7 +700,7 @@ def build_chart_defs(dataset_ids):
                 filters=[top_rank_filter],
             ),
             12,
-            70,
+            76,
         ),
         (
             "Proxy Readiness - Candidate Evidence Detail",
@@ -610,58 +716,33 @@ def build_chart_defs(dataset_ids):
                 filters=[top_ten_filter],
             ),
             12,
-            60,
+            70,
         ),
         (
-            "Proxy Readiness - Irradiation Events: Fluence vs Electrical Event Energy",
-            dataset_ids["context"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "fluence_at_meas",
-                "electrical_terminal_energy_j",
-                "Cumulative irradiation fluence at file (cm^-2)",
-                "Measured electrical event energy (J)",
-                groupby=["event_type"],
-                filters=[
-                    sql_filter("source = 'irradiation'"),
-                    sql_filter("event_record_type = 'detected_single_event'"),
-                ],
-                show_legend=True,
-            ),
-            12,
-            52,
-        ),
-        (
-            "Proxy Readiness - Candidate Pairs: Target vs Best Proxy Energy",
+            "Proxy Readiness - Candidate Pairs: Target vs Best Proxy Terminal Energy",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
                 "target_energy_j",
                 "candidate_energy_j",
-                "Target irradiation electrical event energy (J)",
-                "Selected proxy electrical stress energy (J)",
-                groupby=["candidate_source"],
-                filters=[top_rank_filter],
+                "Target irradiation terminal electrical energy (J)",
+                "Selected proxy terminal electrical energy (J)",
+                groupby=[
+                    "candidate_source",
+                    "candidate_status",
+                    "damage_evidence_tier",
+                ],
+                filters=[
+                    top_rank_filter,
+                    sql_filter("target_energy_j > 0.0"),
+                    sql_filter("candidate_energy_j > 0.0"),
+                ],
                 show_legend=True,
+                log_x=True,
+                log_y=True,
             ),
             12,
-            52,
-        ),
-        (
-            "Proxy Readiness - Candidate Pairs: Fluence vs Best Match Distance",
-            dataset_ids["candidates"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "target_fluence_at_meas",
-                "combined_screening_distance",
-                "Target cumulative irradiation fluence at file (cm^-2)",
-                "Best proxy screening distance",
-                groupby=["candidate_source"],
-                filters=[top_rank_filter],
-                show_legend=True,
-            ),
-            12,
-            52,
+            68,
         ),
         (
             "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Phenotype Mismatch",
@@ -672,12 +753,16 @@ def build_chart_defs(dataset_ids):
                 "phenotype_distance",
                 "|log(selected proxy energy / target irradiation energy)|",
                 "Phenotype mismatch distance",
-                groupby=["candidate_source"],
+                groupby=[
+                    "candidate_source",
+                    "candidate_status",
+                    "damage_evidence_tier",
+                ],
                 filters=[top_rank_filter],
                 show_legend=True,
             ),
             12,
-            52,
+            68,
         ),
         (
             "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance",
@@ -688,12 +773,109 @@ def build_chart_defs(dataset_ids):
                 "best_damage_distance",
                 "Best proxy waveform distance",
                 "Best damage distance",
-                groupby=["candidate_source"],
+                groupby=[
+                    "candidate_source",
+                    "candidate_status",
+                    "damage_evidence_tier",
+                ],
                 filters=[top_rank_filter],
                 show_legend=True,
             ),
             12,
-            52,
+            68,
+        ),
+        (
+            "Proxy Readiness - Normalized Observed V/I Stress Scatter by Test Type",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "normalized_current",
+                "Observed |VDS| / device voltage rating",
+                "Measured |ID| / current rating (SC/avalanche peak; irradiation event)",
+                groupby=["source"],
+                show_legend=True,
+            ),
+            12,
+            48,
+        ),
+        (
+            "Proxy Readiness - Normalized Blocking Bias vs Terminal Electrical Energy by Test Type",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "stress_energy_j",
+                "Observed |VDS| / device voltage rating",
+                "Terminal electrical energy dissipated (J; VDS*ID event/window integration)",
+                groupby=["source"],
+                filters=[sql_filter("stress_energy_j > 0.0")],
+                show_legend=True,
+                log_y=True,
+            ),
+            12,
+            48,
+        ),
+        (
+            "Proxy Readiness - Normalized Blocking Bias vs Average Terminal Power by Test Type",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "average_terminal_power_w",
+                "Observed |VDS| / device voltage rating",
+                "Average terminal power over energy window (W)",
+                groupby=["source"],
+                filters=[sql_filter("average_terminal_power_w > 0.0")],
+                show_legend=True,
+                log_y=True,
+            ),
+            12,
+            48,
+        ),
+        (
+            "Proxy Readiness - Irradiation Radiation Deposited Energy vs Blocking Bias",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "radiation_deposited_energy_j",
+                "Observed |VDS| / device voltage rating",
+                "Radiation deposited energy (J; electronic component)",
+                groupby=["event_type"],
+                filters=[
+                    sql_filter("source = 'irradiation'"),
+                    sql_filter("event_record_type = 'detected_single_event'"),
+                    sql_filter("radiation_deposited_energy_j > 0.0"),
+                ],
+                show_legend=True,
+                log_y=True,
+            ),
+            12,
+            44,
+        ),
+        (
+            "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "radiation_deposited_energy_j",
+                "electrical_terminal_energy_j",
+                "Radiation deposited energy (J; electronic component)",
+                "Terminal electrical energy dissipated (J)",
+                groupby=["event_type"],
+                filters=[
+                    sql_filter("source = 'irradiation'"),
+                    sql_filter("event_record_type = 'detected_single_event'"),
+                    sql_filter("radiation_deposited_energy_j > 0.0"),
+                    sql_filter("electrical_terminal_energy_j > 0.0"),
+                ],
+                show_legend=True,
+                log_x=True,
+                log_y=True,
+            ),
+            12,
+            44,
         ),
         (
             "Proxy Readiness - Stress Test Context",
@@ -705,7 +887,7 @@ def build_chart_defs(dataset_ids):
                 order_by=[["source", True], ["device_type", True]],
             ),
             12,
-            64,
+            58,
         ),
         (
             "Proxy Readiness - Event Feature Coverage",
@@ -717,7 +899,7 @@ def build_chart_defs(dataset_ids):
                 order_by=[["source", True], ["device_type", True]],
             ),
             12,
-            54,
+            48,
         ),
     ]
 
@@ -745,16 +927,19 @@ def create_dashboard() -> int | None:
     candidate_chart_names = {
         "Proxy Readiness - Best Proxy Candidates",
         "Proxy Readiness - Candidate Evidence Detail",
-        "Proxy Readiness - Candidate Pairs: Target vs Best Proxy Energy",
-        "Proxy Readiness - Candidate Pairs: Fluence vs Best Match Distance",
+        "Proxy Readiness - Candidate Pairs: Target vs Best Proxy Terminal Energy",
         "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Phenotype Mismatch",
         "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance",
     }
     context_chart_names = {
         "Proxy Readiness - Stress Test Context",
-        "Proxy Readiness - Irradiation Events: Fluence vs Electrical Event Energy",
+        "Proxy Readiness - Normalized Observed V/I Stress Scatter by Test Type",
+        "Proxy Readiness - Normalized Blocking Bias vs Terminal Electrical Energy by Test Type",
+        "Proxy Readiness - Normalized Blocking Bias vs Average Terminal Power by Test Type",
+        "Proxy Readiness - Irradiation Radiation Deposited Energy vs Blocking Bias",
+        "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
     }
-    readiness_chart_names = {"Proxy Readiness - Device Coverage"}
+    readiness_chart_names = {"Proxy Readiness - Device Coverage / Blocker Matrix"}
     chart_groups = {
         "candidate": [chart_id_by_name[n] for n in candidate_chart_names if n in chart_id_by_name],
         "context": [chart_id_by_name[n] for n in context_chart_names if n in chart_id_by_name],

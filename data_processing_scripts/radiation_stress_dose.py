@@ -690,8 +690,10 @@ def fetch_event_contexts(cur, scope, campaign=None, limit=None):
         fluence_cols = """
             e.fluence_start AS fluence_start_cm2,
             e.fluence_end AS fluence_end_cm2,
-            GREATEST(e.fluence_end - e.fluence_start, 0.0)
-                AS fluence_delta_cm2,
+            CASE
+                WHEN e.fluence_start IS NOT NULL AND e.fluence_end IS NOT NULL
+                    THEN GREATEST(e.fluence_end - e.fluence_start, 0.0)
+            END AS fluence_delta_cm2,
             md.fluence_at_meas AS fluence_at_meas_cm2,
             CASE
                 WHEN e.fluence_start IS NOT NULL AND e.fluence_end IS NOT NULL
