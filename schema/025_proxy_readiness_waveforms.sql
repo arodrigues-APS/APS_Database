@@ -146,6 +146,32 @@ DO UPDATE SET
     status_ceiling = EXCLUDED.status_ceiling,
     rationale = EXCLUDED.rationale;
 
+
+CREATE TABLE IF NOT EXISTS stress_pulse_history (
+    metadata_id integer PRIMARY KEY REFERENCES baselines_metadata(id) ON DELETE CASCADE,
+    pulse_index integer,
+    pulse_count_in_sequence integer,
+    sequence_key text,
+    cumulative_energy_j double precision,
+    basis text,
+    provenance text,
+    updated_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE stress_pulse_history
+    ADD COLUMN IF NOT EXISTS pulse_index integer,
+    ADD COLUMN IF NOT EXISTS pulse_count_in_sequence integer,
+    ADD COLUMN IF NOT EXISTS sequence_key text,
+    ADD COLUMN IF NOT EXISTS cumulative_energy_j double precision,
+    ADD COLUMN IF NOT EXISTS basis text,
+    ADD COLUMN IF NOT EXISTS provenance text,
+    ADD COLUMN IF NOT EXISTS updated_at timestamp with time zone NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS idx_stress_pulse_history_sequence
+    ON stress_pulse_history(sequence_key, pulse_count_in_sequence);
+CREATE INDEX IF NOT EXISTS idx_stress_pulse_history_basis
+    ON stress_pulse_history(basis);
+
 CREATE MATERIALIZED VIEW stress_waveform_file_features AS
 WITH file_metadata AS (
     SELECT
@@ -1807,6 +1833,21 @@ SELECT
     s.electrical_terminal_energy_basis,
     s.stress_energy_j,
     s.stress_energy_basis,
+    sph.pulse_index AS stress_pulse_index,
+    sph.pulse_count_in_sequence,
+    CASE
+        WHEN sph.pulse_count_in_sequence IS NOT NULL
+        THEN GREATEST(sph.pulse_count_in_sequence - 1, 0)
+    END AS prior_pulse_count,
+    sph.sequence_key AS pulse_sequence_key,
+    sph.cumulative_energy_j AS cumulative_pulse_energy_j,
+    CASE
+        WHEN sph.cumulative_energy_j IS NOT NULL
+         AND s.stress_energy_j IS NOT NULL
+        THEN GREATEST(sph.cumulative_energy_j - s.stress_energy_j, 0.0)
+    END AS cumulative_prior_energy_j,
+    sph.basis AS pulse_history_basis,
+    sph.provenance AS pulse_history_provenance,
     s.average_terminal_power_w,
     s.stress_energy_density_j_cm3,
     s.energy_density_basis,
@@ -1971,12 +2012,15 @@ SELECT
         CASE WHEN s.normalized_vds IS NOT NULL THEN 'normalized_voltage_available' END,
         CASE WHEN s.source = 'avalanche' AND s.normalized_vds > 1.60
              THEN 'avalanche_normalized_vds_above_quality_limit' END,
-        CASE WHEN s.normalized_current IS NOT NULL THEN 'normalized_current_available' END
+        CASE WHEN s.normalized_current IS NOT NULL THEN 'normalized_current_available' END,
+        CASE WHEN sph.metadata_id IS NOT NULL THEN 'pulse_history_available' END
     ], NULL)::text[] AS context_flags,
     s.match_basis_class,
     s.readiness_status,
     s.quality_flags
-FROM scored s;
+FROM scored s
+LEFT JOIN stress_pulse_history sph
+  ON sph.metadata_id = s.metadata_id;
 
 CREATE INDEX idx_stress_test_context_source
     ON stress_test_context_view(source);
@@ -2110,6 +2154,12 @@ pairs AS (
         t.radiation_dose_total_gy AS target_radiation_dose_total_gy,
         t.radiation_dose_gy AS target_radiation_dose_gy,
         t.radiation_total_dose_gy AS target_radiation_total_dose_gy,
+        t.fluence_at_meas AS target_repetition_fluence_cm2,
+        COALESCE(
+            t.radiation_dose_total_gy,
+            t.radiation_total_dose_gy,
+            t.radiation_dose_gy
+        ) AS target_repetition_dose_gy,
         t.radiation_layer_count AS target_radiation_layer_count,
         t.radiation_min_energy_in_mev AS target_radiation_min_energy_in_mev,
         t.radiation_min_energy_out_mev AS target_radiation_min_energy_out_mev,
@@ -2189,6 +2239,22 @@ pairs AS (
         c.energy_censored_reason AS candidate_energy_censored_reason,
         c.active_window_confidence AS candidate_active_window_confidence,
         c.energy_level AS candidate_energy_level,
+        c.stress_pulse_index AS candidate_stress_pulse_index,
+        c.pulse_count_in_sequence AS candidate_pulse_count_in_sequence,
+        c.prior_pulse_count AS candidate_prior_pulse_count,
+        c.pulse_sequence_key AS candidate_pulse_sequence_key,
+        c.cumulative_pulse_energy_j AS candidate_cumulative_pulse_energy_j,
+        c.cumulative_prior_energy_j AS candidate_cumulative_prior_energy_j,
+        c.pulse_history_basis AS candidate_pulse_history_basis,
+        c.pulse_history_provenance AS candidate_pulse_history_provenance,
+        c.pulse_count_in_sequence AS candidate_repetition_pulse_count,
+        c.electrical_terminal_energy_j AS candidate_repetition_single_pulse_energy_j,
+        CASE
+            WHEN c.cumulative_pulse_energy_j IS NOT NULL THEN c.cumulative_pulse_energy_j
+            WHEN c.pulse_count_in_sequence IS NOT NULL
+             AND c.electrical_terminal_energy_j IS NOT NULL
+            THEN c.pulse_count_in_sequence * c.electrical_terminal_energy_j
+        END AS candidate_repetition_cumulative_energy_j,
         c.stress_duration_s AS candidate_duration_s,
         c.peak_abs_id_a AS candidate_peak_abs_id_a,
         c.peak_abs_ig_a AS candidate_peak_abs_ig_a,
@@ -2226,6 +2292,22 @@ pairs AS (
               OR t.radiation_deposited_energy_total_j IS NOT NULL
                 THEN TRUE ELSE FALSE
         END AS dose_context_available,
+        CASE
+            WHEN UPPER(COALESCE(t.event_type, '')) IN ('SELCI', 'SELCII', 'MIXED')
+             AND (
+                    t.fluence_at_meas IS NOT NULL
+                 OR t.radiation_dose_total_gy IS NOT NULL
+                 OR t.radiation_total_dose_gy IS NOT NULL
+                 OR t.radiation_dose_gy IS NOT NULL
+             )
+             AND c.pulse_count_in_sequence IS NOT NULL
+             AND (
+                    c.cumulative_pulse_energy_j IS NOT NULL
+                 OR (c.electrical_terminal_energy_j IS NOT NULL
+                     AND c.pulse_count_in_sequence IS NOT NULL)
+             )
+                THEN TRUE ELSE FALSE
+        END AS repetition_context_available,
         CASE
             WHEN c.stress_energy_density_j_cm3 IS NOT NULL
              AND c.stress_energy_density_j_cm3 > 0.0
@@ -2523,6 +2605,9 @@ classified_raw AS (
                     AND e.candidate_normalized_vds > 1.60
                  THEN 'candidate_avalanche_normalized_vds_above_quality_limit' END,
             CASE WHEN e.duration_log_delta IS NULL THEN 'missing_duration_overlap' END,
+            CASE WHEN UPPER(COALESCE(e.target_event_type, '')) IN ('SELCI', 'SELCII', 'MIXED')
+                    AND NOT e.repetition_context_available
+                 THEN 'missing_repetition_context_for_cumulative_target' END,
             CASE WHEN e.measured_comparability_status IS NULL
                    AND e.prediction_comparability_status IS NULL
                  THEN 'missing_damage_context' END,
@@ -2662,6 +2747,8 @@ SELECT
     target_radiation_dose_total_gy,
     target_radiation_dose_gy,
     target_radiation_total_dose_gy,
+    target_repetition_fluence_cm2,
+    target_repetition_dose_gy,
     target_radiation_layer_count,
     target_radiation_min_energy_in_mev,
     target_radiation_min_energy_out_mev,
@@ -2743,6 +2830,17 @@ SELECT
     candidate_energy_censored_reason,
     candidate_active_window_confidence,
     candidate_energy_level,
+    candidate_stress_pulse_index,
+    candidate_pulse_count_in_sequence,
+    candidate_prior_pulse_count,
+    candidate_pulse_sequence_key,
+    candidate_cumulative_pulse_energy_j,
+    candidate_cumulative_prior_energy_j,
+    candidate_pulse_history_basis,
+    candidate_pulse_history_provenance,
+    candidate_repetition_pulse_count,
+    candidate_repetition_single_pulse_energy_j,
+    candidate_repetition_cumulative_energy_j,
     candidate_duration_s,
     candidate_peak_abs_id_a,
     candidate_peak_abs_ig_a,
@@ -2756,6 +2854,7 @@ SELECT
     candidate_post_iv_axis_count,
     candidate_context_flags,
     dose_context_available,
+    repetition_context_available,
     energy_density_ratio,
     log_energy_delta,
     collapse_delta,
