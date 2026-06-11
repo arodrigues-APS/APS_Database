@@ -1515,6 +1515,19 @@ rated AS (
     FROM event_base eb
     LEFT JOIN device_library dl ON dl.part_number = eb.device_type
 ),
+material_geometry AS (
+    SELECT DISTINCT ON (device_type)
+        device_type,
+        thickness_um,
+        exposed_area_cm2,
+        exposed_area_cm2 * thickness_um * 1e-4 AS active_volume_cm3,
+        confidence AS geometry_confidence,
+        provenance AS geometry_provenance
+    FROM device_material_layers
+    WHERE layer_order = 0
+      AND device_type IS NOT NULL
+    ORDER BY device_type, confidence DESC NULLS LAST, id ASC
+),
 normalized AS (
     SELECT
         r.*,
@@ -1554,8 +1567,46 @@ normalized AS (
              AND r.stress_duration_s IS NOT NULL
              AND r.stress_duration_s > 0.0
             THEN r.stress_energy_j / r.stress_duration_s
-        END AS average_terminal_power_w
+        END AS average_terminal_power_w,
+        mg.active_volume_cm3 AS energy_density_active_volume_cm3,
+        mg.geometry_confidence AS energy_density_geometry_confidence,
+        mg.geometry_provenance AS energy_density_geometry_provenance,
+        CASE
+            WHEN r.source IN ('sc', 'avalanche')
+             AND r.stress_energy_j IS NOT NULL
+             AND r.stress_energy_j > 0.0
+             AND mg.active_volume_cm3 IS NOT NULL
+             AND mg.active_volume_cm3 > 0.0
+                THEN r.stress_energy_j / mg.active_volume_cm3
+            WHEN r.source = 'irradiation'
+             AND COALESCE(r.radiation_deposited_energy_total_j,
+                          r.radiation_deposited_energy_j) IS NOT NULL
+             AND COALESCE(r.radiation_deposited_energy_total_j,
+                          r.radiation_deposited_energy_j) > 0.0
+             AND mg.active_volume_cm3 IS NOT NULL
+             AND mg.active_volume_cm3 > 0.0
+                THEN COALESCE(r.radiation_deposited_energy_total_j,
+                              r.radiation_deposited_energy_j)
+                     / mg.active_volume_cm3
+        END AS stress_energy_density_j_cm3,
+        CASE
+            WHEN r.source IN ('sc', 'avalanche')
+             AND r.stress_energy_j IS NOT NULL
+             AND mg.active_volume_cm3 IS NOT NULL
+                THEN 'bulk_terminal_stress_energy_over_active_volume'
+            WHEN r.source = 'irradiation'
+             AND COALESCE(r.radiation_deposited_energy_total_j,
+                          r.radiation_deposited_energy_j) IS NOT NULL
+             AND mg.active_volume_cm3 IS NOT NULL
+                THEN 'ion_track_deposited_energy_over_active_volume'
+        END AS energy_density_basis,
+        CASE
+            WHEN r.source = 'irradiation' THEN 'ion_track_localized'
+            WHEN r.source IN ('sc', 'avalanche') THEN 'bulk_active_region'
+            ELSE 'unknown'
+        END AS energy_localization_class
     FROM rated r
+    LEFT JOIN material_geometry mg ON mg.device_type IS NOT DISTINCT FROM r.device_type
 ),
 scored AS (
     SELECT
@@ -1610,6 +1661,12 @@ SELECT
     s.stress_energy_j,
     s.stress_energy_basis,
     s.average_terminal_power_w,
+    s.stress_energy_density_j_cm3,
+    s.energy_density_basis,
+    s.energy_density_active_volume_cm3,
+    s.energy_density_geometry_confidence,
+    s.energy_density_geometry_provenance,
+    s.energy_localization_class,
     s.radiation_dose_scope,
     s.radiation_fluence_basis,
     s.radiation_energy_basis,
@@ -1875,6 +1932,11 @@ pairs AS (
         t.electrical_terminal_energy_j AS target_energy_j,
         t.target_energy_floor_j,
         t.electrical_terminal_energy_basis AS target_energy_basis,
+        t.stress_energy_density_j_cm3 AS target_stress_energy_density_j_cm3,
+        t.energy_density_basis AS target_energy_density_basis,
+        t.energy_density_active_volume_cm3 AS target_energy_density_active_volume_cm3,
+        t.energy_density_geometry_confidence AS target_energy_density_geometry_confidence,
+        t.energy_localization_class AS target_energy_localization_class,
         t.energy_is_comparable AS target_energy_is_comparable,
         t.energy_window_basis AS target_energy_window_basis,
         t.energy_censored_reason AS target_energy_censored_reason,
@@ -1916,6 +1978,11 @@ pairs AS (
         c.application_likeness AS candidate_application_likeness,
         c.electrical_terminal_energy_j AS candidate_energy_j,
         c.electrical_terminal_energy_basis AS candidate_energy_basis,
+        c.stress_energy_density_j_cm3 AS candidate_stress_energy_density_j_cm3,
+        c.energy_density_basis AS candidate_energy_density_basis,
+        c.energy_density_active_volume_cm3 AS candidate_energy_density_active_volume_cm3,
+        c.energy_density_geometry_confidence AS candidate_energy_density_geometry_confidence,
+        c.energy_localization_class AS candidate_energy_localization_class,
         c.energy_is_comparable AS candidate_energy_is_comparable,
         c.energy_window_basis AS candidate_energy_window_basis,
         c.energy_censored_reason AS candidate_energy_censored_reason,
@@ -1933,6 +2000,24 @@ pairs AS (
         c.has_condition_post_iv AS candidate_has_condition_post_iv,
         c.post_iv_axis_count AS candidate_post_iv_axis_count,
         c.context_flags AS candidate_context_flags,
+        CASE
+            WHEN t.radiation_dose_total_gy IS NOT NULL
+              OR t.radiation_deposited_energy_j IS NOT NULL
+              OR t.radiation_deposited_energy_total_j IS NOT NULL
+                THEN TRUE ELSE FALSE
+        END AS dose_context_available,
+        CASE
+            WHEN c.stress_energy_density_j_cm3 IS NOT NULL
+             AND c.stress_energy_density_j_cm3 > 0.0
+             AND t.stress_energy_density_j_cm3 IS NOT NULL
+             AND t.stress_energy_density_j_cm3 > 0.0
+                THEN c.stress_energy_density_j_cm3 / t.stress_energy_density_j_cm3
+        END AS energy_density_ratio,
+        CASE
+            WHEN c.normalized_vds IS NOT NULL
+             AND t.normalized_vds IS NOT NULL
+                THEN ABS(c.normalized_vds - t.normalized_vds)
+        END AS normalized_vds_delta,
         CASE
             WHEN t.target_match_tier = 'energy_comparable'
               THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
@@ -2020,14 +2105,17 @@ distances AS (
         SELECT
             p.*,
             ((CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
-             + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END))
+             + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END)
+             + (CASE WHEN p.normalized_vds_delta IS NOT NULL THEN 1 ELSE 0 END))
                 AS phenotype_axes_used,
             (
                 COALESCE(POWER(p.collapse_delta / 0.25, 2), 0.0)
               + COALESCE(POWER(p.gate_delta / 0.20, 2), 0.0)
+              + COALESCE(POWER(p.normalized_vds_delta / 0.15, 2), 0.0)
             ) / NULLIF(
                 (CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
-              + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END),
+              + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END)
+              + (CASE WHEN p.normalized_vds_delta IS NOT NULL THEN 1 ELSE 0 END),
                 0
             ) AS phenotype_axis_distance_sq
         FROM pairs p
@@ -2196,6 +2284,7 @@ classified_raw AS (
             CASE WHEN e.phenotype_distance > 2.50 THEN 'phenotype_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
             CASE WHEN e.gate_delta IS NULL THEN 'missing_gate_overlap' END,
+            CASE WHEN e.normalized_vds_delta IS NULL THEN 'missing_normalized_vds_overlap' END,
             CASE WHEN e.duration_log_delta IS NULL THEN 'missing_duration_overlap' END,
             CASE WHEN e.measured_comparability_status IS NULL
                    AND e.prediction_comparability_status IS NULL
@@ -2346,6 +2435,11 @@ SELECT
     target_energy_j,
     target_energy_floor_j,
     target_energy_basis,
+    target_stress_energy_density_j_cm3,
+    target_energy_density_basis,
+    target_energy_density_active_volume_cm3,
+    target_energy_density_geometry_confidence,
+    target_energy_localization_class,
     target_energy_is_comparable,
     target_energy_window_basis,
     target_energy_censored_reason,
@@ -2388,6 +2482,11 @@ SELECT
     candidate_application_likeness,
     candidate_energy_j,
     candidate_energy_basis,
+    candidate_stress_energy_density_j_cm3,
+    candidate_energy_density_basis,
+    candidate_energy_density_active_volume_cm3,
+    candidate_energy_density_geometry_confidence,
+    candidate_energy_localization_class,
     candidate_energy_is_comparable,
     candidate_energy_window_basis,
     candidate_energy_censored_reason,
@@ -2405,9 +2504,12 @@ SELECT
     candidate_has_condition_post_iv,
     candidate_post_iv_axis_count,
     candidate_context_flags,
+    dose_context_available,
+    energy_density_ratio,
     log_energy_delta,
     collapse_delta,
     gate_delta,
+    normalized_vds_delta,
     duration_log_delta,
     mechanism_match_class,
     mechanism_status_ceiling,
