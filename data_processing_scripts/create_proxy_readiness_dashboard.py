@@ -52,6 +52,7 @@ CANDIDATE_COLORS = {
     "weak_measured_candidate": "#bcbd22",
     "analog_questionable": "#8c6d31",
     "waveform_only_candidate": "#ff7f0e",
+    "cross_device_screening_only": "#9edae5",
     "inspect_manually": "#9467bd",
     "missing_damage_context": "#8c564b",
     "missing_phenotype_overlap": "#6b6ecf",
@@ -71,6 +72,16 @@ CANDIDATE_COLORS = {
     "thermal_runaway_pair_secondary": "#17becf",
     "gate_oxide_pair_repetitive_only": "#bcbd22",
     "cumulative_defect_no_electrical_analog": "#8c6d31",
+    # Fixed LET bands (MeV*cm2/mg) on a heat ramp: hotter = higher LET.
+    # New beams fall into an existing band, so this list never grows.
+    "LET 00-05": "#fec44f",
+    "LET 05-15": "#fe9929",
+    "LET 15-25": "#ec7014",
+    "LET 25-50": "#cc4c02",
+    "LET 50-80": "#993404",
+    "LET 80+": "#662506",
+    "LET proton": "#4292c6",
+    "LET n/a": "#969696",
 }
 
 
@@ -313,6 +324,15 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             parent_ids=[device_filter_id],
         ),
         select_filter(
+            "NATIVE_FILTER-proxy-target-let",
+            "Target LET (MeV cm2/mg)",
+            dataset_ids["candidates"],
+            "target_let_surface",
+            candidate_ids,
+            all_ids,
+            parent_ids=[device_filter_id],
+        ),
+        select_filter(
             "NATIVE_FILTER-proxy-candidate-source",
             "Candidate Source",
             dataset_ids["candidates"],
@@ -382,6 +402,22 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             context_ids,
             all_ids,
         ),
+        select_filter(
+            "NATIVE_FILTER-proxy-context-let",
+            "Irradiation LET",
+            dataset_ids["context"],
+            "let_label",
+            context_ids,
+            all_ids,
+        ),
+        select_filter(
+            "NATIVE_FILTER-proxy-context-event",
+            "Context Event Type",
+            dataset_ids["context"],
+            "event_type",
+            context_ids,
+            all_ids,
+        ),
     ]
 
 
@@ -430,6 +466,7 @@ def build_chart_defs(dataset_ids):
     ]
     summary_cols = [
         "target_match_tier",
+        "match_scope",
         "candidate_source",
         "target_event_type",
         "target_path_type",
@@ -438,6 +475,7 @@ def build_chart_defs(dataset_ids):
         "replacement_confidence",
         "top_target_events",
         "device_type_count",
+        "candidate_device_type_count",
         "measured_damage_top_events",
         "predicted_damage_top_events",
         "waveform_only_top_events",
@@ -445,11 +483,15 @@ def build_chart_defs(dataset_ids):
         "median_waveform_distance",
         "median_damage_distance",
         "device_types",
+        "candidate_device_types",
     ]
     candidate_cols = [
         "candidate_rank",
+        "match_scope",
         "distance_setting_name",
         "device_type",
+        "target_voltage_class",
+        "target_technology_class",
         "target_event_type",
         "target_match_tier",
         "target_path_type",
@@ -476,6 +518,11 @@ def build_chart_defs(dataset_ids):
         "target_radiation_stopped_in_any_layer",
         "target_radiation_min_range_margin_um",
         "candidate_source",
+        "candidate_device_type",
+        "candidate_device_label",
+        "candidate_manufacturer",
+        "candidate_voltage_class",
+        "candidate_technology_class",
         "candidate_stress_condition_label",
         "candidate_event_type",
         "candidate_sc_voltage_v",
@@ -530,8 +577,14 @@ def build_chart_defs(dataset_ids):
     ]
     evidence_cols = [
         "candidate_rank",
+        "match_scope",
         "distance_setting_name",
         "device_type",
+        "target_voltage_class",
+        "target_technology_class",
+        "candidate_device_type",
+        "candidate_voltage_class",
+        "candidate_technology_class",
         "target_stress_record_key",
         "candidate_stress_record_key",
         "target_stress_regime",
@@ -595,9 +648,17 @@ def build_chart_defs(dataset_ids):
         "source",
         "stress_record_key",
         "device_type",
+        "voltage_class",
+        "technology_class",
         "filename",
         "event_type",
         "path_type",
+        "ion_species",
+        "beam_energy_mev",
+        "let_surface",
+        "let_bin",
+        "let_label",
+        "fluence_at_meas",
         "stress_regime",
         "figure1_panel_label",
         "figure1_regime_family",
@@ -657,6 +718,8 @@ def build_chart_defs(dataset_ids):
         "filename",
         "event_type",
         "path_type",
+        "ion_species",
+        "let_surface",
         "event_energy_vds_id_j",
         "event_electrical_terminal_energy_j",
         "event_energy_proxy_j",
@@ -853,7 +916,6 @@ def build_chart_defs(dataset_ids):
         ),
         (
             "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance",
-        "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Phenotype Mismatch",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
@@ -952,7 +1014,7 @@ def build_chart_defs(dataset_ids):
                 "radiation_deposited_energy_j",
                 "Observed |VDS| / device voltage rating",
                 "Radiation deposited energy (J; electronic component)",
-                groupby=["event_type"],
+                groupby=["let_bin"],
                 filters=[
                     sql_filter("source = 'irradiation'"),
                     sql_filter("event_record_type = 'detected_single_event'"),
@@ -973,7 +1035,7 @@ def build_chart_defs(dataset_ids):
                 "electrical_terminal_energy_j",
                 "Radiation deposited energy (J; electronic component)",
                 "Terminal electrical energy dissipated (J)",
-                groupby=["event_type"],
+                groupby=["let_bin"],
                 filters=[
                     sql_filter("source = 'irradiation'"),
                     sql_filter("event_record_type = 'detected_single_event'"),

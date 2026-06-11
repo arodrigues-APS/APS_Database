@@ -1596,12 +1596,30 @@ rated AS (
     SELECT
         eb.*,
         dl.device_category,
+        dl.notes AS device_notes,
         CASE
             WHEN dl.voltage_rating ~ '[0-9]' THEN
                 SUBSTRING(dl.voltage_rating FROM '[0-9]+[.]?[0-9]*')::double precision
                 * CASE WHEN dl.voltage_rating ~* 'k[[:space:]]*v|kv'
                        THEN 1000.0 ELSE 1.0 END
+            WHEN eb.device_type ~* '1700' THEN 1700.0
+            WHEN eb.device_type ~* '1200' THEN 1200.0
+            WHEN eb.device_type ~* '900' THEN 900.0
+            WHEN eb.device_type ~* '650|65[[:alpha:]]' THEN 650.0
+            WHEN eb.device_type = 'IFX-Trench' THEN 1200.0
         END AS rated_voltage_v,
+        CASE
+            WHEN LOWER(
+                COALESCE(dl.device_category, '') || ' '
+                || COALESCE(dl.notes, '') || ' '
+                || COALESCE(eb.device_type, '')
+            ) LIKE '%trench%' THEN 'trench'
+            WHEN LOWER(
+                COALESCE(dl.device_category, '') || ' '
+                || COALESCE(dl.notes, '') || ' '
+                || COALESCE(eb.device_type, '')
+            ) LIKE '%planar%' THEN 'planar'
+        END AS technology_class,
         CASE
             WHEN dl.current_rating_a ~ '[0-9]' THEN
                 SUBSTRING(dl.current_rating_a FROM '[0-9]+[.]?[0-9]*')::double precision
@@ -1635,6 +1653,16 @@ normalized AS (
                     )
             END
         ) AS observed_abs_vds_v,
+        CASE
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 775.0 THEN 650
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 1050.0 THEN 900
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 1450.0 THEN 1200
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 1900.0 THEN 1700
+        END AS voltage_class,
         CASE
             WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
              AND (
@@ -1730,6 +1758,8 @@ SELECT
     s.device_label,
     s.manufacturer,
     s.device_category,
+    s.voltage_class,
+    s.technology_class,
     s.filename,
     s.stress_condition_label,
     s.event_type,
@@ -1745,6 +1775,29 @@ SELECT
     s.ion_species,
     s.beam_energy_mev,
     s.let_surface,
+    -- Precise per-beam label. Zero-padded so filter entries sort by LET.
+    -- Kept for the LET filter and tables; charts color by let_bin instead.
+    CASE
+        WHEN s.source <> 'irradiation' THEN NULL::text
+        WHEN s.let_surface IS NOT NULL THEN
+            'LET ' || TO_CHAR(s.let_surface, 'FM00.0') || ' '
+                || COALESCE(NULLIF(s.ion_species, ''), '?')
+        ELSE 'LET n/a ' || COALESCE(NULLIF(s.ion_species, ''), 'unknown')
+    END AS let_label,
+    -- Fixed LET bands (MeV*cm2/mg) so charts read as an ordered scale rather
+    -- than one color per beam.  New experiments fall into an existing band,
+    -- so the legend never grows.  Protons are a distinct low-LET mechanism.
+    CASE
+        WHEN s.source <> 'irradiation' THEN NULL::text
+        WHEN s.ion_species ILIKE 'proton%' THEN 'LET proton'
+        WHEN s.let_surface IS NULL THEN 'LET n/a'
+        WHEN s.let_surface < 5  THEN 'LET 00-05'
+        WHEN s.let_surface < 15 THEN 'LET 05-15'
+        WHEN s.let_surface < 25 THEN 'LET 15-25'
+        WHEN s.let_surface < 50 THEN 'LET 25-50'
+        WHEN s.let_surface < 80 THEN 'LET 50-80'
+        ELSE 'LET 80+'
+    END AS let_bin,
     s.fluence_at_meas,
     s.time_start_s,
     s.time_peak_s,
@@ -1929,6 +1982,8 @@ CREATE INDEX idx_stress_test_context_source
     ON stress_test_context_view(source);
 CREATE INDEX idx_stress_test_context_device
     ON stress_test_context_view(device_type);
+CREATE INDEX idx_stress_test_context_voltage_class
+    ON stress_test_context_view(voltage_class);
 CREATE INDEX idx_stress_test_context_record
     ON stress_test_context_view(stress_record_key);
 CREATE INDEX idx_stress_test_context_regime
@@ -1981,6 +2036,48 @@ candidates AS (
       AND device_type IS NOT NULL
       AND electrical_terminal_energy_j IS NOT NULL
       AND electrical_terminal_energy_j > 0.0
+),
+candidate_links AS (
+    SELECT
+        t.stress_record_key AS target_stress_record_key,
+        c.stress_record_key AS candidate_stress_record_key,
+        settings.setting_name AS distance_setting_name,
+        'same_device'::text AS match_scope
+    FROM targets t
+    CROSS JOIN stress_proxy_distance_settings settings
+    JOIN candidates c ON c.device_type IS NOT DISTINCT FROM t.device_type
+    WHERE settings.setting_name = 'default'
+      AND (t.target_match_tier <> 'energy_comparable'
+       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
+
+    UNION ALL
+
+    SELECT
+        t.stress_record_key AS target_stress_record_key,
+        c.stress_record_key AS candidate_stress_record_key,
+        settings.setting_name AS distance_setting_name,
+        'cross_device'::text AS match_scope
+    FROM targets t
+    CROSS JOIN stress_proxy_distance_settings settings
+    JOIN candidates c
+      ON c.device_type IS DISTINCT FROM t.device_type
+     AND c.voltage_class IS NOT NULL
+     AND t.voltage_class IS NOT NULL
+     AND c.voltage_class = t.voltage_class
+    WHERE settings.setting_name = 'default'
+      AND t.normalized_vds IS NOT NULL
+      AND c.normalized_vds IS NOT NULL
+      AND t.vds_collapse_fraction IS NOT NULL
+      AND c.vds_collapse_fraction IS NOT NULL
+      AND (t.target_match_tier <> 'energy_comparable'
+       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM candidates same_c
+          WHERE same_c.device_type IS NOT DISTINCT FROM t.device_type
+            AND (t.target_match_tier <> 'energy_comparable'
+             OR ABS(LN(same_c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
+      )
 ),
 pairs AS (
     SELECT
@@ -2047,11 +2144,19 @@ pairs AS (
         t.gate_delta_fraction AS target_gate_delta_fraction,
         t.normalized_vds AS target_normalized_vds,
         t.normalized_current AS target_normalized_current,
+        t.voltage_class AS target_voltage_class,
+        t.technology_class AS target_technology_class,
         t.has_condition_post_iv AS target_has_condition_post_iv,
         t.post_iv_axis_count AS target_post_iv_axis_count,
         t.context_flags AS target_context_flags,
+        l.match_scope,
         c.stress_record_key AS candidate_stress_record_key,
         c.source AS candidate_source,
+        c.device_type AS candidate_device_type,
+        c.device_label AS candidate_device_label,
+        c.manufacturer AS candidate_manufacturer,
+        c.voltage_class AS candidate_voltage_class,
+        c.technology_class AS candidate_technology_class,
         c.metadata_id AS candidate_metadata_id,
         c.event_id AS candidate_event_id,
         c.event_index AS candidate_event_index,
@@ -2180,9 +2285,13 @@ pairs AS (
             WHEN t.path_type IS NULL OR c.path_type IS NULL THEN settings.path_unknown_penalty
             ELSE settings.path_mismatch_penalty
         END AS path_penalty
-    FROM targets t
-    JOIN candidates c ON c.device_type = t.device_type
-    CROSS JOIN stress_proxy_distance_settings settings
+    FROM candidate_links l
+    JOIN targets t
+      ON t.stress_record_key = l.target_stress_record_key
+    JOIN candidates c
+      ON c.stress_record_key = l.candidate_stress_record_key
+    JOIN stress_proxy_distance_settings settings
+      ON settings.setting_name = l.distance_setting_name
     LEFT JOIN LATERAL (
         SELECT mc.*
         FROM stress_mechanism_compatibility mc
@@ -2194,9 +2303,6 @@ pairs AS (
             mc.min_candidate_collapse DESC
         LIMIT 1
     ) mech ON TRUE
-    WHERE settings.setting_name = 'default'
-      AND (t.target_match_tier <> 'energy_comparable'
-       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
 ),
 distances AS (
     SELECT
@@ -2374,6 +2480,7 @@ classified_raw AS (
              AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_out_of_range'
             WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap'
             WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_mismatch'
+            WHEN e.match_scope = 'cross_device' THEN 'cross_device_screening_only'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
              AND e.measured_match_scope = 'exact_condition'
              AND e.waveform_distance <= e.measured_exact_waveform_max THEN 'measured_damage_candidate'
@@ -2398,6 +2505,11 @@ classified_raw AS (
                  THEN 'candidate_energy_below_censored_floor' END,
             CASE WHEN e.mechanism_status_ceiling IS NOT NULL
                  THEN 'mechanism_ceiling_' || e.mechanism_status_ceiling END,
+            CASE WHEN e.match_scope = 'cross_device'
+                 THEN 'cross_device_voltage_class_screening_only' END,
+            CASE WHEN e.match_scope = 'cross_device'
+                    AND e.target_technology_class IS DISTINCT FROM e.candidate_technology_class
+                 THEN 'cross_device_technology_class_not_matched' END,
             CASE WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap' END,
             CASE WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
@@ -2468,6 +2580,7 @@ ranked AS (
             WHEN 'weak_measured_candidate' THEN 4
             WHEN 'analog_questionable' THEN 5
             WHEN 'waveform_only_candidate' THEN 5
+            WHEN 'cross_device_screening_only' THEN 6
             WHEN 'inspect_manually' THEN 6
             WHEN 'missing_damage_context' THEN 5
             WHEN 'missing_phenotype_overlap' THEN 6
@@ -2489,11 +2602,14 @@ ranked AS (
                 THEN 'analog_questionable_screening_confidence'
             WHEN c.candidate_status = 'waveform_only_candidate'
                 THEN 'low_waveform_only_confidence'
+            WHEN c.candidate_status = 'cross_device_screening_only'
+                THEN 'cross_device_screening_confidence'
             ELSE 'blocked_or_manual_review'
         END AS replacement_confidence,
         ROW_NUMBER() OVER (
             PARTITION BY c.target_stress_record_key
             ORDER BY
+                CASE c.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
                 CASE c.candidate_status
                     WHEN 'measured_damage_candidate' THEN 1
                     WHEN 'predicted_damage_candidate' THEN 2
@@ -2501,6 +2617,7 @@ ranked AS (
                     WHEN 'weak_measured_candidate' THEN 4
                     WHEN 'analog_questionable' THEN 5
                     WHEN 'waveform_only_candidate' THEN 5
+                    WHEN 'cross_device_screening_only' THEN 6
                     WHEN 'inspect_manually' THEN 6
                     WHEN 'missing_damage_context' THEN 5
                     WHEN 'missing_phenotype_overlap' THEN 6
@@ -2579,13 +2696,21 @@ SELECT
     target_gate_delta_fraction,
     target_normalized_vds,
     target_normalized_current,
+    target_voltage_class,
+    target_technology_class,
     target_has_condition_post_iv,
     target_post_iv_axis_count,
     target_context_flags,
     candidate_stress_record_key,
     candidate_rank,
+    match_scope,
     distance_setting_name,
     candidate_source,
+    candidate_device_type,
+    candidate_device_label,
+    candidate_manufacturer,
+    candidate_voltage_class,
+    candidate_technology_class,
     candidate_metadata_id,
     candidate_event_id,
     candidate_event_index,
@@ -2686,6 +2811,10 @@ CREATE INDEX idx_stress_proxy_candidate_status
     ON stress_proxy_candidate_view(candidate_status);
 CREATE INDEX idx_stress_proxy_candidate_source
     ON stress_proxy_candidate_view(candidate_source);
+CREATE INDEX idx_stress_proxy_candidate_match_scope
+    ON stress_proxy_candidate_view(match_scope);
+CREATE INDEX idx_stress_proxy_candidate_candidate_device
+    ON stress_proxy_candidate_view(candidate_device_type);
 CREATE INDEX idx_stress_proxy_candidate_confidence
     ON stress_proxy_candidate_view(replacement_confidence);
 
@@ -2697,6 +2826,7 @@ WITH top_candidates AS (
 )
 SELECT
     target_match_tier,
+    match_scope,
     candidate_source,
     target_event_type,
     target_path_type,
@@ -2704,6 +2834,7 @@ SELECT
     candidate_status,
     replacement_confidence,
     COUNT(*) AS top_target_events,
+    COUNT(DISTINCT candidate_device_type) AS candidate_device_type_count,
     COUNT(DISTINCT device_type) AS device_type_count,
     COUNT(*) FILTER (WHERE damage_evidence_tier = 'measured_damage')
         AS measured_damage_top_events,
@@ -2719,9 +2850,11 @@ SELECT
     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY best_damage_distance)
         AS median_damage_distance,
     STRING_AGG(DISTINCT device_type, ', ' ORDER BY device_type)
-        AS device_types
+        AS device_types,
+    STRING_AGG(DISTINCT candidate_device_type, ', ' ORDER BY candidate_device_type)
+        AS candidate_device_types
 FROM top_candidates
-GROUP BY target_match_tier, candidate_source, target_event_type,
+GROUP BY target_match_tier, match_scope, candidate_source, target_event_type,
          target_path_type, mechanism_match_class, candidate_status,
          replacement_confidence;
 
