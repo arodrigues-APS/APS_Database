@@ -5,6 +5,7 @@
 -- This layer is intentionally descriptive.  It extracts waveform file/event
 -- phenotypes and readiness coverage; it does not assert stress equivalence.
 
+DROP MATERIALIZED VIEW IF EXISTS stress_proxy_experiment_plan_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_summary_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_test_context_view CASCADE;
@@ -2961,4 +2962,266 @@ CREATE INDEX idx_stress_proxy_candidate_summary_status
     ON stress_proxy_candidate_summary_view(candidate_status);
 CREATE INDEX idx_stress_proxy_candidate_summary_source
     ON stress_proxy_candidate_summary_view(candidate_source);
+
+
+CREATE MATERIALIZED VIEW stress_proxy_experiment_plan_view AS
+WITH same_device_sc_post_iv AS (
+    SELECT
+        'candidate_blocker'::text AS plan_source,
+        'same_device_candidate_post_iv'::text AS plan_action_type,
+        1 AS planning_priority_tier,
+        'candidate_missing_condition_post_iv'::text AS primary_blocker,
+        c.candidate_device_type AS measurement_device_type,
+        NULL::text AS target_device_type,
+        c.candidate_device_type,
+        c.candidate_source,
+        ('post_iv|sc|' || COALESCE(c.candidate_device_type, 'unknown')
+            || '|' || c.candidate_sc_voltage_v::text
+            || '|' || c.candidate_sc_duration_us::text) AS measurement_recipe_key,
+        'Post-IV (IdVg, IdVd, blocking) after existing '
+            || COALESCE(c.candidate_device_type, 'unknown') || ' SC '
+            || c.candidate_sc_voltage_v::text || ' V / '
+            || c.candidate_sc_duration_us::text || ' us' AS measurement_plan,
+        c.candidate_sc_voltage_v,
+        c.candidate_sc_duration_us,
+        NULL::text AS candidate_avalanche_mode,
+        c.candidate_sample_group,
+        MIN(c.candidate_stress_condition_label) AS representative_candidate_condition,
+        COUNT(*) AS pair_count,
+        COUNT(DISTINCT c.target_stress_record_key) AS affected_target_count,
+        COUNT(DISTINCT c.device_type) AS affected_target_device_type_count,
+        STRING_AGG(DISTINCT c.device_type, ', ' ORDER BY c.device_type)
+            AS affected_target_device_types,
+        STRING_AGG(DISTINCT c.target_event_type, ', ' ORDER BY c.target_event_type)
+            AS affected_event_types,
+        STRING_AGG(DISTINCT c.target_ion_species, ', ' ORDER BY c.target_ion_species)
+            AS affected_ion_species,
+        STRING_AGG(DISTINCT c.candidate_status, ', ' ORDER BY c.candidate_status)
+            AS candidate_statuses,
+        STRING_AGG(DISTINCT c.mechanism_match_class, ', ' ORDER BY c.mechanism_match_class)
+            AS mechanism_match_classes,
+        0 AS cross_device_pair_count,
+        NULL::integer AS potential_proxy_record_count,
+        'Adds exact-condition post-IV damage fingerprints for same-device SC candidate rows.'::text
+            AS expected_unlock,
+        'Same-device candidates can move from waveform/predicted/weak screening toward measured damage evidence once post-IV axes exist.'::text
+            AS planning_rationale
+    FROM stress_proxy_candidate_view c
+    WHERE c.match_scope = 'same_device'
+      AND 'candidate_missing_condition_post_iv' = ANY(c.candidate_blockers)
+      AND c.candidate_source = 'sc'
+      AND c.candidate_sc_voltage_v IS NOT NULL
+      AND c.candidate_sc_duration_us IS NOT NULL
+    GROUP BY
+        c.candidate_device_type,
+        c.candidate_source,
+        c.candidate_sc_voltage_v,
+        c.candidate_sc_duration_us,
+        c.candidate_sample_group
+),
+same_device_avalanche_post_iv AS (
+    SELECT
+        'candidate_blocker'::text AS plan_source,
+        'same_device_candidate_post_iv'::text AS plan_action_type,
+        1 AS planning_priority_tier,
+        'candidate_missing_condition_post_iv'::text AS primary_blocker,
+        c.candidate_device_type AS measurement_device_type,
+        NULL::text AS target_device_type,
+        c.candidate_device_type,
+        c.candidate_source,
+        ('post_iv|avalanche|' || COALESCE(c.candidate_device_type, 'unknown')
+            || '|' || COALESCE(c.candidate_avalanche_mode, 'unknown')
+            || '|' || COALESCE(c.candidate_sample_group, 'unknown'))
+            AS measurement_recipe_key,
+        'Post-IV (IdVg, IdVd, blocking) after existing '
+            || COALESCE(c.candidate_device_type, 'unknown') || ' '
+            || COALESCE(c.candidate_avalanche_mode, 'avalanche')
+            || ' avalanche sample '
+            || COALESCE(c.candidate_sample_group, 'unknown') AS measurement_plan,
+        NULL::double precision AS candidate_sc_voltage_v,
+        NULL::double precision AS candidate_sc_duration_us,
+        c.candidate_avalanche_mode,
+        c.candidate_sample_group,
+        MIN(c.candidate_stress_condition_label) AS representative_candidate_condition,
+        COUNT(*) AS pair_count,
+        COUNT(DISTINCT c.target_stress_record_key) AS affected_target_count,
+        COUNT(DISTINCT c.device_type) AS affected_target_device_type_count,
+        STRING_AGG(DISTINCT c.device_type, ', ' ORDER BY c.device_type)
+            AS affected_target_device_types,
+        STRING_AGG(DISTINCT c.target_event_type, ', ' ORDER BY c.target_event_type)
+            AS affected_event_types,
+        STRING_AGG(DISTINCT c.target_ion_species, ', ' ORDER BY c.target_ion_species)
+            AS affected_ion_species,
+        STRING_AGG(DISTINCT c.candidate_status, ', ' ORDER BY c.candidate_status)
+            AS candidate_statuses,
+        STRING_AGG(DISTINCT c.mechanism_match_class, ', ' ORDER BY c.mechanism_match_class)
+            AS mechanism_match_classes,
+        0 AS cross_device_pair_count,
+        NULL::integer AS potential_proxy_record_count,
+        'Adds sample-level avalanche post-IV fingerprints for same-device UIS candidates.'::text
+            AS expected_unlock,
+        'Avalanche damage matching keys exact-condition scope by sample group, so one post-IV campaign on the stressed sample can support all candidate pulses from that sample.'::text
+            AS planning_rationale
+    FROM stress_proxy_candidate_view c
+    WHERE c.match_scope = 'same_device'
+      AND 'candidate_missing_condition_post_iv' = ANY(c.candidate_blockers)
+      AND c.candidate_source = 'avalanche'
+      AND c.candidate_sample_group IS NOT NULL
+    GROUP BY
+        c.candidate_device_type,
+        c.candidate_source,
+        c.candidate_avalanche_mode,
+        c.candidate_sample_group
+),
+cross_device_same_device_stress AS (
+    SELECT
+        'candidate_blocker'::text AS plan_source,
+        CASE
+            WHEN c.target_event_type = 'SEB'
+             AND c.candidate_source = 'avalanche'
+             AND c.mechanism_match_class = 'thermal_runaway_pair'
+                THEN 'same_device_uis_ladder_post_iv'
+            WHEN c.target_event_type = 'SEB'
+             AND c.candidate_source = 'sc'
+                THEN 'same_device_sc_ladder_post_iv'
+            ELSE 'same_device_electrical_ladder_post_iv'
+        END AS plan_action_type,
+        CASE
+            WHEN c.target_event_type = 'SEB'
+             AND c.candidate_source = 'avalanche'
+             AND c.mechanism_match_class = 'thermal_runaway_pair'
+                THEN 2
+            WHEN c.target_event_type = 'SEB' THEN 3
+            ELSE 5
+        END AS planning_priority_tier,
+        'cross_device_voltage_class_screening_only'::text AS primary_blocker,
+        c.device_type AS measurement_device_type,
+        c.device_type AS target_device_type,
+        NULL::text AS candidate_device_type,
+        c.candidate_source,
+        ('same_device_stress|' || COALESCE(c.device_type, 'unknown')
+            || '|' || COALESCE(c.target_event_type, 'unknown')
+            || '|' || COALESCE(c.candidate_source, 'unknown')
+            || '|' || COALESCE(c.mechanism_match_class, 'unknown'))
+            AS measurement_recipe_key,
+        CASE
+            WHEN c.target_event_type = 'SEB'
+             AND c.candidate_source = 'avalanche'
+             AND c.mechanism_match_class = 'thermal_runaway_pair'
+                THEN 'UIS ladder + post-IV on ' || COALESCE(c.device_type, 'unknown')
+                    || ' for SEB targets'
+            WHEN c.target_event_type = 'SEB'
+             AND c.candidate_source = 'sc'
+                THEN 'SC condition ladder + post-IV on ' || COALESCE(c.device_type, 'unknown')
+                    || ' for SEB targets'
+            ELSE UPPER(COALESCE(c.candidate_source, 'electrical'))
+                || ' same-device stress ladder + post-IV on '
+                || COALESCE(c.device_type, 'unknown')
+        END AS measurement_plan,
+        NULL::double precision AS candidate_sc_voltage_v,
+        NULL::double precision AS candidate_sc_duration_us,
+        NULL::text AS candidate_avalanche_mode,
+        NULL::text AS candidate_sample_group,
+        STRING_AGG(DISTINCT c.candidate_device_type, ', ' ORDER BY c.candidate_device_type)
+            AS representative_candidate_condition,
+        COUNT(*) AS pair_count,
+        COUNT(DISTINCT c.target_stress_record_key) AS affected_target_count,
+        COUNT(DISTINCT c.device_type) AS affected_target_device_type_count,
+        STRING_AGG(DISTINCT c.device_type, ', ' ORDER BY c.device_type)
+            AS affected_target_device_types,
+        STRING_AGG(DISTINCT c.target_event_type, ', ' ORDER BY c.target_event_type)
+            AS affected_event_types,
+        STRING_AGG(DISTINCT c.target_ion_species, ', ' ORDER BY c.target_ion_species)
+            AS affected_ion_species,
+        STRING_AGG(DISTINCT c.candidate_status, ', ' ORDER BY c.candidate_status)
+            AS candidate_statuses,
+        STRING_AGG(DISTINCT c.mechanism_match_class, ', ' ORDER BY c.mechanism_match_class)
+            AS mechanism_match_classes,
+        COUNT(*) AS cross_device_pair_count,
+        NULL::integer AS potential_proxy_record_count,
+        'Creates same-device electrical stress and post-IV evidence for targets that currently only have cross-device screening rows.'::text
+            AS expected_unlock,
+        'Cross-device rows are intentionally capped at screening confidence; same-device stress on the target family is the measurement that removes that ceiling.'::text
+            AS planning_rationale
+    FROM stress_proxy_candidate_view c
+    WHERE c.match_scope = 'cross_device'
+      AND c.candidate_status = 'cross_device_screening_only'
+      AND 'cross_device_voltage_class_screening_only' = ANY(c.candidate_blockers)
+    GROUP BY
+        c.device_type,
+        c.target_event_type,
+        c.candidate_source,
+        c.mechanism_match_class
+),
+irradiation_recovery AS (
+    SELECT
+        'readiness_gap'::text AS plan_source,
+        'irradiation_data_recovery'::text AS plan_action_type,
+        4 AS planning_priority_tier,
+        'missing_irradiation_waveforms_or_events'::text AS primary_blocker,
+        r.device_type AS measurement_device_type,
+        r.device_type AS target_device_type,
+        r.device_type AS candidate_device_type,
+        'irradiation'::text AS candidate_source,
+        ('irradiation|' || COALESCE(r.device_type, 'unknown')) AS measurement_recipe_key,
+        'Irradiation campaign or archived irradiation data recovery for '
+            || COALESCE(r.device_type, 'unknown') AS measurement_plan,
+        NULL::double precision AS candidate_sc_voltage_v,
+        NULL::double precision AS candidate_sc_duration_us,
+        NULL::text AS candidate_avalanche_mode,
+        NULL::text AS candidate_sample_group,
+        r.proxy_readiness_status AS representative_candidate_condition,
+        0 AS pair_count,
+        0 AS affected_target_count,
+        0 AS affected_target_device_type_count,
+        NULL::text AS affected_target_device_types,
+        NULL::text AS affected_event_types,
+        NULL::text AS affected_ion_species,
+        NULL::text AS candidate_statuses,
+        NULL::text AS mechanism_match_classes,
+        0 AS cross_device_pair_count,
+        r.electrical_proxy_waveform_plus_post_iv_files::integer
+            AS potential_proxy_record_count,
+        'Adds irradiation targets for a family that already has electrical-proxy waveform plus post-IV coverage.'::text
+            AS expected_unlock,
+        'This is the SCT2080KE-style gate-zero gap: electrical proxy evidence exists, but no irradiation target family exists to compare against.'::text
+            AS planning_rationale
+    FROM stress_proxy_readiness_view r
+    WHERE r.device_type IS NOT NULL
+      AND r.electrical_proxy_waveform_plus_post_iv_files > 0
+      AND (r.irradiation_waveform_files + r.irradiation_events) = 0
+),
+unioned AS (
+    SELECT * FROM same_device_sc_post_iv
+    UNION ALL
+    SELECT * FROM same_device_avalanche_post_iv
+    UNION ALL
+    SELECT * FROM cross_device_same_device_stress
+    UNION ALL
+    SELECT * FROM irradiation_recovery
+),
+ranked AS (
+    SELECT
+        ROW_NUMBER() OVER (
+            ORDER BY
+                planning_priority_tier,
+                pair_count DESC,
+                affected_target_count DESC,
+                COALESCE(potential_proxy_record_count, 0) DESC,
+                measurement_plan
+        ) AS planning_rank,
+        unioned.*
+    FROM unioned
+)
+SELECT *
+FROM ranked;
+
+CREATE UNIQUE INDEX idx_stress_proxy_experiment_plan_rank
+    ON stress_proxy_experiment_plan_view(planning_rank);
+CREATE INDEX idx_stress_proxy_experiment_plan_action
+    ON stress_proxy_experiment_plan_view(plan_action_type);
+CREATE INDEX idx_stress_proxy_experiment_plan_device
+    ON stress_proxy_experiment_plan_view(measurement_device_type);
+CREATE INDEX idx_stress_proxy_experiment_plan_blocker
+    ON stress_proxy_experiment_plan_view(primary_blocker);
 

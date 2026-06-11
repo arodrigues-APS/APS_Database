@@ -43,6 +43,7 @@ DATASET_TABLES = {
     "context": "stress_test_context_view",
     "candidates": "stress_proxy_candidate_view",
     "candidate_summary": "stress_proxy_candidate_summary_view",
+    "experiment_plan": "stress_proxy_experiment_plan_view",
 }
 
 CANDIDATE_COLORS = {
@@ -464,6 +465,35 @@ def build_chart_defs(dataset_ids):
         "irradiation_events_with_waveform_plus_post_iv",
         "comparable_damage_axis_count",
     ]
+    experiment_plan_cols = [
+        "planning_rank",
+        "planning_priority_tier",
+        "plan_action_type",
+        "primary_blocker",
+        "measurement_device_type",
+        "measurement_plan",
+        "measurement_recipe_key",
+        "candidate_source",
+        "candidate_device_type",
+        "target_device_type",
+        "candidate_sc_voltage_v",
+        "candidate_sc_duration_us",
+        "candidate_avalanche_mode",
+        "candidate_sample_group",
+        "representative_candidate_condition",
+        "pair_count",
+        "affected_target_count",
+        "affected_target_device_type_count",
+        "affected_target_device_types",
+        "affected_event_types",
+        "affected_ion_species",
+        "candidate_statuses",
+        "mechanism_match_classes",
+        "cross_device_pair_count",
+        "potential_proxy_record_count",
+        "expected_unlock",
+        "planning_rationale",
+    ]
     summary_cols = [
         "target_match_tier",
         "match_scope",
@@ -865,6 +895,20 @@ def build_chart_defs(dataset_ids):
             36,
         ),
         (
+            "Proxy Readiness - Experiment Planning Queue",
+            dataset_ids["experiment_plan"],
+            "table",
+            table_params(
+                experiment_plan_cols,
+                row_limit=250,
+                order_by=[
+                    ["planning_rank", True],
+                ],
+            ),
+            12,
+            58,
+        ),
+        (
             "Proxy Readiness - Best Proxy Candidates",
             dataset_ids["candidates"],
             "table",
@@ -1142,10 +1186,12 @@ def create_dashboard() -> int | None:
         "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
     }
     readiness_chart_names = {"Proxy Readiness - Device Coverage / Blocker Matrix"}
+    planning_chart_names = {"Proxy Readiness - Experiment Planning Queue"}
     chart_groups = {
         "candidate": [chart_id_by_name[n] for n in candidate_chart_names if n in chart_id_by_name],
         "context": [chart_id_by_name[n] for n in context_chart_names if n in chart_id_by_name],
         "readiness": [chart_id_by_name[n] for n in readiness_chart_names if n in chart_id_by_name],
+        "planning": [chart_id_by_name[n] for n in planning_chart_names if n in chart_id_by_name],
     }
 
     print("\nBuilding proxy-readiness dashboard layout...")
