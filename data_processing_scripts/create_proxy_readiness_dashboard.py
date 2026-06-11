@@ -448,6 +448,7 @@ def build_chart_defs(dataset_ids):
     ]
     candidate_cols = [
         "candidate_rank",
+        "distance_setting_name",
         "device_type",
         "target_event_type",
         "target_match_tier",
@@ -529,6 +530,7 @@ def build_chart_defs(dataset_ids):
     ]
     evidence_cols = [
         "candidate_rank",
+        "distance_setting_name",
         "device_type",
         "target_stress_record_key",
         "candidate_stress_record_key",

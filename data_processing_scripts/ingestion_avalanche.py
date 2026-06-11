@@ -972,14 +972,16 @@ def value_or_none(arr, idx):
     return None if np.isnan(v) else float(v)
 
 
-def remap_existing_avalanche_rows(conn):
+def remap_existing_avalanche_rows(conn, dry_run=False):
     """
     Re-run device_mapping_rules against already-ingested avalanche metadata.
 
     The normal ingest path computes the device match from the grouped capture
     paths before it decides a row already exists. For Phase 1 remapping, the
     persisted csv_path has the same joined paths, so we can update device_type
-    and manufacturer without reopening HDF5/MAT waveform files.
+    and manufacturer without reopening HDF5/MAT waveform files. The remap path
+    is intentionally additive: removing a rule later will not unmap rows that
+    were matched by an earlier rule.
     """
     cur = conn.cursor()
     try:
@@ -1013,26 +1015,31 @@ def remap_existing_avalanche_rows(conn):
                 unchanged += 1
                 continue
 
-            cur.execute(
-                """
-                UPDATE baselines_metadata
-                SET device_type = %s,
-                    manufacturer = %s
-                WHERE id = %s
-                """,
-                (device_type, manufacturer, metadata_id),
-            )
+            if not dry_run:
+                cur.execute(
+                    """
+                    UPDATE baselines_metadata
+                    SET device_type = %s,
+                        manufacturer = %s
+                    WHERE id = %s
+                    """,
+                    (device_type, manufacturer, metadata_id),
+                )
             updated += 1
 
-        conn.commit()
-        print("\nRefreshing avalanche view...")
-        cur.execute(AVALANCHE_VIEW_SQL)
-        conn.commit()
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+            print("\nRefreshing avalanche view...")
+            cur.execute(AVALANCHE_VIEW_SQL)
+            conn.commit()
 
         print("\nAvalanche remap summary:")
         print(f"  Rows scanned:   {len(rows)}")
         print(f"  Matched:        {matched}")
-        print(f"  Updated:        {updated}")
+        update_label = "Would update" if dry_run else "Updated"
+        print(f"  {update_label + ':':<15} {updated}")
         print(f"  Unchanged:      {unchanged}")
         print(f"  Still unmapped: {unmatched}")
     finally:
@@ -1073,8 +1080,9 @@ def main():
         )
         conn.autocommit = False
         try:
-            apply_schema(conn)
-            remap_existing_avalanche_rows(conn)
+            if not args.dry_run:
+                apply_schema(conn)
+            remap_existing_avalanche_rows(conn, dry_run=args.dry_run)
         finally:
             conn.close()
         elapsed = perf_counter() - t0

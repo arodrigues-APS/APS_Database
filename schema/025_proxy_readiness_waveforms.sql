@@ -14,6 +14,100 @@ DROP MATERIALIZED VIEW IF EXISTS stress_waveform_basis_feature_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_waveform_event_features CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_waveform_file_features CASCADE;
 
+CREATE TABLE IF NOT EXISTS stress_proxy_distance_settings (
+    setting_name text PRIMARY KEY,
+    description text,
+    max_energy_log_delta double precision NOT NULL,
+    collapse_delta_scale double precision NOT NULL,
+    gate_delta_scale double precision NOT NULL,
+    normalized_vds_delta_scale double precision NOT NULL,
+    energy_log_weight double precision NOT NULL,
+    same_path_penalty double precision NOT NULL,
+    path_unknown_penalty double precision NOT NULL,
+    path_mismatch_penalty double precision NOT NULL,
+    duration_log_weight double precision NOT NULL,
+    best_damage_distance_fallback double precision NOT NULL,
+    energy_out_of_range_log_delta double precision NOT NULL,
+    phenotype_mismatch_distance double precision NOT NULL,
+    measured_exact_waveform_max double precision NOT NULL,
+    predicted_waveform_max double precision NOT NULL,
+    device_run_waveform_max double precision NOT NULL,
+    weak_waveform_max double precision NOT NULL,
+    waveform_only_max double precision NOT NULL,
+    high_confidence_combined_max double precision NOT NULL
+);
+
+-- Default proxy-distance constants mirrored from the pre-Phase-5 hard-coded
+-- candidate view: energy prefilter 5.0 ln units; collapse/gate/normalized-Vds
+-- scales 0.25/0.20/0.15; energy weight 1.0; path penalties 0.0/0.25/0.75;
+-- duration weight 0.01; damage fallback 2.50; status thresholds
+-- 4.0/2.50/1.75/1.75/2.25/3.00/1.25/1.50.
+INSERT INTO stress_proxy_distance_settings (
+    setting_name,
+    description,
+    max_energy_log_delta,
+    collapse_delta_scale,
+    gate_delta_scale,
+    normalized_vds_delta_scale,
+    energy_log_weight,
+    same_path_penalty,
+    path_unknown_penalty,
+    path_mismatch_penalty,
+    duration_log_weight,
+    best_damage_distance_fallback,
+    energy_out_of_range_log_delta,
+    phenotype_mismatch_distance,
+    measured_exact_waveform_max,
+    predicted_waveform_max,
+    device_run_waveform_max,
+    weak_waveform_max,
+    waveform_only_max,
+    high_confidence_combined_max
+)
+VALUES (
+    'default',
+    'Phase 5 default constants preserving the Phase 4 hard-coded behavior except avalanche normalized Vds is not a comparable knob.',
+    5.0,
+    0.25,
+    0.20,
+    0.15,
+    1.0,
+    0.0,
+    0.25,
+    0.75,
+    0.01,
+    2.50,
+    4.0,
+    2.50,
+    1.75,
+    1.75,
+    2.25,
+    3.00,
+    1.25,
+    1.50
+)
+ON CONFLICT (setting_name)
+DO UPDATE SET
+    description = EXCLUDED.description,
+    max_energy_log_delta = EXCLUDED.max_energy_log_delta,
+    collapse_delta_scale = EXCLUDED.collapse_delta_scale,
+    gate_delta_scale = EXCLUDED.gate_delta_scale,
+    normalized_vds_delta_scale = EXCLUDED.normalized_vds_delta_scale,
+    energy_log_weight = EXCLUDED.energy_log_weight,
+    same_path_penalty = EXCLUDED.same_path_penalty,
+    path_unknown_penalty = EXCLUDED.path_unknown_penalty,
+    path_mismatch_penalty = EXCLUDED.path_mismatch_penalty,
+    duration_log_weight = EXCLUDED.duration_log_weight,
+    best_damage_distance_fallback = EXCLUDED.best_damage_distance_fallback,
+    energy_out_of_range_log_delta = EXCLUDED.energy_out_of_range_log_delta,
+    phenotype_mismatch_distance = EXCLUDED.phenotype_mismatch_distance,
+    measured_exact_waveform_max = EXCLUDED.measured_exact_waveform_max,
+    predicted_waveform_max = EXCLUDED.predicted_waveform_max,
+    device_run_waveform_max = EXCLUDED.device_run_waveform_max,
+    weak_waveform_max = EXCLUDED.weak_waveform_max,
+    waveform_only_max = EXCLUDED.waveform_only_max,
+    high_confidence_combined_max = EXCLUDED.high_confidence_combined_max;
+
 CREATE TABLE IF NOT EXISTS stress_mechanism_compatibility (
     target_event_type text NOT NULL,
     candidate_source text NOT NULL,
@@ -1822,6 +1916,8 @@ SELECT
         CASE WHEN s.gate_delta_fraction IS NULL THEN 'missing_gate_coupling' END,
         CASE WHEN NOT s.has_condition_post_iv THEN 'missing_condition_post_iv' END,
         CASE WHEN s.normalized_vds IS NOT NULL THEN 'normalized_voltage_available' END,
+        CASE WHEN s.source = 'avalanche' AND s.normalized_vds > 1.60
+             THEN 'avalanche_normalized_vds_above_quality_limit' END,
         CASE WHEN s.normalized_current IS NOT NULL THEN 'normalized_current_available' END
     ], NULL)::text[] AS context_flags,
     s.match_basis_class,
@@ -2000,6 +2096,25 @@ pairs AS (
         c.has_condition_post_iv AS candidate_has_condition_post_iv,
         c.post_iv_axis_count AS candidate_post_iv_axis_count,
         c.context_flags AS candidate_context_flags,
+        settings.setting_name AS distance_setting_name,
+        settings.max_energy_log_delta,
+        settings.collapse_delta_scale,
+        settings.gate_delta_scale,
+        settings.normalized_vds_delta_scale,
+        settings.energy_log_weight,
+        settings.same_path_penalty,
+        settings.path_unknown_penalty,
+        settings.path_mismatch_penalty,
+        settings.duration_log_weight,
+        settings.best_damage_distance_fallback,
+        settings.energy_out_of_range_log_delta,
+        settings.phenotype_mismatch_distance,
+        settings.measured_exact_waveform_max,
+        settings.predicted_waveform_max,
+        settings.device_run_waveform_max,
+        settings.weak_waveform_max,
+        settings.waveform_only_max,
+        settings.high_confidence_combined_max,
         CASE
             WHEN t.radiation_dose_total_gy IS NOT NULL
               OR t.radiation_deposited_energy_j IS NOT NULL
@@ -2014,6 +2129,7 @@ pairs AS (
                 THEN c.stress_energy_density_j_cm3 / t.stress_energy_density_j_cm3
         END AS energy_density_ratio,
         CASE
+            WHEN c.source = 'avalanche' THEN NULL::double precision
             WHEN c.normalized_vds IS NOT NULL
              AND t.normalized_vds IS NOT NULL
                 THEN ABS(c.normalized_vds - t.normalized_vds)
@@ -2060,12 +2176,13 @@ pairs AS (
             WHEN mech.mechanism_match_class IS NOT NULL THEN mech.path_penalty
             WHEN t.path_type IS NOT NULL
              AND c.path_type IS NOT NULL
-             AND t.path_type = c.path_type THEN 0.0
-            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 0.25
-            ELSE 0.75
+             AND t.path_type = c.path_type THEN settings.same_path_penalty
+            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN settings.path_unknown_penalty
+            ELSE settings.path_mismatch_penalty
         END AS path_penalty
     FROM targets t
     JOIN candidates c ON c.device_type = t.device_type
+    CROSS JOIN stress_proxy_distance_settings settings
     LEFT JOIN LATERAL (
         SELECT mc.*
         FROM stress_mechanism_compatibility mc
@@ -2077,8 +2194,9 @@ pairs AS (
             mc.min_candidate_collapse DESC
         LIMIT 1
     ) mech ON TRUE
-    WHERE t.target_match_tier <> 'energy_comparable'
-       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= 5.0
+    WHERE settings.setting_name = 'default'
+      AND (t.target_match_tier <> 'energy_comparable'
+       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
 ),
 distances AS (
     SELECT
@@ -2093,12 +2211,12 @@ distances AS (
                 SQRT(
                     CASE
                         WHEN scored.target_match_tier = 'energy_comparable'
-                          THEN POWER(scored.log_energy_delta, 2)
+                          THEN scored.energy_log_weight * POWER(scored.log_energy_delta, 2)
                         ELSE 0.0
                     END
                   + scored.phenotype_axis_distance_sq
                   + POWER(scored.path_penalty, 2)
-                  + 0.01 * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
+                  + scored.duration_log_weight * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
                 )
         END AS waveform_distance
     FROM (
@@ -2109,9 +2227,9 @@ distances AS (
              + (CASE WHEN p.normalized_vds_delta IS NOT NULL THEN 1 ELSE 0 END))
                 AS phenotype_axes_used,
             (
-                COALESCE(POWER(p.collapse_delta / 0.25, 2), 0.0)
-              + COALESCE(POWER(p.gate_delta / 0.20, 2), 0.0)
-              + COALESCE(POWER(p.normalized_vds_delta / 0.15, 2), 0.0)
+                COALESCE(POWER(p.collapse_delta / p.collapse_delta_scale, 2), 0.0)
+              + COALESCE(POWER(p.gate_delta / p.gate_delta_scale, 2), 0.0)
+              + COALESCE(POWER(p.normalized_vds_delta / p.normalized_vds_delta_scale, 2), 0.0)
             ) / NULLIF(
                 (CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
               + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END)
@@ -2249,30 +2367,30 @@ classified_raw AS (
             ELSE 0
         END AS candidate_rank_penalty,
         SQRT(POWER(e.waveform_distance, 2)
-             + POWER(COALESCE(e.best_damage_distance, 2.50), 2))
+             + POWER(COALESCE(e.best_damage_distance, e.best_damage_distance_fallback), 2))
             AS combined_screening_distance,
         CASE
             WHEN e.target_match_tier = 'energy_comparable'
-             AND e.log_energy_delta > 4.0 THEN 'energy_out_of_range'
+             AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_out_of_range'
             WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap'
-            WHEN e.phenotype_distance > 2.50 THEN 'phenotype_mismatch'
+            WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_mismatch'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
              AND e.measured_match_scope = 'exact_condition'
-             AND e.waveform_distance <= 1.75 THEN 'measured_damage_candidate'
+             AND e.waveform_distance <= e.measured_exact_waveform_max THEN 'measured_damage_candidate'
             WHEN e.prediction_comparability_status IN ('strong', 'usable')
-             AND e.waveform_distance <= 1.75 THEN 'predicted_damage_candidate'
+             AND e.waveform_distance <= e.predicted_waveform_max THEN 'predicted_damage_candidate'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
-             AND e.waveform_distance <= 2.25 THEN 'device_run_measured_candidate'
+             AND e.waveform_distance <= e.device_run_waveform_max THEN 'device_run_measured_candidate'
             WHEN e.measured_comparability_status = 'weak'
-             AND e.waveform_distance <= 3.00 THEN 'weak_measured_candidate'
-            WHEN e.waveform_distance <= 1.25 THEN 'waveform_only_candidate'
+             AND e.waveform_distance <= e.weak_waveform_max THEN 'weak_measured_candidate'
+            WHEN e.waveform_distance <= e.waveform_only_max THEN 'waveform_only_candidate'
             WHEN e.measured_comparability_status IS NULL
              AND e.prediction_comparability_status IS NULL THEN 'missing_damage_context'
             ELSE 'inspect_manually'
         END AS uncapped_candidate_status,
         ARRAY_REMOVE(ARRAY[
             CASE WHEN e.target_match_tier = 'energy_comparable'
-                    AND e.log_energy_delta > 4.0 THEN 'energy_far_out_of_range' END,
+                    AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_far_out_of_range' END,
             CASE WHEN e.target_match_tier = 'energy_censored_phenotype_only'
                  THEN 'target_energy_censored_phenotype_only' END,
             CASE WHEN e.target_energy_floor_j IS NOT NULL
@@ -2281,10 +2399,17 @@ classified_raw AS (
             CASE WHEN e.mechanism_status_ceiling IS NOT NULL
                  THEN 'mechanism_ceiling_' || e.mechanism_status_ceiling END,
             CASE WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap' END,
-            CASE WHEN e.phenotype_distance > 2.50 THEN 'phenotype_distance_high' END,
+            CASE WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
             CASE WHEN e.gate_delta IS NULL THEN 'missing_gate_overlap' END,
-            CASE WHEN e.normalized_vds_delta IS NULL THEN 'missing_normalized_vds_overlap' END,
+            CASE WHEN e.normalized_vds_delta IS NULL
+                    AND e.candidate_source <> 'avalanche'
+                 THEN 'missing_normalized_vds_overlap' END,
+            CASE WHEN e.candidate_source = 'avalanche'
+                 THEN 'normalized_vds_axis_excluded_avalanche_clamp' END,
+            CASE WHEN e.candidate_source = 'avalanche'
+                    AND e.candidate_normalized_vds > 1.60
+                 THEN 'candidate_avalanche_normalized_vds_above_quality_limit' END,
             CASE WHEN e.duration_log_delta IS NULL THEN 'missing_duration_overlap' END,
             CASE WHEN e.measured_comparability_status IS NULL
                    AND e.prediction_comparability_status IS NULL
@@ -2351,7 +2476,7 @@ ranked AS (
         END AS candidate_status_priority,
         CASE
             WHEN c.candidate_status = 'measured_damage_candidate'
-             AND c.combined_screening_distance <= 1.50 THEN 'high_screening_confidence'
+             AND c.combined_screening_distance <= c.high_confidence_combined_max THEN 'high_screening_confidence'
             WHEN c.candidate_status = 'measured_damage_candidate'
                 THEN 'medium_screening_confidence'
             WHEN c.candidate_status = 'predicted_damage_candidate'
@@ -2459,6 +2584,7 @@ SELECT
     target_context_flags,
     candidate_stress_record_key,
     candidate_rank,
+    distance_setting_name,
     candidate_source,
     candidate_metadata_id,
     candidate_event_id,
