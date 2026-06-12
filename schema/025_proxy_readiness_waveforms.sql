@@ -7,6 +7,7 @@
 
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_experiment_plan_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_summary_view CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS stress_destruction_boundary_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_test_context_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_gate_zero_view CASCADE;
@@ -1830,6 +1831,32 @@ SELECT
     s.time_peak_s,
     s.time_end_s,
     s.stress_duration_s,
+    -- Figure 1(b) uses an effective stress-time axis.  Repetitive
+    -- avalanche sequences are scaled by pulse count under the local
+    -- same-setting-sequence assumption; the basis tag below makes this
+    -- derived estimate explicit to downstream charts and tables.
+    CASE
+        WHEN sph.pulse_count_in_sequence IS NOT NULL
+         AND sph.pulse_count_in_sequence > 1
+         AND s.stress_duration_s IS NOT NULL
+        THEN sph.pulse_count_in_sequence * s.stress_duration_s
+        ELSE s.stress_duration_s
+    END AS effective_stress_time_s,
+    CASE
+        WHEN s.stress_duration_s IS NULL THEN 'unknown_no_duration'
+        WHEN sph.pulse_count_in_sequence IS NOT NULL
+         AND sph.pulse_count_in_sequence > 1
+            THEN 'repetitive_sequence_scaled'
+        WHEN s.source = 'irradiation'
+         AND (COALESCE(s.event_record_type, '') <> 'detected_single_event'
+              OR s.stress_duration_s > 1.0)
+            THEN 'file_window'
+        WHEN s.source IN ('sc', 'avalanche')
+          OR (s.source = 'irradiation'
+              AND s.event_record_type = 'detected_single_event')
+            THEN 'single_pulse_or_event'
+        ELSE 'duration_window_unknown_basis'
+    END AS figure1b_time_basis,
     s.electrical_terminal_energy_j,
     s.electrical_terminal_energy_basis,
     s.stress_energy_j,
@@ -2035,6 +2062,33 @@ CREATE INDEX idx_stress_test_context_regime
     ON stress_test_context_view(stress_regime);
 CREATE INDEX idx_stress_test_context_figure1_regime_family
     ON stress_test_context_view(figure1_regime_family);
+
+CREATE MATERIALIZED VIEW stress_destruction_boundary_view AS
+SELECT
+    device_type,
+    voltage_class,
+    COUNT(*) FILTER (
+        WHERE response_reversibility = 'destructive_or_catastrophic'
+    ) AS destructive_count,
+    MIN(normalized_vds) FILTER (
+        WHERE response_reversibility = 'destructive_or_catastrophic'
+          AND NOT (source = 'avalanche' AND normalized_vds > 1.60)
+    ) AS min_destructive_normalized_vds,
+    MAX(normalized_vds) FILTER (
+        WHERE response_reversibility <> 'destructive_or_catastrophic'
+          AND NOT (source = 'avalanche' AND normalized_vds > 1.60)
+    ) AS max_survived_normalized_vds,
+    COUNT(*) AS record_count,
+    'Lower-bound estimate: survived means not classified destructive; unknown-outcome rows are included.'::text
+        AS boundary_interpretation
+FROM stress_test_context_view
+WHERE normalized_vds IS NOT NULL
+GROUP BY device_type, voltage_class;
+
+CREATE INDEX idx_stress_destruction_boundary_device
+    ON stress_destruction_boundary_view(device_type);
+CREATE INDEX idx_stress_destruction_boundary_voltage_class
+    ON stress_destruction_boundary_view(voltage_class);
 
 CREATE MATERIALIZED VIEW stress_proxy_candidate_view AS
 WITH targets AS (

@@ -41,6 +41,7 @@ DATASET_TABLES = {
     "event_features": "stress_waveform_event_features",
     "basis_features": "stress_waveform_basis_feature_view",
     "context": "stress_test_context_view",
+    "destruction_boundary": "stress_destruction_boundary_view",
     "candidates": "stress_proxy_candidate_view",
     "candidate_summary": "stress_proxy_candidate_summary_view",
     "experiment_plan": "stress_proxy_experiment_plan_view",
@@ -62,6 +63,10 @@ CANDIDATE_COLORS = {
     "sc": "#4c78a8",
     "avalanche": "#f58518",
     "irradiation": "#54a24b",
+    "robustness": "#d62728",
+    "reliability": "#1f77b4",
+    "radiation": "#54a24b",
+    "unknown": "#9d755d",
     "SEB": "#54a24b",
     "SELCI": "#e45756",
     "SELCII": "#72b7b2",
@@ -85,6 +90,48 @@ CANDIDATE_COLORS = {
     "LET n/a": "#969696",
 }
 
+FIGURE1B_LANDSCAPE_DESCRIPTION = (
+    "Recreates Kozak et al. IEEE TPEL 2023 Figure 1(b) with database "
+    "stress records: normalized VDS is the stimulus-severity axis and "
+    "stress/measurement window duration is the log timescale axis. "
+    "Irradiation durations are detected event or file measurement windows, "
+    "not physical ion-strike durations. Avalanche normalized_vds > 1.60 "
+    "rows are excluded by quality flag; the empty region above 1000 h is "
+    "the intended reliability-coverage gap."
+)
+FIGURE1B_DESTRUCTIVE_DESCRIPTION = (
+    "Empirical destruction-limit markers for Figure 1(b). Current plottable "
+    "destructive rows are irradiation SEB records only; SC and avalanche rows "
+    "are not relabeled destructive without explicit outcome data."
+)
+FIGURE1B_BOUNDARY_DESCRIPTION = (
+    "Per-device empirical destruction-boundary rollup for Figure 1(b). "
+    "Survived means not classified destructive, so unknown-outcome rows are "
+    "included and the boundary is a lower-bound estimate."
+)
+
+FIGURE1B_REFERENCE_LINES = [
+    {
+        "annotationType": "FORMULA",
+        "name": "Acceptable test time: 1000 h",
+        "value": "3.6e6",
+        "style": "dashed",
+        "color": "#7f7f7f",
+        "show": True,
+        "showLabel": True,
+    },
+    {
+        "annotationType": "FORMULA",
+        "name": "Specified lifetime: 15 y",
+        "value": "4.73e8",
+        "style": "dashed",
+        "color": "#4c78a8",
+        "show": True,
+        "showLabel": True,
+    },
+]
+FIGURE1B_Y_BOUNDS = [1e-12, 1e9]
+
 
 def apply_proxy_schema() -> None:
     """Rebuild the single-event dependency and the proxy-readiness views."""
@@ -103,8 +150,9 @@ def sql_filter(expression: str) -> dict:
     }
 
 
-def table_params(columns, row_limit=1000, order_by=None, filters=None) -> dict:
-    return {
+def table_params(columns, row_limit=1000, order_by=None, filters=None,
+                 description=None) -> dict:
+    params = {
         "query_mode": "raw",
         "all_columns": list(columns),
         "adhoc_filters": list(filters or []),
@@ -115,6 +163,9 @@ def table_params(columns, row_limit=1000, order_by=None, filters=None) -> dict:
         "show_cell_bars": True,
         "color_pn": True,
     }
+    if description is not None:
+        params["_description"] = description
+    return params
 
 
 def big_number_params(label: str, sql_expression: str, subheader: str,
@@ -144,7 +195,9 @@ def metric(label: str, sql_expression: str) -> dict:
 
 def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
                    groupby=None, filters=None, show_legend=False,
-                   log_x=False, log_y=False) -> dict:
+                   log_x=False, log_y=False, annotation_layers=None,
+                   x_axis_bounds=None, y_axis_bounds=None,
+                   description=None) -> dict:
     params = {
         "x_axis": x_col,
         "time_grain_sqla": None,
@@ -176,6 +229,8 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
         "zoomable": True,
         "label_colors": CANDIDATE_COLORS,
     }
+    if annotation_layers:
+        params["annotation_layers"] = list(annotation_layers)
     if log_x and log_y:
         params["logAxis"] = "both"
         params["x_axis_bounds"] = [1e-18, None]
@@ -186,6 +241,12 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
     elif log_y:
         params["logAxis"] = "y"
         params["y_axis_bounds"] = [1e-12, None]
+    if x_axis_bounds is not None:
+        params["x_axis_bounds"] = list(x_axis_bounds)
+    if y_axis_bounds is not None:
+        params["y_axis_bounds"] = list(y_axis_bounds)
+    if description is not None:
+        params["_description"] = description
     return params
 
 
@@ -722,6 +783,9 @@ def build_chart_defs(dataset_ids):
         "electrical_terminal_energy_basis",
         "stress_energy_j",
         "stress_energy_basis",
+        "stress_duration_s",
+        "effective_stress_time_s",
+        "figure1b_time_basis",
         "stress_pulse_index",
         "pulse_count_in_sequence",
         "prior_pulse_count",
@@ -768,6 +832,15 @@ def build_chart_defs(dataset_ids):
         "normalized_current",
         "post_iv_axis_count",
         "context_flags",
+    ]
+    destruction_boundary_cols = [
+        "device_type",
+        "voltage_class",
+        "destructive_count",
+        "min_destructive_normalized_vds",
+        "max_survived_normalized_vds",
+        "record_count",
+        "boundary_interpretation",
     ]
     event_cols = [
         "source",
@@ -1122,6 +1195,92 @@ def build_chart_defs(dataset_ids):
             44,
         ),
         (
+            "Proxy Readiness - Figure 1(b): Stress vs Timescale Landscape",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "stress_duration_s",
+                "Observed |VDS| / device voltage rating (1.0 = rating)",
+                "Stress/measurement window duration (s, log)",
+                groupby=["figure1_regime_family"],
+                filters=[
+                    sql_filter(
+                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
+                    ),
+                ],
+                show_legend=True,
+                log_y=True,
+                annotation_layers=FIGURE1B_REFERENCE_LINES,
+                y_axis_bounds=FIGURE1B_Y_BOUNDS,
+                description=FIGURE1B_LANDSCAPE_DESCRIPTION,
+            ),
+            12,
+            68,
+        ),
+        (
+            "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "effective_stress_time_s",
+                "Observed |VDS| / device voltage rating (1.0 = rating)",
+                "Effective cumulative stress time (s, log; repetitive sequences scaled by pulse count)",
+                groupby=["figure1_regime_family"],
+                filters=[
+                    sql_filter(
+                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
+                    ),
+                ],
+                show_legend=True,
+                log_y=True,
+                annotation_layers=FIGURE1B_REFERENCE_LINES,
+                y_axis_bounds=FIGURE1B_Y_BOUNDS,
+                description=FIGURE1B_LANDSCAPE_DESCRIPTION,
+            ),
+            12,
+            68,
+        ),
+        (
+            "Proxy Readiness - Figure 1(b): Destructive Outcomes (Destruction Limit Markers)",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "stress_duration_s",
+                "Observed |VDS| / device voltage rating (1.0 = rating)",
+                "Stress/measurement window duration (s, log)",
+                groupby=["event_type"],
+                filters=[
+                    sql_filter(
+                        "response_reversibility = 'destructive_or_catastrophic'"
+                    ),
+                    sql_filter(
+                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
+                    ),
+                ],
+                show_legend=True,
+                log_y=True,
+                description=FIGURE1B_DESTRUCTIVE_DESCRIPTION,
+            ),
+            12,
+            44,
+        ),
+        (
+            "Proxy Readiness - Figure 1(b): Destruction Boundary by Device",
+            dataset_ids["destruction_boundary"],
+            "table",
+            table_params(
+                destruction_boundary_cols,
+                row_limit=500,
+                order_by=[["device_type", True], ["voltage_class", True]],
+                description=FIGURE1B_BOUNDARY_DESCRIPTION,
+            ),
+            12,
+            38,
+        ),
+        (
             "Proxy Readiness - Stress Test Context",
             dataset_ids["context"],
             "table",
@@ -1162,7 +1321,13 @@ def create_dashboard() -> int | None:
     chart_ids = []
     chart_id_by_name = {}
     for name, ds_id, viz_type, params, width, height in build_chart_defs(dataset_ids):
-        cid, cuuid = create_chart(session, name, ds_id, viz_type, params)
+        description = params.get("_description")
+        if description is not None:
+            params = {key: value for key, value in params.items()
+                      if key != "_description"}
+        cid, cuuid = create_chart(
+            session, name, ds_id, viz_type, params, description=description
+        )
         charts_info.append((cid, cuuid, name, width, height))
         if cid:
             chart_ids.append(cid)
@@ -1184,6 +1349,9 @@ def create_dashboard() -> int | None:
         "Proxy Readiness - Normalized Blocking Bias vs Average Terminal Power by Test Type",
         "Proxy Readiness - Irradiation Radiation Deposited Energy vs Blocking Bias",
         "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
+        "Proxy Readiness - Figure 1(b): Stress vs Timescale Landscape",
+        "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
+        "Proxy Readiness - Figure 1(b): Destructive Outcomes (Destruction Limit Markers)",
     }
     readiness_chart_names = {"Proxy Readiness - Device Coverage / Blocker Matrix"}
     planning_chart_names = {"Proxy Readiness - Experiment Planning Queue"}

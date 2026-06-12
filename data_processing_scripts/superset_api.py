@@ -148,7 +148,7 @@ def refresh_dataset_columns(session, ds_id):
 
 # ── Chart Management ────────────────────────────────────────────────────────
 
-def create_chart(session, name, datasource_id, viz_type, params):
+def create_chart(session, name, datasource_id, viz_type, params, description=None):
     """Create or update a chart. Returns (chart_id, chart_uuid)."""
     url = _url(session)
     resp = session.get(
@@ -161,14 +161,17 @@ def create_chart(session, name, datasource_id, viz_type, params):
     if resp.ok:
         for chart in resp.json()["result"]:
             if chart.get("slice_name") == name:
+                payload = {
+                    "params": json.dumps(params),
+                    "viz_type": viz_type,
+                    "datasource_id": datasource_id,
+                    "datasource_type": "table",
+                }
+                if description is not None:
+                    payload["description"] = description
                 update_resp = session.put(
                     f"{url}/api/v1/chart/{chart['id']}",
-                    json={
-                        "params": json.dumps(params),
-                        "viz_type": viz_type,
-                        "datasource_id": datasource_id,
-                        "datasource_type": "table",
-                    },
+                    json=payload,
                 )
                 detail = session.get(
                     f"{url}/api/v1/chart/{chart['id']}"
@@ -179,13 +182,16 @@ def create_chart(session, name, datasource_id, viz_type, params):
                 export_chart_png(name, datasource_id, viz_type, params)
                 return chart["id"], uid
 
-    resp = session.post(f"{url}/api/v1/chart/", json={
+    payload = {
         "slice_name": name,
         "datasource_id": datasource_id,
         "datasource_type": "table",
         "viz_type": viz_type,
         "params": json.dumps(params),
-    })
+    }
+    if description is not None:
+        payload["description"] = description
+    resp = session.post(f"{url}/api/v1/chart/", json=payload)
     if resp.ok:
         chart_id = resp.json()["id"]
         detail = session.get(f"{url}/api/v1/chart/{chart_id}").json()
