@@ -1,0 +1,7 @@
+[Unit]
+Description=Record APS nightly failure for %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/aps_database/APS_Database/scripts/aps-nightly-failure-record.sh %i

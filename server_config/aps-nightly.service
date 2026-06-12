@@ -2,6 +2,7 @@
 Description=Nightly APS Docker update and data ingest
 Wants=network-online.target
 After=network-online.target
+OnFailure=aps-nightly-failure-record@%n.service
 RequiresMountsFor=/opt/aps_database/APS_Database
 
 [Service]

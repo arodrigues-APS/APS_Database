@@ -42,6 +42,7 @@ import math
 import statistics
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from time import perf_counter
 
 try:
@@ -60,6 +61,8 @@ from db_config import get_connection
 
 DETECTOR_VERSION = "single_event_detector_v3_source_aware"
 EVENT_TYPES = ("SEB", "SELCI", "SELCII", "MIXED", "UNKNOWN")
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
+PROXY_READINESS_SCHEMA = SCHEMA_DIR / "025_proxy_readiness_waveforms.sql"
 
 
 @dataclass(frozen=True)
@@ -1206,11 +1209,19 @@ def detect_events_for_file(points, cfg, metadata_context=None):
 
 def ensure_views(cur):
     cur.execute("""
-        DROP VIEW IF EXISTS irradiation_single_event_energy_view;
-        DROP VIEW IF EXISTS irradiation_single_event_let_frequency_view;
-        DROP VIEW IF EXISTS irradiation_single_event_file_frequency_view;
+        DROP VIEW IF EXISTS irradiation_single_event_energy_view CASCADE;
+        DROP VIEW IF EXISTS irradiation_single_event_let_frequency_view CASCADE;
+        DROP VIEW IF EXISTS irradiation_single_event_file_frequency_view CASCADE;
     """)
     cur.execute(CREATE_VIEWS_SQL)
+
+
+def ensure_proxy_readiness_views(cur):
+    if not PROXY_READINESS_SCHEMA.exists():
+        raise FileNotFoundError(
+            f"Missing proxy-readiness schema: {PROXY_READINESS_SCHEMA}")
+    cur.execute(PROXY_READINESS_SCHEMA.read_text())
+    return True
 
 
 def fetch_metadata(cur, args):
@@ -1401,16 +1412,16 @@ def main():
         with conn.cursor() as cur:
             apply_schema(
                 conn,
-                include_pipeline={"022_irradiation_single_events.sql"},
+                include_pipeline={
+                    "022_irradiation_single_events.sql",
+                    "027_radiation_stress_dose.sql",
+                },
             )
-            ensure_views(cur)
-            conn.commit()
 
             records = fetch_metadata(cur, args)
             metadata_ids = [row[0] for row in records]
             if args.rebuild and not args.dry_run:
                 delete_existing(cur, metadata_ids)
-                conn.commit()
 
             skip_existing = set()
             if not args.rebuild:
@@ -1458,8 +1469,11 @@ def main():
 
             if args.dry_run:
                 conn.rollback()
+                proxy_views_rebuilt = False
             else:
                 insert_results(cur, summaries, events)
+                ensure_views(cur)
+                proxy_views_rebuilt = ensure_proxy_readiness_views(cur)
                 conn.commit()
 
             elapsed = perf_counter() - t0
@@ -1480,6 +1494,8 @@ def main():
                 print("  irradiation_single_event_view")
                 print("  irradiation_single_event_file_frequency_view")
                 print("  irradiation_single_event_let_frequency_view")
+                if proxy_views_rebuilt:
+                    print("  stress proxy-readiness materialized views")
     finally:
         conn.close()
 

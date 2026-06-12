@@ -9,6 +9,9 @@ BACKUP_DIR="/opt/aps_database/backups"
 LOG_DIR="${REPO_ROOT}/logs/nightly"
 LOCK_FILE="/tmp/aps-nightly-update-and-ingest.lock"
 SUPERSET_HEALTH_URL="http://localhost:8088/health"
+BACKUP_RETENTION_DAYS="${APS_BACKUP_RETENTION_DAYS:-14}"
+LOG_RETENTION_DAYS="${APS_LOG_RETENTION_DAYS:-30}"
+DOCKER_IMAGE_PRUNE="${APS_DOCKER_IMAGE_PRUNE:-1}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "${BACKUP_DIR}" "${LOG_DIR}"
@@ -115,6 +118,43 @@ dump_database() {
   mv "${tmp}" "${output}"
 }
 
+validate_retention_days() {
+  local name=$1
+  local value=$2
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    die "${name} must be a non-negative integer, got: ${value}"
+  fi
+}
+
+prune_docker_images() {
+  if [[ "${DOCKER_IMAGE_PRUNE}" != "1" ]]; then
+    log "Skipping Docker image prune; APS_DOCKER_IMAGE_PRUNE=${DOCKER_IMAGE_PRUNE}."
+    return 0
+  fi
+
+  log "Pruning dangling Docker images."
+  if docker image prune -f; then
+    log "Docker image prune completed."
+  else
+    log "WARNING: Docker image prune failed; continuing after successful ingest."
+  fi
+}
+
+cleanup_old_files() {
+  validate_retention_days APS_BACKUP_RETENTION_DAYS "${BACKUP_RETENTION_DAYS}"
+  validate_retention_days APS_LOG_RETENTION_DAYS "${LOG_RETENTION_DAYS}"
+
+  log "Deleting database dumps older than ${BACKUP_RETENTION_DAYS} days from ${BACKUP_DIR}."
+  find "${BACKUP_DIR}" -type f \( -name "mosfets-*.dump" -o -name "superset_metadata-*.dump" \) \
+    -mtime +"${BACKUP_RETENTION_DAYS}" -print -delete \
+    | while IFS= read -r path; do log "Deleted old backup: ${path}"; done
+
+  log "Deleting nightly logs older than ${LOG_RETENTION_DAYS} days from ${LOG_DIR}."
+  find "${LOG_DIR}" -type f -name "nightly-*.log" \
+    -mtime +"${LOG_RETENTION_DAYS}" -print -delete \
+    | while IFS= read -r path; do log "Deleted old nightly log: ${path}"; done
+}
+
 run_py() {
   log "Running $*"
   "${PYTHON}" "$@"
@@ -191,5 +231,8 @@ run_py ml_sc_irrad_equivalence.py --rebuild
 run_py create_proxy_readiness_dashboard.py
 run_py create_sc_irrad_dashboard.py
 run_py create_sc_irrad_prediction_dashboard.py
+
+prune_docker_images
+cleanup_old_files
 
 log "APS nightly container update and ingest completed successfully."
