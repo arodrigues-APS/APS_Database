@@ -1813,11 +1813,11 @@ SELECT
         ELSE 'LET n/a ' || COALESCE(NULLIF(s.ion_species, ''), 'unknown')
     END AS let_label,
     -- Fixed LET bands (MeV*cm2/mg) so charts read as an ordered scale rather
-    -- than one color per beam.  New experiments fall into an existing band,
-    -- so the legend never grows.  Protons are a distinct low-LET mechanism.
+    -- than one color per beam.  New experiments, including protons with
+    -- numeric stopping-power metadata, fall into an existing band so the
+    -- legend never grows.
     CASE
         WHEN s.source <> 'irradiation' THEN NULL::text
-        WHEN s.ion_species ILIKE 'proton%' THEN 'LET proton'
         WHEN s.let_surface IS NULL THEN 'LET n/a'
         WHEN s.let_surface < 5  THEN 'LET 00-05'
         WHEN s.let_surface < 15 THEN 'LET 05-15'

@@ -18,7 +18,11 @@ Usage:
     python3 seed_irradiation_campaigns.py
 """
 
+import argparse
+import math
+import subprocess
 import sys
+from pathlib import Path
 
 try:
     import psycopg2
@@ -29,6 +33,13 @@ except ImportError:
 
 from db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 from common import apply_schema
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PROTECTED_NUMERIC_FIELDS = ("let_surface", "let_bragg_peak", "range_um")
+CODE_OWNED_FIELDS = ("beam_type", "notes")
+FLOAT_ABS_TOL = 1e-12
+FLOAT_REL_TOL = 1e-9
 
 
 # ── Known Campaigns (facility-level) ─────────────────────────────────────────
@@ -114,13 +125,13 @@ RUNS = [
 
     # ── Proton campaigns ────────────────────────────────────────────────
     # Padova: 1 and 3 MeV protons at CN accelerator, INFN-LNL Legnaro.
-    ("Padova_Proton",   "proton", 1.0,  None, None, 7.0, None,
-     "1 MeV protons at INFN-LNL CN accelerator. MOSFET range ~7 um after top metallization; wafer/DLTS pieces ~10.8 um. Flux 7.9e9 cm-2s-1; max MOSFET fluence 6e12 cm-2 (~20.9 Mrad); dose factor 3.49e-6 rad per cm-2. Source: NSREC2025_TNS_FINAL."),
-    ("Padova_Proton",   "proton", 3.0,  None, None, 57.0, None,
-     "3 MeV protons at INFN-LNL CN accelerator. MOSFET range ~57 um after top metallization; wafer/DLTS pieces ~62 um. Reported fluxes include 7.9e9, ~2e10, and 3.46e10 cm-2s-1 depending device/campaign; max fluence 6.72e13 cm-2 (planar/NSREC) or 2.7e13 cm-2 (trench); dose factor ~1.47e-6 to 1.49e-6 rad per cm-2."),
+    ("Padova_Proton",   "proton", 1.0,  0.19153573628621, None, 7.0, None,
+     "1 MeV protons at INFN-LNL CN accelerator. MOSFET range ~7 um after top metallization from SRIM; wafer/DLTS pieces ~10.8 um. LET is SiC electronic stopping from NIST PSTAR Si/graphite Bragg-additive fallback. Flux 7.9e9 cm-2s-1; max MOSFET fluence 6e12 cm-2 (~20.9 Mrad); SiO2 dose factor 3.49e-6 rad per cm-2. Sources: NSREC2025_TNS_FINAL; seed_radiation_dose_foundation.py."),
+    ("Padova_Proton",   "proton", 3.0,  0.0903069928796778, None, 57.0, None,
+     "3 MeV protons at INFN-LNL CN accelerator. MOSFET range ~57 um after top metallization from SRIM; wafer/DLTS pieces ~62 um. LET is SiC electronic stopping from NIST PSTAR Si/graphite Bragg-additive fallback. Reported fluxes include 7.9e9, ~2e10, and 3.46e10 cm-2s-1 depending device/campaign; max fluence 6.72e13 cm-2 (planar/NSREC) or 2.7e13 cm-2 (trench); SiO2 dose factor ~1.47e-6 to 1.49e-6 rad per cm-2. Sources: NSREC2025_TNS_FINAL; Padova 3 MeV/trench papers; seed_radiation_dose_foundation.py."),
     ("D2019_Proton",    "proton", None, None, None, None, None, None),
-    ("PSI_Proton_2022", "proton", 200.0, None, None, None, None,
-     "200 MeV protons at PSI/PIF; 5 cm diameter flatness area, normal incidence, target fluence 1e11 cm-2. Source: Martinella et al. 2023, DOI 10.1109/TNS.2023.3267144."),
+    ("PSI_Proton_2022", "proton", 200.0, 0.00374262719938149, None, 97789.7465666261, None,
+     "200 MeV protons at PSI/PIF; 5 cm diameter flatness area, normal incidence, target fluence 1e11 cm-2. LET and SiC CSDA range are electronic stopping/range from NIST PSTAR Si/graphite Bragg-additive fallback. Sources: Martinella et al. 2023, DOI 10.1109/TNS.2023.3267144; seed_radiation_dose_foundation.py."),
 ]
 
 
@@ -197,6 +208,24 @@ CREATE TABLE IF NOT EXISTS experiment_campaign_map (
     campaign_id  INTEGER REFERENCES irradiation_campaigns(id) ON DELETE CASCADE,
     role         TEXT NOT NULL DEFAULT 'post_irrad'
 );
+
+CREATE TABLE IF NOT EXISTS seed_metadata_conflicts (
+    id               SERIAL PRIMARY KEY,
+    detected_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    campaign_name    TEXT NOT NULL,
+    ion_species      TEXT NOT NULL,
+    beam_energy_mev  DOUBLE PRECISION,
+    field_name       TEXT NOT NULL,
+    db_value         TEXT,
+    seed_value       TEXT,
+    mode             TEXT NOT NULL,
+    git_ref          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_seed_metadata_conflicts_detected
+    ON seed_metadata_conflicts(detected_at);
+CREATE INDEX IF NOT EXISTS idx_seed_metadata_conflicts_campaign
+    ON seed_metadata_conflicts(campaign_name, ion_species, beam_energy_mev);
 
 -- Add columns to irradiation_campaigns (idempotent, for existing DBs)
 DO $$ BEGIN
@@ -668,46 +697,248 @@ def _find_run(cur, campaign_id, ion_species, beam_energy_mev):
     return row[0] if row else None
 
 
-def _update_run(cur, run_id, ion_species, beam_energy_mev, let_surface,
-                let_bragg_peak, range_um, beam_type, notes):
+def _fetch_run(cur, campaign_id, ion_species, beam_energy_mev):
     cur.execute("""
-        UPDATE irradiation_runs
-        SET ion_species     = %s,
-            beam_energy_mev = %s,
-            let_surface     = %s,
-            let_bragg_peak  = %s,
-            range_um        = %s,
-            beam_type       = %s,
-            notes           = %s
-        WHERE id = %s
-    """, (ion_species, beam_energy_mev, let_surface, let_bragg_peak,
-          range_um, beam_type, notes, run_id))
+        SELECT id, ion_species, beam_energy_mev, let_surface,
+               let_bragg_peak, range_um, beam_type, notes
+        FROM irradiation_runs
+        WHERE campaign_id = %s
+          AND lower(btrim(ion_species)) = lower(btrim(%s))
+          AND beam_energy_mev IS NOT DISTINCT FROM %s
+        ORDER BY id
+        LIMIT 1
+    """, (campaign_id, ion_species, beam_energy_mev))
+    row = cur.fetchone()
+    if not row:
+        return None
+    columns = (
+        "id", "ion_species", "beam_energy_mev", "let_surface",
+        "let_bragg_peak", "range_um", "beam_type", "notes",
+    )
+    return dict(zip(columns, row))
 
 
-def _upsert_run(cur, campaign_id, ion_species, beam_energy_mev, let_surface,
-                let_bragg_peak, range_um, beam_type, notes):
-    run_id = _find_run(cur, campaign_id, ion_species, beam_energy_mev)
-    if run_id:
-        _update_run(cur, run_id, ion_species, beam_energy_mev, let_surface,
-                    let_bragg_peak, range_um, beam_type, notes)
-        return False
+def _run_seed_record(ion_species, beam_energy_mev, let_surface,
+                     let_bragg_peak, range_um, beam_type, notes):
+    return {
+        "ion_species": ion_species,
+        "beam_energy_mev": beam_energy_mev,
+        "let_surface": let_surface,
+        "let_bragg_peak": let_bragg_peak,
+        "range_um": range_um,
+        "beam_type": beam_type,
+        "notes": notes,
+    }
 
+
+def _numeric_values_match(db_value, seed_value):
+    if db_value is None or seed_value is None:
+        return db_value is None and seed_value is None
+    return math.isclose(
+        float(db_value), float(seed_value),
+        rel_tol=FLOAT_REL_TOL, abs_tol=FLOAT_ABS_TOL,
+    )
+
+
+def _format_seed_value(value):
+    return "NULL" if value is None else str(value)
+
+
+def _compute_run_actions(existing, seed, accept_seed_conflicts=False,
+                         suppress_conflicts=False):
+    plan = {
+        "insert": existing is None,
+        "numeric_updates": {},
+        "code_updates": {},
+        "conflicts": [],
+        "actions": [],
+    }
+    if existing is None:
+        plan["actions"].append({"action": "insert"})
+        return plan
+
+    for field in PROTECTED_NUMERIC_FIELDS:
+        db_value = existing.get(field)
+        seed_value = seed.get(field)
+        if db_value is None and seed_value is not None:
+            plan["numeric_updates"][field] = seed_value
+            plan["actions"].append({
+                "action": "fill_blank",
+                "field": field,
+                "db_value": db_value,
+                "seed_value": seed_value,
+            })
+        elif (
+            db_value is not None
+            and seed_value is not None
+            and not _numeric_values_match(db_value, seed_value)
+        ):
+            action = {
+                "action": "conflict",
+                "field": field,
+                "db_value": db_value,
+                "seed_value": seed_value,
+                "accepted": accept_seed_conflicts,
+            }
+            if suppress_conflicts:
+                action = dict(action)
+                action["action"] = "noop"
+                action["reason"] = "legacy_cleanup_suppressed_conflict"
+                action["accepted"] = False
+                plan["actions"].append(action)
+            else:
+                if accept_seed_conflicts:
+                    plan["numeric_updates"][field] = seed_value
+                plan["conflicts"].append(action)
+                plan["actions"].append(action)
+
+    for field in CODE_OWNED_FIELDS:
+        if existing.get(field) != seed.get(field):
+            plan["code_updates"][field] = seed.get(field)
+            plan["actions"].append({
+                "action": "code_owned_update",
+                "field": field,
+                "db_value": existing.get(field),
+                "seed_value": seed.get(field),
+            })
+
+    if not plan["actions"]:
+        plan["actions"].append({"action": "noop"})
+    return plan
+
+
+def _insert_run(cur, campaign_id, seed):
     cur.execute("""
         INSERT INTO irradiation_runs
             (campaign_id, ion_species, beam_energy_mev,
              let_surface, let_bragg_peak, range_um,
              beam_type, notes)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """, (campaign_id, ion_species, beam_energy_mev, let_surface,
-          let_bragg_peak, range_um, beam_type, notes))
-    return True
+    """, (
+        campaign_id, seed["ion_species"], seed["beam_energy_mev"],
+        seed["let_surface"], seed["let_bragg_peak"], seed["range_um"],
+        seed["beam_type"], seed["notes"],
+    ))
+
+
+def _update_run_fields(cur, run_id, updates):
+    if not updates:
+        return
+    assignments = ", ".join(f"{field} = %s" for field in updates)
+    params = list(updates.values()) + [run_id]
+    cur.execute(
+        f"UPDATE irradiation_runs SET {assignments} WHERE id = %s",
+        params,
+    )
+
+
+def _record_run_conflicts(cur, campaign_name, seed, conflicts, mode, git_ref):
+    for conflict in conflicts:
+        cur.execute("""
+            INSERT INTO seed_metadata_conflicts
+                (campaign_name, ion_species, beam_energy_mev, field_name,
+                 db_value, seed_value, mode, git_ref)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            campaign_name, seed["ion_species"], seed["beam_energy_mev"],
+            conflict["field"], _format_seed_value(conflict["db_value"]),
+            _format_seed_value(conflict["seed_value"]), mode, git_ref,
+        ))
+
+
+def _upsert_run(cur, campaign_id, campaign_name, ion_species, beam_energy_mev,
+                let_surface, let_bragg_peak, range_um, beam_type, notes,
+                *, audit_only=False, accept_seed_conflicts=False,
+                suppress_conflict_run_ids=None, mode="default",
+                git_ref="unknown"):
+    seed = _run_seed_record(
+        ion_species, beam_energy_mev, let_surface, let_bragg_peak, range_um,
+        beam_type, notes,
+    )
+    existing = _fetch_run(cur, campaign_id, ion_species, beam_energy_mev)
+    suppress_conflicts = (
+        existing is not None
+        and suppress_conflict_run_ids is not None
+        and existing["id"] in suppress_conflict_run_ids
+    )
+    plan = _compute_run_actions(
+        existing, seed,
+        accept_seed_conflicts=accept_seed_conflicts,
+        suppress_conflicts=suppress_conflicts,
+    )
+
+    if audit_only:
+        return plan
+
+    if plan["insert"]:
+        _insert_run(cur, campaign_id, seed)
+        return plan
+
+    updates = {}
+    updates.update(plan["numeric_updates"])
+    updates.update(plan["code_updates"])
+    _update_run_fields(cur, existing["id"], updates)
+    if plan["conflicts"]:
+        _record_run_conflicts(cur, campaign_name, seed, plan["conflicts"],
+                              mode, git_ref)
+    return plan
+
+
+def _run_action_label(plan):
+    if plan["insert"]:
+        return "insert"
+    labels = []
+    fill_fields = [
+        action["field"] for action in plan["actions"]
+        if action["action"] == "fill_blank"
+    ]
+    if fill_fields:
+        labels.append("fill_blank: " + ", ".join(fill_fields))
+    accepted_fields = [
+        conflict["field"] for conflict in plan["conflicts"]
+        if conflict.get("accepted")
+    ]
+    unresolved_fields = [
+        conflict["field"] for conflict in plan["conflicts"]
+        if not conflict.get("accepted")
+    ]
+    if accepted_fields:
+        labels.append("accept_seed_conflicts: " + ", ".join(accepted_fields))
+    if unresolved_fields:
+        labels.append("conflict: " + ", ".join(unresolved_fields))
+    if plan["code_updates"]:
+        labels.append(
+            "code_owned_update: " + ", ".join(plan["code_updates"].keys())
+        )
+    suppressed_fields = [
+        action["field"] for action in plan["actions"]
+        if action.get("reason") == "legacy_cleanup_suppressed_conflict"
+    ]
+    if suppressed_fields:
+        labels.append("legacy_conflict_suppressed: " + ", ".join(suppressed_fields))
+    return "; ".join(labels) if labels else "noop"
+
+
+def _count_run_plan(stats, plan):
+    if plan["insert"]:
+        stats["insert"] += 1
+    elif any(conflict.get("accepted") for conflict in plan["conflicts"]):
+        stats["accepted_conflict"] += 1
+    elif any(not conflict.get("accepted") for conflict in plan["conflicts"]):
+        stats["conflict"] += 1
+    elif plan["numeric_updates"]:
+        stats["fill_blank"] += 1
+    elif plan["code_updates"]:
+        stats["code_owned_update"] += 1
+    else:
+        stats["noop"] += 1
 
 
 def _move_legacy_run(cur, campaign_id, old_ion, old_energy,
                      new_ion, new_energy):
     old_id = _find_run(cur, campaign_id, old_ion, old_energy)
     if not old_id:
-        return False
+        return None
 
     new_id = _find_run(cur, campaign_id, new_ion, new_energy)
     if new_id and new_id != old_id:
@@ -717,7 +948,7 @@ def _move_legacy_run(cur, campaign_id, old_ion, old_energy,
             WHERE irrad_run_id = %s
         """, (new_id, old_id))
         cur.execute("DELETE FROM irradiation_runs WHERE id = %s", (old_id,))
-        return True
+        return {old_id}
 
     cur.execute("""
         UPDATE irradiation_runs
@@ -725,7 +956,7 @@ def _move_legacy_run(cur, campaign_id, old_ion, old_energy,
             beam_energy_mev = %s
         WHERE id = %s
     """, (new_ion, new_energy, old_id))
-    return True
+    return {old_id}
 
 
 def _delete_stale_run_if_unreferenced(cur, campaign_id, ion_species,
@@ -751,26 +982,108 @@ def _delete_stale_run_if_unreferenced(cur, campaign_id, ion_species,
 def cleanup_legacy_runs(cur):
     moved = 0
     deleted = 0
+    affected_run_ids = set()
     for campaign_name, old_ion, old_energy, new_ion, new_energy in LEGACY_RUN_ALIASES:
         campaign_id = _campaign_id(cur, campaign_name)
-        if campaign_id and _move_legacy_run(
-                cur, campaign_id, old_ion, old_energy, new_ion, new_energy):
-            moved += 1
+        if campaign_id:
+            moved_run_ids = _move_legacy_run(
+                cur, campaign_id, old_ion, old_energy, new_ion, new_energy)
+            if moved_run_ids:
+                affected_run_ids.update(moved_run_ids)
+                moved += 1
 
     for campaign_name, ion_species, beam_energy_mev in STALE_RUNS:
         campaign_id = _campaign_id(cur, campaign_name)
         if campaign_id and _delete_stale_run_if_unreferenced(
                 cur, campaign_id, ion_species, beam_energy_mev):
             deleted += 1
-    return moved, deleted
+    return moved, deleted, affected_run_ids
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Seed irradiation campaign metadata without overwriting "
+                    "curated scientific numerics."
+    )
+    parser.add_argument(
+        "--audit-only", action="store_true",
+        help="Compute and print run seed actions without writing changes.",
+    )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit nonzero if protected numeric conflicts are found.",
+    )
+    parser.add_argument(
+        "--accept-seed-conflicts", action="store_true",
+        help="Overwrite protected numeric conflicts from the seed and log them.",
+    )
+    args = parser.parse_args(argv)
+    if args.audit_only and args.accept_seed_conflicts:
+        parser.error("--audit-only cannot be combined with --accept-seed-conflicts")
+    if args.strict and args.accept_seed_conflicts:
+        parser.error("--strict cannot be combined with --accept-seed-conflicts")
+    return args
+
+
+def _seed_mode(args):
+    if args.accept_seed_conflicts:
+        return "accept-seed-conflicts"
+    if args.strict:
+        return "strict"
+    if args.audit_only:
+        return "audit-only"
+    return "default"
+
+
+def _git_ref():
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _print_run_result(campaign_name, label, plan):
+    action_label = _run_action_label(plan)
+    if plan["insert"]:
+        prefix = "+"
+    elif any(not conflict.get("accepted") for conflict in plan["conflicts"]):
+        prefix = "!"
+    elif plan["numeric_updates"] or plan["code_updates"]:
+        prefix = "~"
+    else:
+        prefix = "="
+    print(f"   {prefix} {campaign_name} / {label} ({action_label})")
+    for conflict in plan["conflicts"]:
+        if conflict.get("accepted"):
+            print(
+                "     WARNING: accepted seed value for "
+                f"{conflict['field']}: DB={conflict['db_value']} "
+                f"seed={conflict['seed_value']}"
+            )
+        else:
+            print(
+                "     WARNING: protected metadata conflict; kept DB value "
+                f"for {conflict['field']}: DB={conflict['db_value']} "
+                f"seed={conflict['seed_value']}"
+            )
+
+
+def main(argv=None):
+    args = _parse_args(argv)
+    mode = _seed_mode(args)
+    git_ref = _git_ref()
+
     print("=" * 70)
     print("Seeding irradiation campaign tables")
     print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(f"Mode: {mode}")
+    print(f"Git ref: {git_ref}")
     print("=" * 70)
 
     conn = psycopg2.connect(
@@ -778,75 +1091,125 @@ def main():
         user=DB_USER, password=DB_PASSWORD,
     )
     conn.autocommit = False
-    apply_schema(conn)
     cur = conn.cursor()
 
-    # 1. Create / migrate tables
-    print("\n1. Creating tables and migrating schema...")
-    cur.execute(CREATE_TABLES_SQL)
-    cur.execute(DEDUP_RUNS_SQL)
-    conn.commit()
-    print("   OK")
+    if args.audit_only:
+        print("\n1. Audit-only: skipping schema migration and table writes.")
+    else:
+        apply_schema(conn)
 
-    # 2. Seed campaigns
-    print("\n2. Seeding irradiation campaigns...")
-    inserted_c = 0
-    skipped_c = 0
-    for (campaign_name, folder_name, facility, beam_type, notes) in CAMPAIGNS:
-        cur.execute("""
-            INSERT INTO irradiation_campaigns
-                (campaign_name, folder_name, facility, beam_type, notes)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (campaign_name)
-            DO UPDATE SET folder_name = COALESCE(
-                              irradiation_campaigns.folder_name,
-                              EXCLUDED.folder_name),
-                          facility = COALESCE(
-                              EXCLUDED.facility,
-                              irradiation_campaigns.facility),
-                          beam_type = COALESCE(
-                              EXCLUDED.beam_type,
-                              irradiation_campaigns.beam_type),
-                          notes = COALESCE(
-                              EXCLUDED.notes,
-                              irradiation_campaigns.notes)
-        """, (campaign_name, folder_name, facility, beam_type, notes))
-        if cur.rowcount:
-            inserted_c += 1
-            print(f"   + {campaign_name}")
-        else:
-            skipped_c += 1
-            print(f"   = {campaign_name} (already exists)")
-    conn.commit()
-    print(f"   Inserted/updated: {inserted_c}, Skipped: {skipped_c}")
+        # 1. Create / migrate tables
+        print("\n1. Creating tables and migrating schema...")
+        cur.execute(CREATE_TABLES_SQL)
+        cur.execute(DEDUP_RUNS_SQL)
+        conn.commit()
+        print("   OK")
 
-    print("\n3. Cleaning legacy irradiation runs...")
-    moved, deleted = cleanup_legacy_runs(cur)
-    conn.commit()
-    print(f"   Corrected aliases: {moved}, Deleted stale rows: {deleted}")
+    if args.audit_only:
+        print("\n2. Audit-only: skipping irradiation campaign writes.")
+    else:
+        # 2. Seed campaigns
+        print("\n2. Seeding irradiation campaigns...")
+        inserted_c = 0
+        skipped_c = 0
+        for (campaign_name, folder_name, facility, beam_type, notes) in CAMPAIGNS:
+            cur.execute("""
+                INSERT INTO irradiation_campaigns
+                    (campaign_name, folder_name, facility, beam_type, notes)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (campaign_name)
+                DO UPDATE SET folder_name = COALESCE(
+                                  irradiation_campaigns.folder_name,
+                                  EXCLUDED.folder_name),
+                              facility = COALESCE(
+                                  EXCLUDED.facility,
+                                  irradiation_campaigns.facility),
+                              beam_type = COALESCE(
+                                  EXCLUDED.beam_type,
+                                  irradiation_campaigns.beam_type),
+                              notes = COALESCE(
+                                  EXCLUDED.notes,
+                                  irradiation_campaigns.notes)
+            """, (campaign_name, folder_name, facility, beam_type, notes))
+            if cur.rowcount:
+                inserted_c += 1
+                print(f"   + {campaign_name}")
+            else:
+                skipped_c += 1
+                print(f"   = {campaign_name} (already exists)")
+        conn.commit()
+        print(f"   Inserted/updated: {inserted_c}, Skipped: {skipped_c}")
+
+    suppress_conflict_run_ids = set()
+    if args.audit_only:
+        print("\n3. Audit-only: skipping legacy run cleanup.")
+    else:
+        print("\n3. Cleaning legacy irradiation runs...")
+        moved, deleted, suppress_conflict_run_ids = cleanup_legacy_runs(cur)
+        conn.commit()
+        print(f"   Corrected aliases: {moved}, Deleted stale rows: {deleted}")
 
     # 3. Seed irradiation runs
     print("\n4. Seeding irradiation runs...")
-    inserted_r = 0
-    skipped_r = 0
+    run_stats = {
+        "insert": 0,
+        "fill_blank": 0,
+        "conflict": 0,
+        "accepted_conflict": 0,
+        "code_owned_update": 0,
+        "noop": 0,
+    }
     for (campaign_name, ion_species, beam_energy_mev, let_surface,
          let_bragg_peak, range_um, beam_type_override, notes) in RUNS:
         campaign_id = _campaign_id(cur, campaign_name)
         if not campaign_id:
             print(f"   WARNING: campaign '{campaign_name}' not found, skipping")
             continue
-        inserted = _upsert_run(cur, campaign_id, ion_species, beam_energy_mev,
-                               let_surface, let_bragg_peak, range_um,
-                               beam_type_override, notes)
+        plan = _upsert_run(
+            cur, campaign_id, campaign_name, ion_species, beam_energy_mev,
+            let_surface, let_bragg_peak, range_um, beam_type_override, notes,
+            audit_only=args.audit_only,
+            accept_seed_conflicts=args.accept_seed_conflicts,
+            suppress_conflict_run_ids=suppress_conflict_run_ids,
+            mode=mode,
+            git_ref=git_ref,
+        )
+        _count_run_plan(run_stats, plan)
         label = f"{ion_species} {beam_energy_mev or '?'} MeV"
-        if inserted:
-            inserted_r += 1
-            print(f"   + {campaign_name} / {label}")
-        else:
-            skipped_r += 1
-            print(f"   = {campaign_name} / {label} (already exists)")
-    conn.commit()
-    print(f"   Inserted/updated: {inserted_r}, Skipped: {skipped_r}")
+        _print_run_result(campaign_name, label, plan)
+
+    if args.audit_only:
+        conn.rollback()
+    else:
+        conn.commit()
+    print(
+        "   Rows by action: "
+        f"insert={run_stats['insert']}, "
+        f"fill_blank={run_stats['fill_blank']}, "
+        f"conflict={run_stats['conflict']}, "
+        f"accepted_conflict={run_stats['accepted_conflict']}, "
+        f"code_owned_update={run_stats['code_owned_update']}, "
+        f"noop={run_stats['noop']}"
+    )
+
+    if run_stats["conflict"]:
+        print(
+            "   WARNING: protected numeric conflicts were recorded; "
+            "the production DB values were kept."
+        )
+        if args.strict:
+            print("   ERROR: --strict requested, exiting after conflict detection.")
+            cur.close()
+            conn.close()
+            return 1
+
+    if args.audit_only:
+        cur.close()
+        conn.close()
+        print("\n" + "=" * 70)
+        print("Audit complete; no changes written.")
+        print("=" * 70)
+        return 1 if args.strict and run_stats["conflict"] else 0
 
     # 4. Seed experiment mappings
     print("\n5. Seeding experiment -> campaign mappings...")
@@ -937,7 +1300,8 @@ def main():
     print("  2. Assign irradiation runs to individual measurements")
     print("     via the web UI to enable per-measurement ion linkage.")
     print("=" * 70)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

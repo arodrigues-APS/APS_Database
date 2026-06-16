@@ -12,6 +12,7 @@ SUPERSET_HEALTH_URL="http://localhost:8088/health"
 BACKUP_RETENTION_DAYS="${APS_BACKUP_RETENTION_DAYS:-14}"
 LOG_RETENTION_DAYS="${APS_LOG_RETENTION_DAYS:-30}"
 DOCKER_IMAGE_PRUNE="${APS_DOCKER_IMAGE_PRUNE:-1}"
+SOURCE_STATUS_PATHS=(data_processing_scripts schema scripts superset)
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "${BACKUP_DIR}" "${LOG_DIR}"
@@ -160,6 +161,36 @@ run_py() {
   "${PYTHON}" "$@"
 }
 
+preflight_irradiation_seed_source() {
+  local head
+  local dirty
+
+  if ! head="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null)"; then
+    log "WARNING: unable to read git HEAD for ${REPO_ROOT}; skipping irradiation seed."
+    return 1
+  fi
+  log "Repository HEAD before irradiation seed: ${head}"
+
+  if ! dirty="$(git -C "${REPO_ROOT}" status --short --untracked-files=no -- "${SOURCE_STATUS_PATHS[@]}" 2>&1)"; then
+    log "WARNING: unable to inspect source cleanliness; skipping irradiation seed."
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log "  ${line}"
+    done <<< "${dirty}"
+    return 1
+  fi
+
+  if [[ -n "${dirty}" ]]; then
+    log "WARNING: dirty tracked source files detected; skipping irradiation seed only."
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log "  ${line}"
+    done <<< "${dirty}"
+    return 1
+  fi
+
+  log "Tracked source paths clean for irradiation seed."
+  return 0
+}
+
 require_file "${REPO_ROOT}"
 require_file "${COMPOSE_DIR}/docker-compose.yml"
 require_file "${INGEST_DIR}"
@@ -198,7 +229,11 @@ run_py seed_device_library.py
 run_py seed_device_mapping_rules.py
 run_py ingestion_baselines.py
 run_py ingestion_sc.py
-run_py seed_irradiation_campaigns.py
+if preflight_irradiation_seed_source; then
+  run_py seed_irradiation_campaigns.py
+else
+  log "WARNING: continuing downstream without seed_irradiation_campaigns.py."
+fi
 run_py ingestion_irradiation.py
 run_py parse_logbooks_assign_runs.py
 run_py irradiation_energy_windows.py
