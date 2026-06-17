@@ -1831,6 +1831,14 @@ SELECT
     s.time_peak_s,
     s.time_end_s,
     s.stress_duration_s,
+    -- Backward-compatible aliases for older Superset "Stress Landscape"
+    -- slices.  The canonical raw-duration column is stress_duration_s, but
+    -- slices 398/399 still reference the earlier timescale_axis_* names.
+    s.stress_duration_s AS timescale_axis_s,
+    CASE
+        WHEN s.stress_duration_s IS NOT NULL AND s.stress_duration_s > 0.0
+            THEN LN(s.stress_duration_s) / LN(10.0::double precision)
+    END AS timescale_axis_log10_s,
     -- Figure 1(b) uses an effective stress-time axis.  Repetitive
     -- avalanche sequences are scaled by pulse count under the local
     -- same-setting-sequence assumption; the basis tag below makes this

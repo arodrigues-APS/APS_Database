@@ -86,7 +86,6 @@ CANDIDATE_COLORS = {
     "LET 25-50": "#cc4c02",
     "LET 50-80": "#993404",
     "LET 80+": "#662506",
-    "LET proton": "#4292c6",
     "LET n/a": "#969696",
 }
 
@@ -110,27 +109,63 @@ FIGURE1B_BOUNDARY_DESCRIPTION = (
     "included and the boundary is a lower-bound estimate."
 )
 
+# Superset's annotation-layer schema requires showMarkers/hideLine even for
+# FORMULA layers; the remaining keys mirror what the explore UI saves.
 FIGURE1B_REFERENCE_LINES = [
     {
         "annotationType": "FORMULA",
+        "sourceType": "",
         "name": "Acceptable test time: 1000 h",
         "value": "3.6e6",
         "style": "dashed",
         "color": "#7f7f7f",
+        "opacity": "",
+        "width": 1,
         "show": True,
         "showLabel": True,
+        "showMarkers": False,
+        "hideLine": False,
+        "overrides": {"time_range": None},
     },
     {
         "annotationType": "FORMULA",
+        "sourceType": "",
         "name": "Specified lifetime: 15 y",
         "value": "4.73e8",
         "style": "dashed",
         "color": "#4c78a8",
+        "opacity": "",
+        "width": 1,
         "show": True,
         "showLabel": True,
+        "showMarkers": False,
+        "hideLine": False,
+        "overrides": {"time_range": None},
     },
 ]
-FIGURE1B_Y_BOUNDS = [1e-12, 1e9]
+# Lower bound sits just below the fastest recorded event (0.25 us) so the
+# data keeps half the plot; upper bound keeps the 15 y reference visible.
+FIGURE1B_Y_BOUNDS = [1e-7, 1e9]
+FIGURE1B_DESTRUCTIVE_Y_BOUNDS = [1e-2, 1e3]
+FIGURE1B_X_BOUNDS = [0.0, 1.7]
+# d3 trimmed scientific notation; SMART_NUMBER renders wide log ranges as
+# "100p"/"1B", which is unreadable on time and ratio axes.
+SCI_AXIS_FORMAT = "~e"
+
+# Known probe/unit-scaling artifact family (676 rows); excluded from display,
+# never rescaled. Matches the context_flags quality limit.
+AVALANCHE_NVDS_ARTIFACT_EXCLUSION = (
+    "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
+)
+
+AMPLIFICATION_DESCRIPTION = (
+    "Energy amplification of irradiation single events: terminal electrical "
+    "energy released in the event window divided by the ion's deposited "
+    "energy (electronic component). Ratios of 1e6-1e10 show the ion acts "
+    "only as a trigger; the destructive energy is supplied by the blocking "
+    "bias circuit and device output capacitance. Rows without a positive "
+    "deposited-energy estimate are excluded."
+)
 
 
 def apply_proxy_schema() -> None:
@@ -197,7 +232,8 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
                    groupby=None, filters=None, show_legend=False,
                    log_x=False, log_y=False, annotation_layers=None,
                    x_axis_bounds=None, y_axis_bounds=None,
-                   description=None) -> dict:
+                   description=None, y_axis_format="SMART_NUMBER",
+                   zoomable=True) -> dict:
     params = {
         "x_axis": x_col,
         "time_grain_sqla": None,
@@ -221,16 +257,24 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
         "rich_tooltip": True,
         "x_axis_title": x_label,
         "y_axis_title": y_label,
-        "y_axis_format": "SMART_NUMBER",
+        # Default margins overlap the tick row on numeric axes.
+        "x_axis_title_margin": 30,
+        "y_axis_title_margin": 30,
+        "y_axis_format": y_axis_format,
         "truncateYAxis": False,
         "y_axis_bounds": [None, None],
         "markerEnabled": True,
         "markerSize": 7,
-        "zoomable": True,
+        "zoomable": zoomable,
         "label_colors": CANDIDATE_COLORS,
     }
     if annotation_layers:
         params["annotation_layers"] = list(annotation_layers)
+    # NOTE: echarts_timeseries_scatter only supports a log *y* axis; the
+    # "logAxis" values "x"/"both" below are truthy strings that Superset
+    # treats as the y-axis checkbox, so log_x has never produced a log x
+    # axis. Kept for compatibility with existing charts; avoid log_x for
+    # new charts and reshape the query instead (e.g., plot a ratio).
     if log_x and log_y:
         params["logAxis"] = "both"
         params["x_axis_bounds"] = [1e-18, None]
@@ -243,8 +287,11 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
         params["y_axis_bounds"] = [1e-12, None]
     if x_axis_bounds is not None:
         params["x_axis_bounds"] = list(x_axis_bounds)
+        params["truncateXAxis"] = True
     if y_axis_bounds is not None:
+        # Superset ignores y_axis_bounds unless the axis is truncated.
         params["y_axis_bounds"] = list(y_axis_bounds)
+        params["truncateYAxis"] = True
     if description is not None:
         params["_description"] = description
     return params
@@ -330,7 +377,7 @@ def select_filter(filter_id: str, name: str, dataset_id: int, column: str,
     return {
         "id": filter_id,
         "controlValues": {
-            "enableEmptyFilter": True,
+            "enableEmptyFilter": False,
             "defaultToFirstItem": False,
             "multiSelect": True,
             "searchAllOptions": True,
@@ -1111,7 +1158,9 @@ def build_chart_defs(dataset_ids):
                 "Observed |VDS| / device voltage rating",
                 "Measured |ID| / current rating (SC/avalanche peak; irradiation event)",
                 groupby=["source"],
+                filters=[sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION)],
                 show_legend=True,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
             ),
             12,
             48,
@@ -1126,9 +1175,13 @@ def build_chart_defs(dataset_ids):
                 "Observed |VDS| / device voltage rating",
                 "Terminal electrical energy dissipated (J; VDS*ID event/window integration)",
                 groupby=["source"],
-                filters=[sql_filter("stress_energy_j > 0.0")],
+                filters=[
+                    sql_filter("stress_energy_j > 0.0"),
+                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
+                ],
                 show_legend=True,
                 log_y=True,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
             ),
             12,
             48,
@@ -1143,9 +1196,13 @@ def build_chart_defs(dataset_ids):
                 "Observed |VDS| / device voltage rating",
                 "Average terminal power over energy window (W)",
                 groupby=["source"],
-                filters=[sql_filter("average_terminal_power_w > 0.0")],
+                filters=[
+                    sql_filter("average_terminal_power_w > 0.0"),
+                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
+                ],
                 show_legend=True,
                 log_y=True,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
             ),
             12,
             48,
@@ -1167,19 +1224,21 @@ def build_chart_defs(dataset_ids):
                 ],
                 show_legend=True,
                 log_y=True,
+                x_axis_bounds=[0.0, 1.0],
             ),
             12,
             44,
         ),
         (
-            "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
+            "Proxy Readiness - Irradiation Energy Amplification (Terminal / Deposited) vs Blocking Bias",
             dataset_ids["context"],
             "echarts_timeseries_scatter",
             scatter_params(
-                "radiation_deposited_energy_j",
-                "electrical_terminal_energy_j",
-                "Radiation deposited energy (J; electronic component)",
-                "Terminal electrical energy dissipated (J)",
+                "normalized_vds",
+                "electrical_terminal_energy_j"
+                " / NULLIF(radiation_deposited_energy_j, 0.0)",
+                "Observed |VDS| / device voltage rating",
+                "Terminal energy / ion deposited energy (amplification, log)",
                 groupby=["let_bin"],
                 filters=[
                     sql_filter("source = 'irradiation'"),
@@ -1188,8 +1247,10 @@ def build_chart_defs(dataset_ids):
                     sql_filter("electrical_terminal_energy_j > 0.0"),
                 ],
                 show_legend=True,
-                log_x=True,
                 log_y=True,
+                x_axis_bounds=[0.0, 1.0],
+                y_axis_format=SCI_AXIS_FORMAT,
+                description=AMPLIFICATION_DESCRIPTION,
             ),
             12,
             44,
@@ -1205,14 +1266,15 @@ def build_chart_defs(dataset_ids):
                 "Stress/measurement window duration (s, log)",
                 groupby=["figure1_regime_family"],
                 filters=[
-                    sql_filter(
-                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
-                    ),
+                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
                 ],
                 show_legend=True,
                 log_y=True,
                 annotation_layers=FIGURE1B_REFERENCE_LINES,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
                 y_axis_bounds=FIGURE1B_Y_BOUNDS,
+                y_axis_format=SCI_AXIS_FORMAT,
+                zoomable=False,
                 description=FIGURE1B_LANDSCAPE_DESCRIPTION,
             ),
             12,
@@ -1229,14 +1291,15 @@ def build_chart_defs(dataset_ids):
                 "Effective cumulative stress time (s, log; repetitive sequences scaled by pulse count)",
                 groupby=["figure1_regime_family"],
                 filters=[
-                    sql_filter(
-                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
-                    ),
+                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
                 ],
                 show_legend=True,
                 log_y=True,
                 annotation_layers=FIGURE1B_REFERENCE_LINES,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
                 y_axis_bounds=FIGURE1B_Y_BOUNDS,
+                y_axis_format=SCI_AXIS_FORMAT,
+                zoomable=False,
                 description=FIGURE1B_LANDSCAPE_DESCRIPTION,
             ),
             12,
@@ -1256,12 +1319,14 @@ def build_chart_defs(dataset_ids):
                     sql_filter(
                         "response_reversibility = 'destructive_or_catastrophic'"
                     ),
-                    sql_filter(
-                        "NOT (source = 'avalanche' AND normalized_vds > 1.60)"
-                    ),
+                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
                 ],
                 show_legend=True,
                 log_y=True,
+                x_axis_bounds=FIGURE1B_X_BOUNDS,
+                y_axis_bounds=FIGURE1B_DESTRUCTIVE_Y_BOUNDS,
+                y_axis_format=SCI_AXIS_FORMAT,
+                zoomable=False,
                 description=FIGURE1B_DESTRUCTIVE_DESCRIPTION,
             ),
             12,
@@ -1348,7 +1413,7 @@ def create_dashboard() -> int | None:
         "Proxy Readiness - Normalized Blocking Bias vs Terminal Electrical Energy by Test Type",
         "Proxy Readiness - Normalized Blocking Bias vs Average Terminal Power by Test Type",
         "Proxy Readiness - Irradiation Radiation Deposited Energy vs Blocking Bias",
-        "Proxy Readiness - Irradiation Deposited Energy vs Terminal Electrical Energy",
+        "Proxy Readiness - Irradiation Energy Amplification (Terminal / Deposited) vs Blocking Bias",
         "Proxy Readiness - Figure 1(b): Stress vs Timescale Landscape",
         "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
         "Proxy Readiness - Figure 1(b): Destructive Outcomes (Destruction Limit Markers)",
