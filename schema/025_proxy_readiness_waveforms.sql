@@ -1668,6 +1668,16 @@ material_geometry AS (
       AND device_type IS NOT NULL
     ORDER BY device_type, confidence DESC NULLS LAST, id ASC
 ),
+depletion_constants AS (
+    SELECT
+        (8.8541878128e-14::double precision * 9.7::double precision)
+            AS sic_eps_f_cm,
+        1.602176634e-19::double precision AS elementary_charge_c,
+        207e-6::double precision AS seb_critical_energy_j_cm2,
+        60e-6::double precision AS selc_critical_energy_j_cm2,
+        'kosier_2026_1d_high_let_normal_incidence_full_epi_traversal'::text
+            AS model_basis
+),
 normalized AS (
     SELECT
         r.*,
@@ -1718,6 +1728,7 @@ normalized AS (
              AND r.stress_duration_s > 0.0
             THEN r.stress_energy_j / r.stress_duration_s
         END AS average_terminal_power_w,
+        mg.thickness_um AS se_depletion_active_thickness_um,
         mg.active_volume_cm3 AS energy_density_active_volume_cm3,
         mg.geometry_confidence AS energy_density_geometry_confidence,
         mg.geometry_provenance AS energy_density_geometry_provenance,
@@ -1758,6 +1769,123 @@ normalized AS (
     FROM rated r
     LEFT JOIN material_geometry mg ON mg.device_type IS NOT DISTINCT FROM r.device_type
 ),
+se_depletion_model AS (
+    SELECT
+        n.*,
+        CASE
+            WHEN n.source = 'irradiation' THEN dc.model_basis
+        END AS se_depletion_model_basis,
+        CASE
+            WHEN n.source = 'irradiation' THEN dc.seb_critical_energy_j_cm2
+        END AS se_depletion_critical_seb_j_cm2,
+        CASE
+            WHEN n.source = 'irradiation' THEN dc.selc_critical_energy_j_cm2
+        END AS se_depletion_critical_selc_j_cm2,
+        CASE
+            WHEN n.source = 'irradiation' THEN n.observed_abs_vds_v
+        END AS se_depletion_voltage_v,
+        dm.net_doping_cm3 AS se_depletion_net_doping_cm3,
+        CASE
+            WHEN dm.net_doping_cm3 IS NOT NULL
+                THEN 'rated_voltage_reachthrough_active_sic_thickness_estimate'
+        END AS se_depletion_net_doping_basis,
+        ds.depletion_width_um AS se_depletion_width_um,
+        ds.peak_field_v_cm AS se_depletion_peak_field_v_cm,
+        ds.stored_energy_j_cm2 AS se_depletion_stored_energy_j_cm2,
+        CASE
+            WHEN ds.stored_energy_j_cm2 IS NOT NULL
+                THEN ds.stored_energy_j_cm2 / dc.seb_critical_energy_j_cm2
+        END AS se_depletion_ratio_to_seb,
+        CASE
+            WHEN ds.stored_energy_j_cm2 IS NOT NULL
+                THEN ds.stored_energy_j_cm2 / dc.selc_critical_energy_j_cm2
+        END AS se_depletion_ratio_to_selc,
+        ds.predicted_seb_voltage_v AS se_depletion_predicted_seb_voltage_v,
+        ds.predicted_selc_voltage_v AS se_depletion_predicted_selc_voltage_v,
+        CASE
+            WHEN n.source <> 'irradiation'
+                THEN 'not_applicable_non_irradiation'
+            WHEN n.observed_abs_vds_v IS NULL
+                THEN 'missing_observed_vds'
+            WHEN n.rated_voltage_v IS NULL
+                THEN 'missing_rated_voltage_for_doping_estimate'
+            WHEN n.se_depletion_active_thickness_um IS NULL
+                THEN 'missing_active_sic_thickness_for_doping_estimate'
+            WHEN dm.net_doping_cm3 IS NULL
+                THEN 'invalid_depletion_model_inputs'
+            ELSE 'estimated_from_rated_voltage_and_active_sic_thickness'
+        END AS se_depletion_model_quality
+    FROM normalized n
+    CROSS JOIN depletion_constants dc
+    LEFT JOIN LATERAL (
+        SELECT
+            CASE
+                WHEN n.source = 'irradiation'
+                 AND n.rated_voltage_v IS NOT NULL
+                 AND n.rated_voltage_v > 0.0
+                 AND n.se_depletion_active_thickness_um IS NOT NULL
+                 AND n.se_depletion_active_thickness_um > 0.0
+                    THEN 2.0 * dc.sic_eps_f_cm * n.rated_voltage_v
+                         / (
+                            dc.elementary_charge_c
+                            * POWER(n.se_depletion_active_thickness_um * 1e-4, 2)
+                         )
+            END AS net_doping_cm3
+    ) dm ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT
+            CASE
+                WHEN dm.net_doping_cm3 IS NOT NULL
+                 AND n.observed_abs_vds_v IS NOT NULL
+                 AND n.observed_abs_vds_v > 0.0
+                    THEN SQRT(
+                        2.0 * dc.sic_eps_f_cm * dc.elementary_charge_c
+                        * dm.net_doping_cm3 * POWER(n.observed_abs_vds_v, 3)
+                    ) / 3.0
+            END AS stored_energy_j_cm2,
+            CASE
+                WHEN dm.net_doping_cm3 IS NOT NULL
+                 AND n.observed_abs_vds_v IS NOT NULL
+                 AND n.observed_abs_vds_v > 0.0
+                    THEN SQRT(
+                        2.0 * dc.sic_eps_f_cm * n.observed_abs_vds_v
+                        / (dc.elementary_charge_c * dm.net_doping_cm3)
+                    ) * 1e4
+            END AS depletion_width_um,
+            CASE
+                WHEN dm.net_doping_cm3 IS NOT NULL
+                 AND n.observed_abs_vds_v IS NOT NULL
+                 AND n.observed_abs_vds_v > 0.0
+                    THEN 2.0 * n.observed_abs_vds_v
+                         / SQRT(
+                            2.0 * dc.sic_eps_f_cm * n.observed_abs_vds_v
+                            / (dc.elementary_charge_c * dm.net_doping_cm3)
+                         )
+            END AS peak_field_v_cm,
+            CASE
+                WHEN dm.net_doping_cm3 IS NOT NULL
+                    THEN POWER(
+                        POWER(3.0 * dc.seb_critical_energy_j_cm2, 2)
+                        / (
+                            2.0 * dc.sic_eps_f_cm * dc.elementary_charge_c
+                            * dm.net_doping_cm3
+                        ),
+                        1.0 / 3.0
+                    )
+            END AS predicted_seb_voltage_v,
+            CASE
+                WHEN dm.net_doping_cm3 IS NOT NULL
+                    THEN POWER(
+                        POWER(3.0 * dc.selc_critical_energy_j_cm2, 2)
+                        / (
+                            2.0 * dc.sic_eps_f_cm * dc.elementary_charge_c
+                            * dm.net_doping_cm3
+                        ),
+                        1.0 / 3.0
+                    )
+            END AS predicted_selc_voltage_v
+    ) ds ON TRUE
+),
 scored AS (
     SELECT
         n.*,
@@ -1768,7 +1896,7 @@ scored AS (
           + CASE WHEN n.has_condition_post_iv THEN 0.75 ELSE 0.0 END
           + CASE WHEN n.normalized_vds BETWEEN 0.30 AND 1.50 THEN 0.50 ELSE 0.0 END
         ) AS application_likeness_score
-    FROM normalized n
+    FROM se_depletion_model n
 )
 SELECT
     s.source,
@@ -1891,6 +2019,21 @@ SELECT
     s.energy_density_geometry_confidence,
     s.energy_density_geometry_provenance,
     s.energy_localization_class,
+    s.se_depletion_model_basis,
+    s.se_depletion_model_quality,
+    s.se_depletion_critical_seb_j_cm2,
+    s.se_depletion_critical_selc_j_cm2,
+    s.se_depletion_voltage_v,
+    s.se_depletion_active_thickness_um,
+    s.se_depletion_net_doping_cm3,
+    s.se_depletion_net_doping_basis,
+    s.se_depletion_width_um,
+    s.se_depletion_peak_field_v_cm,
+    s.se_depletion_stored_energy_j_cm2,
+    s.se_depletion_ratio_to_seb,
+    s.se_depletion_ratio_to_selc,
+    s.se_depletion_predicted_seb_voltage_v,
+    s.se_depletion_predicted_selc_voltage_v,
     s.radiation_dose_scope,
     s.radiation_fluence_basis,
     s.radiation_energy_basis,
@@ -2042,6 +2185,13 @@ SELECT
         CASE WHEN s.source = 'irradiation'
                AND s.radiation_deposited_energy_j IS NULL
              THEN 'missing_radiation_deposition' END,
+        CASE WHEN s.source = 'irradiation'
+               AND s.se_depletion_stored_energy_j_cm2 IS NULL
+             THEN 'missing_se_depletion_threshold_model' END,
+        CASE WHEN s.se_depletion_model_quality = 'estimated_from_rated_voltage_and_active_sic_thickness'
+             THEN 'se_depletion_threshold_model_available' END,
+        CASE WHEN s.se_depletion_model_quality = 'estimated_from_rated_voltage_and_active_sic_thickness'
+             THEN 'se_depletion_net_doping_estimated_not_measured' END,
         CASE WHEN s.vds_collapse_fraction IS NULL THEN 'missing_vds_collapse' END,
         CASE WHEN s.gate_delta_fraction IS NULL THEN 'missing_gate_coupling' END,
         CASE WHEN NOT s.has_condition_post_iv THEN 'missing_condition_post_iv' END,
@@ -2243,6 +2393,21 @@ pairs AS (
         t.energy_density_active_volume_cm3 AS target_energy_density_active_volume_cm3,
         t.energy_density_geometry_confidence AS target_energy_density_geometry_confidence,
         t.energy_localization_class AS target_energy_localization_class,
+        t.se_depletion_model_basis AS target_se_depletion_model_basis,
+        t.se_depletion_model_quality AS target_se_depletion_model_quality,
+        t.se_depletion_critical_seb_j_cm2 AS target_se_depletion_critical_seb_j_cm2,
+        t.se_depletion_critical_selc_j_cm2 AS target_se_depletion_critical_selc_j_cm2,
+        t.se_depletion_voltage_v AS target_se_depletion_voltage_v,
+        t.se_depletion_active_thickness_um AS target_se_depletion_active_thickness_um,
+        t.se_depletion_net_doping_cm3 AS target_se_depletion_net_doping_cm3,
+        t.se_depletion_net_doping_basis AS target_se_depletion_net_doping_basis,
+        t.se_depletion_width_um AS target_se_depletion_width_um,
+        t.se_depletion_peak_field_v_cm AS target_se_depletion_peak_field_v_cm,
+        t.se_depletion_stored_energy_j_cm2 AS target_se_depletion_stored_energy_j_cm2,
+        t.se_depletion_ratio_to_seb AS target_se_depletion_ratio_to_seb,
+        t.se_depletion_ratio_to_selc AS target_se_depletion_ratio_to_selc,
+        t.se_depletion_predicted_seb_voltage_v AS target_se_depletion_predicted_seb_voltage_v,
+        t.se_depletion_predicted_selc_voltage_v AS target_se_depletion_predicted_selc_voltage_v,
         t.energy_is_comparable AS target_energy_is_comparable,
         t.energy_window_basis AS target_energy_window_basis,
         t.energy_censored_reason AS target_energy_censored_reason,
@@ -2832,6 +2997,21 @@ SELECT
     target_energy_density_active_volume_cm3,
     target_energy_density_geometry_confidence,
     target_energy_localization_class,
+    target_se_depletion_model_basis,
+    target_se_depletion_model_quality,
+    target_se_depletion_critical_seb_j_cm2,
+    target_se_depletion_critical_selc_j_cm2,
+    target_se_depletion_voltage_v,
+    target_se_depletion_active_thickness_um,
+    target_se_depletion_net_doping_cm3,
+    target_se_depletion_net_doping_basis,
+    target_se_depletion_width_um,
+    target_se_depletion_peak_field_v_cm,
+    target_se_depletion_stored_energy_j_cm2,
+    target_se_depletion_ratio_to_seb,
+    target_se_depletion_ratio_to_selc,
+    target_se_depletion_predicted_seb_voltage_v,
+    target_se_depletion_predicted_selc_voltage_v,
     target_energy_is_comparable,
     target_energy_window_basis,
     target_energy_censored_reason,
