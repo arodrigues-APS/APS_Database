@@ -198,7 +198,20 @@ MARKDOWN_PANELS = [
         ),
         "width": 12,
         "height": 10,
-    }
+    },
+    {
+        "tab": TAB_DIAGNOSTICS,
+        "code": (
+            "## Interactive 3D phenotype viewer\n\n"
+            "[Open the interactive source-record and delta-comparison plots]"
+            "(/tools/phenotype-3d/)\n\n"
+            "Drag to rotate, scroll to zoom, hover for record metadata, and "
+            "click legend entries to isolate irradiation, short-circuit, or "
+            "avalanche cohorts. The viewer opens as a separate analysis page."
+        ),
+        "width": 12,
+        "height": 7,
+    },
 ]
 DECISION_STATUS_SQL = (
     "candidate_status IN ("

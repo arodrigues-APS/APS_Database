@@ -44,6 +44,20 @@ server {
         return 302 https://data.aps.ee.ethz.ch/dashboard/list/;
     }
 
+    # Self-contained interactive APS analysis tools. Keep this exact file
+    # route ahead of the Superset catch-all so it stays on the authenticated
+    # data.aps.ee.ethz.ch origin without requiring another application server.
+    location = /tools/phenotype-3d {
+        return 302 /tools/phenotype-3d/;
+    }
+
+    location = /tools/phenotype-3d/ {
+        alias /data/www/tools/phenotype-3d/index.html;
+        default_type text/html;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8088;
         proxy_set_header Host $host;
