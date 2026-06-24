@@ -2,16 +2,16 @@
 """
 Plot individual irradiation, short-circuit, and avalanche stress records in 3D.
 
-Unlike plot_phenotype_delta_3d.py, this script does not plot candidate/target
+Unlike plot_damage_signature_delta_3d.py, this script does not plot candidate/target
 differences. Each point is one record from stress_test_context_view, positioned
 using that record's own Vds collapse fraction, gate-current fraction, and
 normalized blocking voltage.
 
 Outputs:
-  out/avalanche_irrad_pilot/phenotype_sources_3d.png
-  out/avalanche_irrad_pilot/phenotype_sources_3d.csv
-  out/avalanche_irrad_pilot/phenotype_sources_3d_coverage.csv
-  out/avalanche_irrad_pilot/phenotype_sources_3d_NOTES.md
+  out/avalanche_irrad_pilot/damage_signature_sources_3d.png
+  out/avalanche_irrad_pilot/damage_signature_sources_3d.csv
+  out/avalanche_irrad_pilot/damage_signature_sources_3d_coverage.csv
+  out/avalanche_irrad_pilot/damage_signature_sources_3d_NOTES.md
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError as exc:
-    raise SystemExit("matplotlib is required for the phenotype plot") from exc
+    raise SystemExit("matplotlib is required for the damage signature plot") from exc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_config import get_connection  # noqa: E402
@@ -37,7 +37,7 @@ from db_config import get_connection  # noqa: E402
 
 OUT_DIR = Path("out/avalanche_irrad_pilot")
 
-PHENOTYPE_SQL = """
+DAMAGE_SIGNATURE_SQL = """
 SELECT source,
        stress_record_key,
        metadata_id,
@@ -65,13 +65,13 @@ ORDER BY source, stress_record_key;
 def load_records() -> pd.DataFrame:
     conn = get_connection()
     try:
-        return pd.read_sql_query(PHENOTYPE_SQL, conn)
+        return pd.read_sql_query(DAMAGE_SIGNATURE_SQL, conn)
     finally:
         conn.close()
 
 
 def summarize_coverage(records: pd.DataFrame) -> pd.DataFrame:
-    """Count records and available physical phenotype coordinates."""
+    """Count records and available physical damage signature coordinates."""
     rows = []
     axes = [
         "vds_collapse_fraction",
@@ -120,7 +120,7 @@ def format_tick(value: float) -> str:
     return f"{value:.2g}"
 
 
-def plot_source_phenotypes(records: pd.DataFrame, out_path: Path) -> None:
+def plot_source_damage_signatures(records: pd.DataFrame, out_path: Path) -> None:
     """
     Plot each source record; missing coordinates use labelled N/A planes.
 
@@ -283,7 +283,7 @@ def plot_source_phenotypes(records: pd.DataFrame, out_path: Path) -> None:
     ax.set_box_aspect((1.30, 1.0, 1.0))
     ax.set_title(
         "Individual irradiation, short-circuit, and avalanche records\n"
-        "in phenotype space",
+        "in damage signature space",
         pad=20,
     )
     ax.legend(
@@ -326,10 +326,10 @@ def write_notes(coverage: pd.DataFrame, records: pd.DataFrame, out_path: Path) -
         errors="coerce",
     )
     avalanche_normalized = normalized_vds[records["source"].eq("avalanche")]
-    text = f"""# Individual-source 3D Phenotype Plot
+    text = f"""# Individual-source 3D Damage Signature Plot
 
-This is the non-delta version of the phenotype plot. Every marker in
-`phenotype_sources_3d.png` is one record from
+This is the non-delta version of the damage signature plot. Every marker in
+`damage_signature_sources_3d.png` is one record from
 `stress_test_context_view`, colored by its own source: irradiation, short
 circuit, or avalanche.
 
@@ -356,12 +356,12 @@ The stored avalanche normalized-Vds values range from
 {avalanche_normalized.min():.4g} to {avalanche_normalized.max():.4g}, including
 values far above one. The database already flags this as a known avalanche
 clamp/scaling artifact. Those raw values are plotted because this figure shows
-individual stored phenotypes, but their z-position should not be interpreted
+individual stored damage signatures, but their z-position should not be interpreted
 as directly physically comparable to irradiation or SC until that scaling is
 corrected.
 
 The exact plotted records, with missing values preserved, are exported in
-`phenotype_sources_3d.csv`.
+`damage_signature_sources_3d.csv`.
 """
     out_path.write_text(text)
 
@@ -370,28 +370,28 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     records = load_records()
     if records.empty:
-        raise SystemExit("No individual stress phenotype records found")
+        raise SystemExit("No individual stress damage signature records found")
 
     coverage = summarize_coverage(records)
     records.to_csv(
-        OUT_DIR / "phenotype_sources_3d.csv",
+        OUT_DIR / "damage_signature_sources_3d.csv",
         index=False,
     )
     coverage.to_csv(
-        OUT_DIR / "phenotype_sources_3d_coverage.csv",
+        OUT_DIR / "damage_signature_sources_3d_coverage.csv",
         index=False,
     )
-    plot_source_phenotypes(
+    plot_source_damage_signatures(
         records,
-        OUT_DIR / "phenotype_sources_3d.png",
+        OUT_DIR / "damage_signature_sources_3d.png",
     )
     write_notes(
         coverage,
         records,
-        OUT_DIR / "phenotype_sources_3d_NOTES.md",
+        OUT_DIR / "damage_signature_sources_3d_NOTES.md",
     )
 
-    print(f"Wrote individual-source phenotype outputs to {OUT_DIR}")
+    print(f"Wrote individual-source damage signature outputs to {OUT_DIR}")
     print(coverage.to_string(index=False))
 
 

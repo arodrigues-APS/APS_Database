@@ -52,6 +52,10 @@ VIEW_NAME = "damage_equivalence_view"
 MATCH_VIEW_NAME = "damage_equivalence_match_view"
 COVERAGE_VIEW_NAME = "damage_equivalence_coverage_view"
 MATCH_SEGMENT_VIEW_NAME = "damage_equivalence_match_segment_view"
+INTERACTIVE_VIEWER_URL = (
+    "https://rawdata.aps.ee.ethz.ch/data/www/tools/"
+    "sc-irrad-equivalence-3d/index.html"
+)
 
 SOURCE_COLORS = {
     "sc": "#1f77b4",
@@ -95,7 +99,7 @@ def build_dashboard_layout(chart_tuples):
         "GRID_ID": {
             "type": "GRID", "id": "GRID_ID",
             "children": [
-                "ROW-coverage", "ROW-scatter", "ROW-links",
+                "ROW-interactive", "ROW-coverage", "ROW-scatter", "ROW-links",
                 "ROW-matches", "ROW-fingerprints",
             ],
             "parents": ["ROOT_ID"],
@@ -103,6 +107,29 @@ def build_dashboard_layout(chart_tuples):
         "HEADER_ID": {
             "type": "HEADER", "id": "HEADER_ID",
             "meta": {"text": DASHBOARD_TITLE},
+        },
+        "ROW-interactive": {
+            "type": "ROW", "id": "ROW-interactive",
+            "children": ["MARKDOWN-interactive-3d"],
+            "parents": ["ROOT_ID", "GRID_ID"],
+            "meta": {"background": "BACKGROUND_TRANSPARENT"},
+        },
+        "MARKDOWN-interactive-3d": {
+            "type": "MARKDOWN",
+            "id": "MARKDOWN-interactive-3d",
+            "children": [],
+            "parents": ["ROOT_ID", "GRID_ID", "ROW-interactive"],
+            "meta": {
+                "code": (
+                    "[Open the interactive 3D damage-equivalence viewer]"
+                    f"({INTERACTIVE_VIEWER_URL})\n\n"
+                    "Rotate the measured ΔVth / ΔRds(on) / ΔV(BR)DSS "
+                    "fingerprint space and inspect the rank-1 strong/usable "
+                    "match links."
+                ),
+                "width": 12,
+                "height": 5,
+            },
         },
         "ROW-coverage": {
             "type": "ROW", "id": "ROW-coverage",

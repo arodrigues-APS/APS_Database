@@ -296,7 +296,7 @@ Events that change nearest proxy class when collapse is added: {switched}.
 - Energy + collapse proxy collapse fraction: {median_ec_collapse:.6g}
 
 Interpretation: energy-only matching finds waveforms with similar Joules even
-when the failure phenotype differs. Adding collapse penalizes high-collapse
+when the failure damage signature differs. Adding collapse penalizes high-collapse
 avalanche waveforms and moves the nearest candidates toward SC waveforms, whose
 collapse profile is closer to the proton SEB events.
 """

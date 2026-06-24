@@ -43,7 +43,7 @@ SETTING_FIELDS = (
     "duration_log_weight",
     "best_damage_distance_fallback",
     "energy_out_of_range_log_delta",
-    "phenotype_mismatch_distance",
+    "damage_signature_mismatch_distance",
     "measured_exact_waveform_max",
     "predicted_waveform_max",
     "device_run_waveform_max",
@@ -69,8 +69,8 @@ STATUS_PRIORITY = {
     "waveform_only_candidate": 5,
     "missing_damage_context": 5,
     "inspect_manually": 6,
-    "missing_phenotype_overlap": 6,
-    "phenotype_mismatch": 6,
+    "missing_damage_signature_overlap": 6,
+    "damage_signature_mismatch": 6,
     "energy_out_of_range": 7,
 }
 
@@ -90,7 +90,7 @@ class DistanceSettings:
     duration_log_weight: float
     best_damage_distance_fallback: float
     energy_out_of_range_log_delta: float
-    phenotype_mismatch_distance: float
+    damage_signature_mismatch_distance: float
     measured_exact_waveform_max: float
     predicted_waveform_max: float
     device_run_waveform_max: float
@@ -240,7 +240,7 @@ def load_default_settings(conn) -> DistanceSettings:
                    path_mismatch_penalty, duration_log_weight,
                    best_damage_distance_fallback,
                    energy_out_of_range_log_delta,
-                   phenotype_mismatch_distance,
+                   damage_signature_mismatch_distance,
                    measured_exact_waveform_max,
                    predicted_waveform_max,
                    device_run_waveform_max,
@@ -378,7 +378,7 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
                     UNION ALL
                     SELECT
                         s.*,
-                        'energy_censored_phenotype_only'::text AS target_match_tier,
+                        'energy_censored_damage_signature_only'::text AS target_match_tier,
                         CASE
                             WHEN COALESCE(s.energy_censored_reason, 'none') = 'failure_cutoff'
                               THEN s.event_energy_vds_id_j
@@ -525,20 +525,20 @@ def generate_grid(default: DistanceSettings, include_default: bool = True) -> li
     gate_scales = sorted({default.gate_delta_scale, 0.15, 0.20, 0.25})
     norm_scales = sorted({default.normalized_vds_delta_scale, 0.10, 0.15, 0.20})
     energy_weights = sorted({default.energy_log_weight, 0.50, 1.00, 1.50})
-    phenotype_thresholds = sorted({default.phenotype_mismatch_distance, 2.25, 2.50, 2.75})
+    damage_signature_thresholds = sorted({default.damage_signature_mismatch_distance, 2.25, 2.50, 2.75})
     weak_thresholds = sorted({default.weak_waveform_max, 2.50, 3.00, 3.50})
 
     for collapse in collapse_scales:
         for gate in gate_scales:
             for norm in norm_scales:
                 for energy_weight in energy_weights:
-                    for phenotype_threshold in phenotype_thresholds:
+                    for damage_signature_threshold in damage_signature_thresholds:
                         for weak_threshold in weak_thresholds:
                             candidate = replace(
                                 default,
                                 setting_name=(
                                     f"grid_c{collapse:g}_g{gate:g}_n{norm:g}_"
-                                    f"ew{energy_weight:g}_pt{phenotype_threshold:g}_"
+                                    f"ew{energy_weight:g}_pt{damage_signature_threshold:g}_"
                                     f"ww{weak_threshold:g}"
                                 ),
                                 description="calibration grid candidate",
@@ -546,7 +546,7 @@ def generate_grid(default: DistanceSettings, include_default: bool = True) -> li
                                 gate_delta_scale=gate,
                                 normalized_vds_delta_scale=norm,
                                 energy_log_weight=energy_weight,
-                                phenotype_mismatch_distance=phenotype_threshold,
+                                damage_signature_mismatch_distance=damage_signature_threshold,
                                 weak_waveform_max=weak_threshold,
                             )
                             if candidate != default:
@@ -568,16 +568,16 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
 
     if not axis_terms:
         return {
-            "phenotype_axes_used": 0,
-            "phenotype_axis_distance_sq": None,
-            "phenotype_distance": None,
+            "damage_signature_axes_used": 0,
+            "damage_signature_axis_distance_sq": None,
+            "damage_signature_distance": None,
             "waveform_distance": None,
             "combined_screening_distance": None,
         }
 
-    phenotype_axis_distance_sq = sum(axis_terms) / len(axis_terms)
+    damage_signature_axis_distance_sq = sum(axis_terms) / len(axis_terms)
     path_penalty = finite_float(row.get("path_penalty")) or 0.0
-    phenotype_distance = math.sqrt(phenotype_axis_distance_sq + path_penalty ** 2)
+    damage_signature_distance = math.sqrt(damage_signature_axis_distance_sq + path_penalty ** 2)
 
     energy_term = 0.0
     log_energy = finite_float(row.get("log_energy_delta"))
@@ -589,7 +589,7 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
         duration = 1.0
     waveform_distance = math.sqrt(
         energy_term
-        + phenotype_axis_distance_sq
+        + damage_signature_axis_distance_sq
         + path_penalty ** 2
         + settings.duration_log_weight * duration ** 2
     )
@@ -599,9 +599,9 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
     combined = math.sqrt(waveform_distance ** 2 + damage_distance ** 2)
 
     return {
-        "phenotype_axes_used": len(axis_terms),
-        "phenotype_axis_distance_sq": phenotype_axis_distance_sq,
-        "phenotype_distance": phenotype_distance,
+        "damage_signature_axes_used": len(axis_terms),
+        "damage_signature_axis_distance_sq": damage_signature_axis_distance_sq,
+        "damage_signature_distance": damage_signature_distance,
         "waveform_distance": waveform_distance,
         "combined_screening_distance": combined,
     }
@@ -615,13 +615,13 @@ def classify_row(row: dict[str, Any], settings: DistanceSettings, distances: dic
         and log_energy > settings.energy_out_of_range_log_delta
     ):
         status = "energy_out_of_range"
-    elif distances["phenotype_axes_used"] == 0:
-        status = "missing_phenotype_overlap"
+    elif distances["damage_signature_axes_used"] == 0:
+        status = "missing_damage_signature_overlap"
     elif (
-        distances["phenotype_distance"] is not None
-        and distances["phenotype_distance"] > settings.phenotype_mismatch_distance
+        distances["damage_signature_distance"] is not None
+        and distances["damage_signature_distance"] > settings.damage_signature_mismatch_distance
     ):
-        status = "phenotype_mismatch"
+        status = "damage_signature_mismatch"
     elif (
         row.get("damage_comparability_status") in {"strong", "usable"}
         and distances["waveform_distance"] is not None
@@ -716,8 +716,8 @@ def evaluate_config(
             top3_hits += 1
         if truth_score["candidate_status"] not in {
             "energy_out_of_range",
-            "missing_phenotype_overlap",
-            "phenotype_mismatch",
+            "missing_damage_signature_overlap",
+            "damage_signature_mismatch",
         }:
             truth_not_blocked_hits += 1
 

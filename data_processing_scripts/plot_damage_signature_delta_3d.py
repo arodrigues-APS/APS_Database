@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot irradiation-to-SC and irradiation-to-avalanche phenotype deltas in 3D.
+Plot irradiation-to-SC and irradiation-to-avalanche damage-signature deltas in 3D.
 
 The source relation is stress_proxy_candidate_view. Each row is a ranked
 irradiation-target/proxy-candidate comparison; it is not a standalone sample.
@@ -8,10 +8,10 @@ Missing axes are placed on explicitly labelled N/A display planes and are never
 written back as zero-valued measurements.
 
 Outputs:
-  out/avalanche_irrad_pilot/phenotype_delta_3d.png
-  out/avalanche_irrad_pilot/phenotype_delta_3d.csv
-  out/avalanche_irrad_pilot/phenotype_delta_3d_coverage.csv
-  out/avalanche_irrad_pilot/phenotype_delta_3d_NOTES.md
+  out/avalanche_irrad_pilot/damage_signature_delta_3d.png
+  out/avalanche_irrad_pilot/damage_signature_delta_3d.csv
+  out/avalanche_irrad_pilot/damage_signature_delta_3d_coverage.csv
+  out/avalanche_irrad_pilot/damage_signature_delta_3d_NOTES.md
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except ImportError as exc:
-    raise SystemExit("matplotlib is required for the phenotype plot") from exc
+    raise SystemExit("matplotlib is required for the damage signature plot") from exc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db_config import get_connection  # noqa: E402
@@ -36,7 +36,7 @@ from db_config import get_connection  # noqa: E402
 
 OUT_DIR = Path("out/avalanche_irrad_pilot")
 
-PHENOTYPE_SQL = """
+DAMAGE_SIGNATURE_SQL = """
 SELECT target_stress_record_key,
        target_metadata_id,
        target_event_id,
@@ -59,8 +59,8 @@ SELECT target_stress_record_key,
        collapse_delta,
        gate_delta,
        normalized_vds_delta,
-       phenotype_axes_used,
-       phenotype_distance,
+       damage_signature_axes_used,
+       damage_signature_distance,
        candidate_status
 FROM stress_proxy_candidate_view
 WHERE candidate_source IN ('sc', 'avalanche')
@@ -71,13 +71,13 @@ ORDER BY candidate_source, target_stress_record_key, candidate_rank;
 def load_comparisons() -> pd.DataFrame:
     conn = get_connection()
     try:
-        return pd.read_sql_query(PHENOTYPE_SQL, conn)
+        return pd.read_sql_query(DAMAGE_SIGNATURE_SQL, conn)
     finally:
         conn.close()
 
 
 def summarize_coverage(comparisons: pd.DataFrame) -> pd.DataFrame:
-    """Count measured phenotype axes and distinct records by proxy source."""
+    """Count measured damage signature axes and distinct records by proxy source."""
     rows = []
     for source, group in comparisons.groupby("candidate_source", sort=True):
         complete = group[
@@ -102,7 +102,7 @@ def summarize_coverage(comparisons: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_phenotype_delta_3d(
+def plot_damage_signature_delta_3d(
     comparisons: pd.DataFrame,
     out_path: Path,
 ) -> None:
@@ -228,7 +228,7 @@ def plot_phenotype_delta_3d(
     )
     ax.view_init(elev=24, azim=-57)
     ax.set_title(
-        "All ranked proxy comparisons in phenotype-delta space",
+        "All ranked proxy comparisons in damage-signature-delta space",
         pad=20,
     )
     ax.legend(
@@ -267,9 +267,9 @@ def markdown_table(frame: pd.DataFrame) -> str:
 
 
 def write_notes(coverage: pd.DataFrame, out_path: Path) -> None:
-    text = f"""# 3D Phenotype Delta Plot
+    text = f"""# 3D Damage Signature Delta Plot
 
-Each point in `phenotype_delta_3d.png` is one ranked comparison from
+Each point in `damage_signature_delta_3d.png` is one ranked comparison from
 `stress_proxy_candidate_view`: an irradiation target event paired with either
 an SC or avalanche proxy candidate. The axes are absolute candidate-to-target
 differences:
@@ -293,7 +293,7 @@ display coordinates are not zero-valued imputations.
 There are therefore no fully measured three-axis comparisons in the current
 materialized data. The plot still compares both proxy types on collapse delta
 and compares irradiation-to-SC pairs on normalized-Vds delta. The exact source
-rows, with NULLs preserved, are in `phenotype_delta_3d.csv`.
+rows, with NULLs preserved, are in `damage_signature_delta_3d.csv`.
 """
     out_path.write_text(text)
 
@@ -302,24 +302,24 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     comparisons = load_comparisons()
     if comparisons.empty:
-        raise SystemExit("No irradiation-to-proxy phenotype comparisons found")
+        raise SystemExit("No irradiation-to-proxy damage signature comparisons found")
 
     coverage = summarize_coverage(comparisons)
-    comparisons.to_csv(OUT_DIR / "phenotype_delta_3d.csv", index=False)
+    comparisons.to_csv(OUT_DIR / "damage_signature_delta_3d.csv", index=False)
     coverage.to_csv(
-        OUT_DIR / "phenotype_delta_3d_coverage.csv",
+        OUT_DIR / "damage_signature_delta_3d_coverage.csv",
         index=False,
     )
-    plot_phenotype_delta_3d(
+    plot_damage_signature_delta_3d(
         comparisons,
-        OUT_DIR / "phenotype_delta_3d.png",
+        OUT_DIR / "damage_signature_delta_3d.png",
     )
     write_notes(
         coverage,
-        OUT_DIR / "phenotype_delta_3d_NOTES.md",
+        OUT_DIR / "damage_signature_delta_3d_NOTES.md",
     )
 
-    print(f"Wrote phenotype-delta outputs to {OUT_DIR}")
+    print(f"Wrote damage-signature-delta outputs to {OUT_DIR}")
     print(coverage.to_string(index=False))
 
 

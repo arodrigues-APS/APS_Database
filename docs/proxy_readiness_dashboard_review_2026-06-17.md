@@ -30,7 +30,7 @@ every conclusion below.
   `... Normalized Observed V/I Stress Scatter by Test Type`, etc.).
 - The **11:21 screenshots** show a **reworked dashboard that exists nowhere in
   the repository**. Chart titles there (`Stress Landscape: Severity vs
-  Timescale`, `Energy vs Phenotype Distance`, `Irradiation Fluence vs Proxy
+  Timescale`, `Energy vs Damage Signature Distance`, `Irradiation Fluence vs Proxy
   Match Distance`, `Radiation Dose vs Proxy Match Distance`) do not appear in
   any `.py` or `.sql` file. `grep` across `data_processing_scripts/` and
   `schema/` finds none of them.
@@ -155,7 +155,7 @@ dependency order:
 
 - **Targets** = irradiation `detected_single_event`s, in two tiers
   (SQL 2102): `energy_comparable` (event-level integrated energy available) and
-  `energy_censored_phenotype_only` (energy censored/not comparable; a
+  `energy_censored_damage_signature_only` (energy censored/not comparable; a
   `target_energy_floor_j` is kept for `failure_cutoff`).
 - **Candidates** = SC/avalanche records with positive terminal energy (SQL 2139).
 - **Links** (SQL 2147): `same_device` (matching `device_type`), plus
@@ -166,7 +166,7 @@ dependency order:
   by design — known clamp/scaling artifact), `log_energy_delta`,
   `collapse_delta`, `gate_delta`, `duration_log_delta`, and a seeded
   `path_penalty` from `stress_mechanism_compatibility`.
-- **Distances** (SQL 2452): `phenotype_distance = sqrt(mean(normalized squared
+- **Distances** (SQL 2452): `damage_signature_distance = sqrt(mean(normalized squared
   axis deltas) + path_penalty²)`; `waveform_distance` adds the energy-log term
   (weight 1.0) and a small duration term (weight 0.01).
 - **Damage evidence** (SQL 2493): lateral join to measured matches first
@@ -175,7 +175,7 @@ dependency order:
   waveform_only) follow.
 - **Status** (SQL 2623): an ordered ladder using the seeded thresholds
   (`stress_proxy_distance_settings`, default row): `energy_out_of_range`
-  (log delta > 4.0) → `missing_phenotype_overlap` → `phenotype_mismatch`
+  (log delta > 4.0) → `missing_damage_signature_overlap` → `damage_signature_mismatch`
   (> 2.50) → `cross_device_screening_only` → `measured_damage_candidate`
   (waveform ≤ 1.75, exact-condition, strong/usable) → `predicted_damage_candidate`
   → `device_run_measured_candidate` (≤ 2.25) → `weak_measured_candidate`
@@ -235,13 +235,13 @@ tab/dashboard) · **Trim** (keep but cut columns/fix) · **Cut/replace**.
 | Device Coverage / Blocker Matrix | Which families blocked, on what | `readiness` view, 14 cols | **Keep, trim.** Most useful operational table. Cut to device, status, gate_zero_candidate, SC/UIS counts, irradiation events, the two "+post-IV" overlap counts, comparable-damage-axis count, next action. Drop cell bars here. |
 | Experiment Planning Queue | Next measurement to run | `experiment_plan` view, 26 cols | **Keep, move up, trim.** This is the most actionable panel and it sits 8th. Show rank, priority tier, action type, measurement device, plan text, affected-target count, expected unlock, rationale. Hide recipe keys + repeated candidate metadata. |
 | Candidate Summary | Aggregate of rank-1 proxies | `candidate_summary`, 19 cols | **Trim → compact counts / stacked bar.** Long `device_types` / `candidate_device_types` strings are unreadable as columns; the value is the counts by status/source/tier. |
-| Censored SEB Candidate Coverage | SEB events where energy is censored | same view, filtered to `energy_censored_phenotype_only` + `SEB` | **Replace with a small panel.** Conceptually important (SEB censoring is a real failure mode) but it just duplicates the summary table shape. Make it 4–5 counts. |
+| Censored SEB Candidate Coverage | SEB events where energy is censored | same view, filtered to `energy_censored_damage_signature_only` + `SEB` | **Replace with a small panel.** Conceptually important (SEB censoring is a real failure mode) but it just duplicates the summary table shape. Make it 4–5 counts. |
 | Best Proxy Candidates | Best proxy per target | `candidates`, rank=1, **~95 cols** | **Trim hard.** This is an export, not a dashboard table. Visible set should be ~15 cols: target key/device/event/tier, target energy or censor reason, candidate source/device/condition, status, confidence, scope, waveform/damage/combined distance, blockers. |
 | Candidate Evidence Detail | Debug top-10 statuses | `candidates`, rank≤10, ~80 cols, 2500 rows | **Demote to drill-through/export.** Screenshot shows 13 pages of 60+ columns. Not a dashboard object. |
-| Energy Mismatch vs Phenotype Mismatch (scatter) | Are candidates close in both energy and phenotype? | x=`log_energy_delta`, y=`phenotype_distance`, rank=1 | **Keep — best candidate plot.** Maps directly to the matching logic. Add threshold guide lines (energy out-of-range = 4.0; phenotype mismatch = 2.50). But see §6.3: the dense horizontal band at y≈0.77 is cross-device avalanche screening rows — color/facet by status so they don't dominate. |
+| Energy Mismatch vs Damage Signature Mismatch (scatter) | Are candidates close in both energy and damage signature? | x=`log_energy_delta`, y=`damage_signature_distance`, rank=1 | **Keep — best candidate plot.** Maps directly to the matching logic. Add threshold guide lines (energy out-of-range = 4.0; damage signature mismatch = 2.50). But see §6.3: the dense horizontal band at y≈0.77 is cross-device avalanche screening rows — color/facet by status so they don't dominate. |
 | Waveform vs Damage Distance (scatter) | Waveform similarity vs post-IV damage similarity | x=`waveform_distance`, y=`best_damage_distance`, rank=1 | **Keep as validation diagnostic.** By construction only rows *with* damage evidence appear (screenshot legend is all `measured_damage`), so it is the most "real" plot — but it's sparse and belongs after the summary establishes that damage evidence exists. |
 | Target vs Best Proxy Terminal Energy (scatter) | Compare target vs proxy energy | x=`target_energy_j`, y=`candidate_energy_j`, `log_x=log_y=True` | **Cut or rebuild.** Confirmed broken on screen (see §6.1). |
-| Energy Density Ratio vs Phenotype Mismatch (scatter) | Does local energy-density ratio explain mismatch? | x=`energy_density_ratio` (`log_x=True`), y=`phenotype_distance` | **Demote + fix.** Research diagnostic; x-axis broken (linear 1e-18→1.37e12, §6.1); also missing from the candidate filter group (§6.4). |
+| Energy Density Ratio vs Damage Signature Mismatch (scatter) | Does local energy-density ratio explain mismatch? | x=`energy_density_ratio` (`log_x=True`), y=`damage_signature_distance` | **Demote + fix.** Research diagnostic; x-axis broken (linear 1e-18→1.37e12, §6.1); also missing from the candidate filter group (§6.4). |
 
 ### Diagnostics / physics (job E) — all **Demote** off the operational page
 
@@ -290,10 +290,10 @@ documents that FORMULA annotation layers are a recurring fragility; any new
 reference-line chart must carry those keys.
 
 ### 6.3 Candidate scatters are dominated by screening-only rows
-In `Screenshot 09-56-01`, "Energy Mismatch vs Phenotype Mismatch" is a thick
-horizontal band of cyan points at `phenotype_distance ≈ 0.77`. Those are
+In `Screenshot 09-56-01`, "Energy Mismatch vs Damage Signature Mismatch" is a thick
+horizontal band of cyan points at `damage_signature_distance ≈ 0.77`. Those are
 `avalanche, cross_device_screening_only, waveform_only` rows — avalanche drops
-the `normalized_vds` axis (SQL 2382), so their phenotype distance collapses to a
+the `normalized_vds` axis (SQL 2382), so their damage signature distance collapses to a
 near-constant from collapse+gate+path_penalty. By the method's own rules these
 are **capped at screening confidence**, yet they visually dominate the plot and
 make the candidate space look dense. This is a *usefulness* bug, not just
@@ -306,7 +306,7 @@ In the builder:
   `build_native_filters` (402) **never uses it** — so the Experiment Planning
   Queue is excluded from *every* filter. Apply a device filter and the action
   queue does not respond.
-- "Energy Density Ratio vs Phenotype Mismatch" is **not** in
+- "Energy Density Ratio vs Damage Signature Mismatch" is **not** in
   `candidate_chart_names` (1401–1409), so candidate filters skip it.
 - "Event Feature Coverage" and "Destruction Boundary by Device" are in **no**
   group at all.
@@ -337,10 +337,10 @@ reads "Waiting on Models," i.e., an empty/zero-row chart shipped to the layout.
    MARKDOWN). Superset *does* support both; the page uses neither.
 2. **Tables doing analysis work** — three tables exceed 60 columns. Superset's
    table renderer is the wrong tool for inspecting radiation dose + waveform
-   phenotype + damage evidence + geometry + pulse history at once.
+   damage signature + damage evidence + geometry + pulse history at once.
 3. **Titles name implementation nouns, not questions** — "Candidate Pairs:
-   Energy Mismatch vs Phenotype Mismatch" vs. "Where do top candidates fail —
-   energy, phenotype, or damage?"
+   Energy Mismatch vs Damage Signature Mismatch" vs. "Where do top candidates fail —
+   energy, damage signature, or damage?"
 4. **Censoring/evidence caveats are under-stated** — the SQL carefully tracks
    energy censoring, active-window confidence, and damage comparability, but the
    page shows candidate clouds before telling the user how little of it is
@@ -374,7 +374,7 @@ big-bang rebuilds), do this in order rather than as one rewrite:
 - Tab 1 "Readiness & Actions": status card, blocker matrix (trimmed), planning
   queue (trimmed).
 - Tab 2 "Candidate Triage": compact summary, trimmed best-proxy table, the
-  energy-vs-phenotype scatter (faceted by status), waveform-vs-damage scatter.
+  energy-vs-damage signature scatter (faceted by status), waveform-vs-damage scatter.
 - Tab 3 "Method Diagnostics": the normalized V/I, bias/energy/power, deposited
   energy, amplification, and Figure 1(b) charts.
 - Tab 4 "Raw / QA" (or drill-through links): stress-context and event-feature
@@ -424,10 +424,10 @@ After completing the above, I read
    screenshot and identifies the *binding constraint*: the single
    electrical-proxy family does not overlap the seven irradiation families.
 4. **A usefulness (not just legibility) critique of the candidate scatters
-   (§6.3):** the dense `phenotype_distance ≈ 0.77` band is cross-device
+   (§6.3):** the dense `damage_signature_distance ≈ 0.77` band is cross-device
    avalanche screening rows, so the plots visually overstate readiness.
 5. **Concrete thresholds (§3.4):** the actual `stress_proxy_distance_settings`
-   default constants (energy log delta 5.0, phenotype mismatch 2.50, waveform
+   default constants (energy log delta 5.0, damage signature mismatch 2.50, waveform
    maxima 1.25–3.00, etc.) that explain the status ladder.
 
 **Where I'd reprioritize differently:**

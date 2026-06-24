@@ -400,7 +400,7 @@ def categorize_measurement(measurement_type, filename=''):
     # that could be picked up by the IdVd regex in edge cases).
     # `dvd_vg` was removed: it was intended to catch standalone Blocking
     # filenames but only ever matched `IdVd_Vg*` as a substring.
-    if re.search(r'block|bvdss|idss|idvdss|dvdss|listv', tl):
+    if re.search(r'block|bvdss|idss|idvdss|dvdss|listv|v_bd|vbd', tl):
         return 'Blocking'
 
     # Standard categories (union of baselines and SC patterns)

@@ -58,6 +58,17 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
     }
 
+    location = /tools/sc-irrad-equivalence-3d {
+        return 302 /tools/sc-irrad-equivalence-3d/;
+    }
+
+    location = /tools/sc-irrad-equivalence-3d/ {
+        alias /data/www/tools/sc-irrad-equivalence-3d/index.html;
+        default_type text/html;
+        add_header Cache-Control "no-cache";
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8088;
         proxy_set_header Host $host;

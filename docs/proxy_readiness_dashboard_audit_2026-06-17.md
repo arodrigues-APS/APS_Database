@@ -59,8 +59,8 @@ The builder script registers these Superset datasets:
 | --- | --- | --- |
 | `gate_zero` | `stress_proxy_gate_zero_view` | one-row go/no-go readiness summary |
 | `readiness` | `stress_proxy_readiness_view` | per-device coverage and blocker matrix |
-| `file_features` | `stress_waveform_file_features` | file-level waveform phenotype extraction |
-| `event_features` | `stress_waveform_event_features` | event-level waveform phenotype extraction |
+| `file_features` | `stress_waveform_file_features` | file-level waveform damage signature extraction |
+| `event_features` | `stress_waveform_event_features` | event-level waveform damage signature extraction |
 | `basis_features` | `stress_waveform_basis_feature_view` | unnested feature basis flags |
 | `context` | `stress_test_context_view` | normalized stress, dose, energy, and Figure 1(b) context |
 | `destruction_boundary` | `stress_destruction_boundary_view` | empirical destructive/survived voltage rollup |
@@ -195,8 +195,8 @@ Targets are irradiation detected events in two tiers:
 
 - `energy_comparable`: event-level comparable integrated terminal energy is
   available.
-- `energy_censored_phenotype_only`: energy is censored or not comparable, so
-  matching falls back to phenotype-only evidence and an optional floor.
+- `energy_censored_damage_signature_only`: energy is censored or not comparable, so
+  matching falls back to damage-signature-only evidence and an optional floor.
 
 Candidates are SC and avalanche stress records with positive terminal energy.
 
@@ -204,7 +204,7 @@ Candidate links are created in two scopes:
 
 - `same_device`: candidate `device_type` matches target `device_type`.
 - `cross_device`: no same-device candidate exists, but target and candidate
-  have the same voltage class and enough comparable phenotype axes.
+  have the same voltage class and enough comparable damage signature axes.
 
 For energy-comparable targets, candidates are prefiltered to
 `abs(ln(candidate_energy / target_energy)) <= 5.0`.
@@ -221,7 +221,7 @@ Distance terms:
 - `duration_log_delta`: absolute natural-log duration mismatch.
 - `path_penalty`: seeded mechanism/path compatibility penalty.
 
-Phenotype distance is a normalized Euclidean distance over available phenotype
+Damage Signature distance is a normalized Euclidean distance over available damage signature
 axes plus path penalty. Waveform distance adds log-energy distance for
 energy-comparable targets plus a small duration term.
 
@@ -234,7 +234,7 @@ damage matches. Candidates are classified into statuses such as:
 - `weak_measured_candidate`
 - `waveform_only_candidate`
 - `missing_damage_context`
-- `phenotype_mismatch`
+- `damage_signature_mismatch`
 - `cross_device_screening_only`
 - `analog_questionable`
 - `inspect_manually`
@@ -345,10 +345,10 @@ are poor dashboard columns.
 ### Censored SEB Candidate Coverage
 
 Use: isolate SEB events where energy cannot be compared directly and matching
-is phenotype-only.
+is damage-signature-only.
 
 Computation: same summary view filtered to
-`target_match_tier = 'energy_censored_phenotype_only'` and
+`target_match_tier = 'energy_censored_damage_signature_only'` and
 `target_event_type = 'SEB'`.
 
 Assessment: conceptually important, because SEB energy censoring is a known
@@ -431,17 +431,17 @@ Recommendation: precompute `log10_target_energy_j` and
 `log10_candidate_energy_j` in SQL, then plot those as linear axes, or use a
 chart type that supports both log axes correctly.
 
-### Energy Mismatch Vs Phenotype Mismatch
+### Energy Mismatch Vs Damage Signature Mismatch
 
-Use: show whether candidates are close in energy and waveform phenotype at the
+Use: show whether candidates are close in energy and waveform damage signature at the
 same time.
 
-Computation: x is `log_energy_delta`; y is `phenotype_distance`; top-ranked
+Computation: x is `log_energy_delta`; y is `damage_signature_distance`; top-ranked
 candidates only.
 
 Assessment: keep one version of this plot. It is the most interpretable
 candidate scatter because it maps directly to the matching logic. Add visual
-threshold lines for energy-out-of-range and phenotype-mismatch thresholds, and
+threshold lines for energy-out-of-range and damage-signature-mismatch thresholds, and
 filter or facet by candidate status so blocked/manual rows do not dominate the
 reading.
 
@@ -457,12 +457,12 @@ It should be shown only after the summary says whether measured or predicted
 damage evidence exists. When damage evidence is missing, this plot becomes
 sparse or misleading.
 
-### Energy Density Ratio Vs Phenotype Mismatch
+### Energy Density Ratio Vs Damage Signature Mismatch
 
 Use: explore whether local active-volume energy-density ratio explains
-phenotype mismatch.
+damage signature mismatch.
 
-Computation: x is `energy_density_ratio`; y is `phenotype_distance`;
+Computation: x is `energy_density_ratio`; y is `damage_signature_distance`;
 top-ranked candidates only.
 
 Assessment: demote. This is a research diagnostic. It also has two
@@ -578,7 +578,7 @@ reason the dashboard feels out of hand.
 ### 2. Wide Tables Are Doing Too Much Work
 
 The dashboard includes multiple tables with dozens of columns. Superset table
-rendering is not a good place to inspect radiation dose, waveform phenotype,
+rendering is not a good place to inspect radiation dose, waveform damage signature,
 damage evidence, geometry, pulse history, blockers, and ranking details all at
 once.
 
@@ -593,7 +593,7 @@ specific numeric summary views.
 
 The generated chart groups omit some charts:
 
-- `Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Phenotype
+- `Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Damage Signature
   Mismatch` is not included in `candidate_chart_names`, so candidate filters
   do not apply to it.
 - `Proxy Readiness - Event Feature Coverage` is not included in the context
@@ -690,7 +690,7 @@ Keep:
 
 - compact Candidate Summary;
 - reduced Best Proxy Candidates table;
-- one scatter: Energy Mismatch vs Phenotype Mismatch.
+- one scatter: Energy Mismatch vs Damage Signature Mismatch.
 
 Optional:
 
@@ -740,14 +740,14 @@ Those removed charts should move to a separate "Proxy Method Diagnostics" or
 
 6. Add explicit threshold annotations to candidate-distance plots:
    - energy out-of-range threshold;
-   - phenotype mismatch threshold;
+   - damage signature mismatch threshold;
    - waveform status thresholds where meaningful.
 
 7. Rename chart titles around user questions rather than implementation nouns:
    - "Which device families block gate-zero?"
    - "What measurement unlocks the most targets?"
    - "Which top candidates are evidence-supported?"
-   - "Where do top candidates fail: energy, phenotype, or damage?"
+   - "Where do top candidates fail: energy, damage signature, or damage?"
 
 8. Put raw audit tables behind drill-through links or in a diagnostics
    dashboard. They should not be first-order dashboard charts.

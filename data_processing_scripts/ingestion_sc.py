@@ -740,6 +740,13 @@ def detect_sc_waveform(filepath):
     """
     fname = os.path.basename(filepath)
 
+    # Curve-tracer characterization exports (IDSS, V_BD, body-diode) can carry a
+    # 'time'+'VDS' column header and would false-match the header heuristic below.
+    # They live under curvetracermeasurements/, never the oscilloscope
+    # ForDataAnalysis/ tree, so they are never SC event waveforms.
+    if 'curvetracermeasurements' in filepath.replace('\\', '/').lower():
+        return False
+
     # Pattern 1: filename like Rohm600V8us.csv, 600V2us.csv, C2M_IMC32_600V7us.csv
     if re.match(r'^(?:[A-Za-z_]*?)(\d+)V(\d+(?:\.\d+)?)us\.csv$', fname, re.IGNORECASE):
         return True

@@ -19,7 +19,7 @@ Produces `event_type` (SEB / SELCI / SELCII / MIXED) and mechanism-neutral
 `path_type`. 516 files, 1811 events: 76 SEB, 177 SELC-I, 1520 SELC-II,
 38 MIXED. High-energy-proton events can only be SEB or UNKNOWN; low-energy
 proton steps are TID/DD diagnostics. This is the layer that prevents
-phenotype matching across incompatible radiation mechanisms.
+damage signature matching across incompatible radiation mechanisms.
 
 ### 1.2 Measured damage-fingerprint matching
 
@@ -44,7 +44,7 @@ measured irradiation is missing, with donor counts, validation gates, and
 reference tiers carried on every match. Used as a separate, lower evidence
 tier — correct design.
 
-### 1.4 Waveform phenotype + energy candidate retrieval (production method)
+### 1.4 Waveform damage signature + energy candidate retrieval (production method)
 
 - `schema/025_proxy_readiness_waveforms.sql`
 - `stress_waveform_file_features`, `stress_waveform_event_features`,
@@ -59,7 +59,7 @@ tier — correct design.
   integrated Vds·Id energy;
 - candidates: SC/avalanche records of the **same `device_type`** within
   |Δln E| ≤ 5;
-- waveform distance = log-energy delta + phenotype distance
+- waveform distance = log-energy delta + damage signature distance
   (collapse delta /0.25, gate delta /0.20, hand-tuned `path_penalty`)
   + 0.01·(duration log delta)²;
 - evidence join: measured damage match (exact-condition vs device-run scope),
@@ -102,7 +102,7 @@ carried into `stress_test_context_view` / candidate view as context but are
 | fact | value |
 | --- | --- |
 | candidate pairs in `stress_proxy_candidate_view` | 390 |
-| statuses present | weak_measured (180), missing_damage_context (178), inspect_manually (20), phenotype_mismatch (12) |
+| statuses present | weak_measured (180), missing_damage_context (178), inspect_manually (20), damage_signature_mismatch (12) |
 | measured_damage / predicted_damage candidates | **0 / 0** |
 | rank-1 targets covered | C2M0080120D SELCII + 1 MIXED only |
 | rank-1 recommendation today | SC 600V/8µs (12 targets), SC 600V/2µs (6 targets), all vs Ca-ion SELCII, weak 1-axis damage support |
@@ -141,7 +141,7 @@ waveform-shape similarity plus 1-axis weak damage matches.
 
 Recommendation (follows the lab's "tag quality, don't widen" rule):
 
-1. Add a **phenotype-only target tier** for energy-censored events instead of
+1. Add a **damage-signature-only target tier** for energy-censored events instead of
    excluding them. Keep the energy axis out of the distance for that tier and
    emit `target_energy_censored_*` blockers, which the schema already
    defines but which are currently dead code (targets that would carry them
@@ -195,7 +195,7 @@ and `normalized_current` — they are displayed but unused in the distance.
 
 Recommendations, in increasing order of physics:
 
-1. Add `normalized_vds` delta (V/BV fraction) to the phenotype distance for
+1. Add `normalized_vds` delta (V/BV fraction) to the damage signature distance for
    blocking-state targets; for SEB targets this is the dominant axis in the
    literature and is robust to instrument current-scale differences.
 2. Use the new `device_material_layers` area/thickness estimates to express
@@ -309,7 +309,7 @@ ORDER BY target_stress_record_key, candidate_rank;
 Step 2 — read `candidate_status` honestly: anything below
 `measured_damage_candidate` is a *screening* suggestion. Today's best
 answer is "SC 600 V / 8 µs (or 2 µs) resembles C2M0080120D Ca-ion SELC-II
-events in waveform phenotype, with weak 1-axis damage support" — and per F1
+events in waveform damage signature, with weak 1-axis damage support" — and per F1
 its mechanism compatibility is questionable; treat it as a hypothesis to
 test, not a recommendation to substitute.
 
@@ -325,12 +325,12 @@ gates passing.
 ### Target workflow (after F1–F3 land) — SEB example
 
 1. Define the target: family, environment (ion/LET or proton energy), bias
-   point; SEB targets enter via the censored/phenotype tier.
+   point; SEB targets enter via the censored/damage signature tier.
 2. Mechanism gate: SEB → UIS avalanche first (BJT-latch pair), SC second.
 3. Match on normalized axes: V_stress/BV near the target's bias fraction
    (literature: heavy-ion SEB ≈ 40–50 % V_BD, alpha SEB ≈ 80–93 % V_BD),
    peak current vs latch limit, energy ≥ censored lower bound, collapse
-   phenotype ≥ 0.9.
+   damage signature ≥ 0.9.
 4. Validate: post-IV fingerprint agreement on ≥ 2 same-sign axes
    (measured > predicted), IQR and n reported.
 5. Report the equivalence envelope row (condition, axes, tier, status,
@@ -341,7 +341,7 @@ gates passing.
 | # | action | type | effort | unlocks |
 | --- | --- | --- | --- | --- |
 | 1 | Map Selam avalanche files to part numbers | data curation | low | ~7× avalanche pool, new overlaps |
-| 2 | Censored/phenotype-only SEB target tier | schema/SQL | low | the physically right proxy question |
+| 2 | Censored/damage-signature-only SEB target tier | schema/SQL | low | the physically right proxy question |
 | 3 | Sign agreement in damage comparability | SQL | low | stops false "nearest" matches |
 | 4 | Mechanism-compatibility class table | schema/SQL | low | auditable replacement for path_penalty |
 | 5 | Post-IV after existing C2M0080120D SC/UIS conditions | lab | medium | first measured_damage_candidate rows |

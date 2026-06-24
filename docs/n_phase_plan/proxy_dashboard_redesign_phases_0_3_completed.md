@@ -113,7 +113,7 @@ because the two evidence pools do not overlap enough yet.
 ### What changed
 
 - Removed `Candidate Pairs: Target vs Best Proxy Terminal Energy`.
-- Rebuilt `Candidate Pairs: Energy Density Ratio vs Phenotype Mismatch` so the
+- Rebuilt `Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch` so the
   energy-density ratio is on the working log y-axis.
 - Did not port the live-only `soa_axis_score` chart.
 - Confirmed the Figure 1(b) FORMULA annotation layers include the fields
@@ -132,7 +132,7 @@ relationship.
 
 The energy-density chart had a related problem. Its information was potentially
 useful, but the log transform was assigned to the ineffective axis. The fix was
-to swap axes so phenotype distance is on x and energy-density ratio is on y,
+to swap axes so damage signature distance is on x and energy-density ratio is on y,
 where the chart can use a real log scale.
 
 The live `soa_axis_score` panel was removed instead of repaired because the
@@ -223,13 +223,13 @@ compared in the same way.
 
 ### What changed
 
-- The operational `Energy Mismatch vs Phenotype Mismatch` scatter now shows
+- The operational `Energy Mismatch vs Damage Signature Mismatch` scatter now shows
   rank-1, decision-driving candidates and genuine failure modes.
 - The full all-status version moved to `Method Diagnostics` as
-  `Energy vs Phenotype (All Statuses, Diagnostic)`.
+  `Energy vs Damage Signature (All Statuses, Diagnostic)`.
 - Thresholds are described in chart descriptions instead of drawn as formula
   annotation lines:
-  - phenotype mismatch cutoff = 2.50;
+  - damage signature mismatch cutoff = 2.50;
   - energy out-of-range cutoff = `|log(proxy/target energy)| = 4.0`.
 - `Waveform vs Damage Distance` now explicitly says that rows require measured
   or predicted post-IV damage evidence.
@@ -253,7 +253,7 @@ replacement decision or expose a real top-candidate failure, and moves the full
 cloud to diagnostics where it can be interpreted as screening behavior.
 
 The threshold lines were kept in descriptions rather than drawn on the chart
-because the observed phenotype range was well below the 2.50 cutoff. Drawing a
+because the observed damage signature range was well below the 2.50 cutoff. Drawing a
 line far outside the visible data would distort the autoscaled axis and reduce
 legibility. Descriptions preserve the decision rule without damaging the plot.
 This also avoids reintroducing Superset annotation-layer fragility.
@@ -285,7 +285,7 @@ the destruction-boundary chart in scope.
 
 ### Energy failures are included in the operational scatter
 
-The first implementation filtered the operational energy-vs-phenotype scatter
+The first implementation filtered the operational energy-vs-damage signature scatter
 to decision statuses but accidentally left out `energy_out_of_range`, even
 though the chart description cited the energy cutoff. That would have made the
 operational view look cleaner than the ranking logic if a top-ranked candidate
@@ -322,11 +322,11 @@ look most plausible and why.
 - `Candidate Summary` gives grouped counts and median distances for rank-1
   candidates.
 - `Censored SEB Candidate Coverage` isolates energy-censored SEB rows, where
-  phenotype-only matching is the available comparison mode.
+  damage-signature-only matching is the available comparison mode.
 - `Best Proxy Candidates` shows the compact rank-1 candidate table with the
   fields needed to triage status, confidence, scope, waveform distance, damage
   distance, combined distance, and blockers.
-- `Energy Mismatch vs Phenotype Mismatch` is the operational scatter. It is not
+- `Energy Mismatch vs Damage Signature Mismatch` is the operational scatter. It is not
   a complete screening cloud; it is the candidate-decision view.
 - `Waveform vs Damage Distance` only contains candidates with measured or
   predicted damage evidence, so sparsity means missing damage context rather
@@ -337,7 +337,7 @@ look most plausible and why.
 Use this tab to inspect the method and physics context, not to make the first
 readiness decision.
 
-- The all-status energy-vs-phenotype scatter preserves the full screening cloud.
+- The all-status energy-vs-damage signature scatter preserves the full screening cloud.
 - The energy-density ratio plot remains available with a working log y-axis.
 - Normalized V/I, bias-vs-energy, bias-vs-power, deposited-energy, and
   amplification plots show how electrical and radiation stress quantities
@@ -408,7 +408,7 @@ Verified live state after implementation:
   `gate_zero_fail_current_state`, 0 candidate families,
   1 electrical-proxy-plus-post-IV family, and
   7 irradiation-plus-post-IV families.
-- The operational energy-vs-phenotype scatter had 39 decision points.
+- The operational energy-vs-damage signature scatter had 39 decision points.
 - The all-status diagnostic scatter had 819 points.
 
 ## Orphaned Chart Cleanup

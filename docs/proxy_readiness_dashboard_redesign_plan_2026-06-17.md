@@ -109,10 +109,10 @@ Changes:
    274–278.)
 
 3. **Fix or cut the energy-density scatter axis.** For
-   `Candidate Pairs: Energy Density Ratio vs Phenotype Mismatch`
+   `Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch`
    (`:1129`), stop using `log_x=True`. Preferred Phase-0 fix: swap axes so the
    working log axis is y:
-   `scatter_params("phenotype_distance", "energy_density_ratio", ...,
+   `scatter_params("damage_signature_distance", "energy_density_ratio", ...,
    log_y=True)`. If that still reads poorly, cut the chart until Phase 4 adds a
    precomputed `energy_density_ratio_log10` column.
 
@@ -200,7 +200,7 @@ Changes:
    - **Tab 1 — Readiness & Actions:** verdict block, planning queue,
      blocker matrix.
    - **Tab 2 — Candidate Triage:** candidate summary (compact), best-proxy
-     table (trimmed), energy-vs-phenotype scatter, waveform-vs-damage scatter.
+     table (trimmed), energy-vs-damage signature scatter, waveform-vs-damage scatter.
    - **Tab 3 — Method Diagnostics:** normalized V/I, bias-vs-energy,
      bias-vs-power, deposited-energy, amplification, Figure 1(b) ×4,
      energy-density scatter.
@@ -263,11 +263,11 @@ Goal: stop the scatters visually overstating readiness.
 Changes (in `scatter_params` usage for the Tab 2 scatters):
 
 1. **Separate screening-only rows from evidence-supported rows.** On
-   `Energy Mismatch vs Phenotype Mismatch` (`:1090`), keep a Tab-2 operational
+   `Energy Mismatch vs Damage Signature Mismatch` (`:1090`), keep a Tab-2 operational
    chart filtered to statuses that can drive decisions:
    `measured_damage_candidate`, `predicted_damage_candidate`,
    `device_run_measured_candidate`, `weak_measured_candidate`,
-   `analog_questionable`, `inspect_manually`, `phenotype_mismatch`, and
+   `analog_questionable`, `inspect_manually`, `damage_signature_mismatch`, and
    `missing_damage_context`. Move an all-status version to Tab 3 if the
    screening cloud is still useful diagnostically. This prevents
    `cross_device_screening_only` / `waveform_only` rows from visually implying
@@ -276,7 +276,7 @@ Changes (in `scatter_params` usage for the Tab 2 scatters):
 2. **Add threshold guide lines** as FORMULA annotation layers where Superset
    supports them. Reuse the `showMarkers`/`hideLine` pattern from the Figure
    1(b) reference lines. Add a horizontal guide at
-   `phenotype_distance = 2.50`. Add a vertical guide at
+   `damage_signature_distance = 2.50`. Add a vertical guide at
    `log_energy_delta = 4.0` only if the chart plugin supports x-axis formula
    annotations; otherwise add the threshold to the chart description and table
    columns. Do not ship another annotation-layer error.
@@ -287,13 +287,13 @@ Changes (in `scatter_params` usage for the Tab 2 scatters):
    not "no candidates."
 
 4. **Question-framed titles** across kept charts, e.g. "Where do top candidates
-   fail — energy, phenotype, or damage?", "Which families block gate-zero?",
+   fail — energy, damage signature, or damage?", "Which families block gate-zero?",
    "What measurement unlocks the most targets?"
 
 Acceptance criteria:
 
 - The default candidate scatter is not dominated by screening-only points.
-- The phenotype threshold is visible on the plot; the energy threshold is either visible or explicitly documented if x-axis formula annotations are unsupported.
+- The damage signature threshold is visible on the plot; the energy threshold is either visible or explicitly documented if x-axis formula annotations are unsupported.
 
 ---
 
@@ -338,7 +338,7 @@ Acceptance criteria:
     family rather than measurement family);
   - include the planning chart(s) in the Device filter scope after the helper
     supports the planning target;
-  - add `Energy Density Ratio vs Phenotype Mismatch` to `candidate_chart_names` if the chart is retained;
+  - add `Energy Density Ratio vs Damage Signature Mismatch` to `candidate_chart_names` if the chart is retained;
   - assign `Event Feature Coverage` and `Destruction Boundary by Device` to a
     group (or the diagnostics tab scope) so they respond to filters.
   - When tabs land, set each native filter's `tabsInScope` (`select_filter`,

@@ -294,7 +294,7 @@ def plot_event_space(features: pd.DataFrame, out_path: Path) -> None:
     ax.set_xscale("log")
     ax.set_xlabel("delta |Id| or pulse amplitude (A, log scale)")
     ax.set_ylabel("Vds collapse fraction")
-    ax.set_title("C2M0080120D pilot: event/pulse phenotype space")
+    ax.set_title("C2M0080120D pilot: event/pulse damage signature space")
     ax.axhline(0.5, color="black", linestyle="--", linewidth=1, alpha=0.5)
     ax.grid(True, which="both", linewidth=0.4, alpha=0.35)
     ax.legend(loc="best", fontsize=8)
@@ -443,7 +443,7 @@ def main() -> None:
     summary.to_csv(OUT_DIR / "pilot_cohort_summary.csv", index=False)
     damage.to_csv(OUT_DIR / "avalanche_d3_damage_case_study.csv", index=False)
 
-    plot_event_space(features, OUT_DIR / "phenotype_space.png")
+    plot_event_space(features, OUT_DIR / "damage_signature_space.png")
     plot_avalanche_waveforms(avalanche_waveforms, OUT_DIR / "avalanche_d3_waveforms.png")
     write_readme(summary, damage, OUT_DIR / "README.md")
 

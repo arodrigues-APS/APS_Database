@@ -86,15 +86,15 @@ Candidate view internals:
   `|Δln E| ≤ 5.0`; hand-tuned `path_penalty` CASE at L1887–1900
   (SEB×avalanche collapse≥0.30 → 0.15; SEB×sc → 0.25; SELC×sc → 0.50;
   NULL path → 0.25; else 0.75) — replaced by mechanism table in Phase 3.
-- `distances` L1905–1926: phenotype = sqrt((COALESCE(collapse_delta,0.75)/0.25)²
+- `distances` L1905–1926: damage signature = sqrt((COALESCE(collapse_delta,0.75)/0.25)²
   + (COALESCE(gate_delta,0.25)/0.20)² + path_penalty²); waveform = sqrt(
-  log_energy_delta² + phenotype² + 0.01·duration_log_delta²). The fixed
+  log_energy_delta² + damage signature² + 0.01·duration_log_delta²). The fixed
   imputations are removed in Phase 2 (pairwise normalization instead).
 - `evidence` L1927–2036: LATERAL joins to `damage_equivalence_match_view`
   (match_scope exact_condition vs device_run_best_damage) and
   `damage_equivalence_prediction_match_view` (sc only, latest model run).
 - `classified` L2038–2096: status thresholds (energy_out_of_range >4.0,
-  phenotype_mismatch >2.50, measured ≤1.75, device-run ≤2.25, weak ≤3.00,
+  damage_signature_mismatch >2.50, measured ≤1.75, device-run ≤2.25, weak ≤3.00,
   waveform_only ≤1.25; best_damage default 2.50 in combined distance);
   `candidate_blockers` array — the `target_energy_*` blocker CASEs at
   L2083–2094 are currently dead code (targets pre-filtered); they become
@@ -163,7 +163,7 @@ SC 400V/18µs d=0.416 on ΔBV axis, same sign (+193 vs +149).
 | weak_measured_candidate | low_measured_damage_screening_confidence | 180 |
 | missing_damage_context | blocked_or_manual_review | 178 |
 | inspect_manually | blocked_or_manual_review | 20 |
-| phenotype_mismatch | blocked_or_manual_review | 12 |
+| damage_signature_mismatch | blocked_or_manual_review | 12 |
 
 Zero measured/predicted damage candidates. Rank-1 exists only for
 C2M0080120D SELCII (38) + 1 MIXED, all SC candidates; top conditions:
@@ -173,7 +173,7 @@ damage distance 0.42 (weak, device-run scope).
 Blockers: missing_gate_overlap 390/390, candidate_missing_condition_post_iv
 390/390, damage_context_device_run_not_exact_candidate 200,
 target_missing_condition_post_iv 190, missing_damage_context 190,
-phenotype_distance_high 12.
+damage_signature_distance_high 12.
 
 ### Why no SEB targets (event energy breakdown, irradiation events)
 
@@ -205,7 +205,7 @@ AVL_UIDSelam/UID 43, AVL_Selam/Avalanche 2. `device_id` == `sample_group`
 `UIS 24.07.2019/Series2_1-47mH/series2_00026.mat`. Note trailing counters in
 filenames = pulse-sequence indices (Phase 7 exploits this).
 
-### SEB/MIXED target profile (collapse fraction ≈ phenotype)
+### SEB/MIXED target profile (collapse fraction ≈ damage signature)
 
 | device | ion | type | n | post-IV | avg collapse |
 | --- | --- | --- | ---: | ---: | ---: |
@@ -309,11 +309,11 @@ GROUP BY 1,2,3,4,5 ORDER BY 1,2,6 DESC;
   rows). Refresh Superset dataset columns afterwards
   (`refresh_dataset_columns` in superset_api.py).
 - Adding statuses (`analog_questionable`, `cross_device_screening_only`,
-  `missing_phenotype_overlap`) requires touching: status CASE, priority
+  `missing_damage_signature_overlap`) requires touching: status CASE, priority
   CASE, `replacement_confidence` CASE, ranking ORDER BY, summary view, and
   `CANDIDATE_COLORS` + filters in `create_proxy_readiness_dashboard.py`.
 - The proton SEB cohort (44 events, collapse 0) will NOT match avalanche
-  even in the censored tier — phenotype distance correctly pushes them to
+  even in the censored tier — damage signature distance correctly pushes them to
   SC (`thermal_runaway_pair_secondary`); that is expected behavior, per the
   energy+collapse diagnostic (43/44 flip,
   `out/proxy_matching_shift/proton_proxy_match_shift_summary.md`).

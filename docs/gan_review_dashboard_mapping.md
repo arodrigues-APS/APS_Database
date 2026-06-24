@@ -294,7 +294,7 @@ Recommended additions:
 - Derive `vds_peak / rated_vds` and dynamic overvoltage margin where waveform
   Vds and device rating are known.
 - Track single-pulse vs repetitive avalanche shots.
-- Add a "surge/overvoltage phenotype" view:
+- Add a "surge/overvoltage damage signature" view:
   - energy;
   - collapse fraction;
   - peak Vds;
@@ -305,12 +305,12 @@ Recommended additions:
 For proxy equivalence:
 
 - Avalanche energy can be compared with irradiation event energy only after
-  phenotype gating.
+  damage signature gating.
 - The existing proton diagnostic already shows that energy-only matching points
   to avalanche, while energy plus collapse points to SC for the current proton
   SEB subset.
 - Avalanche may still be a strong proxy candidate for hard-collapse heavy-ion
-  SEB-like behavior, where collapse phenotype is closer.
+  SEB-like behavior, where collapse damage signature is closer.
 
 ### 8. Radiation Comparisons
 
@@ -367,7 +367,7 @@ For proxy equivalence:
 - TID/DD-like cumulative damage should not be forced into the same Joule-based
   proxy model as SC or avalanche pulses.
 - Single-event burnout-like traces can be compared to electrical pulse stresses,
-  but only through waveform phenotype plus post-IV damage agreement.
+  but only through waveform damage signature plus post-IV damage agreement.
 
 ### 9. Extreme-Temperature Comparisons
 
@@ -399,7 +399,7 @@ Apply the paper's framework by adding mechanism-specific views:
 - LET/range/fluence/dose panels separated by mechanism class.
 - OFF-state bias derating panel: event rate or damage vs normalized blocking
   voltage.
-- Event phenotype panel: event type, path type, Vds collapse, gate fraction,
+- Event damage signature panel: event type, path type, Vds collapse, gate fraction,
   energy, and post-IV damage availability.
 
 This would make the irradiation dashboard less label-only and more comparable
@@ -449,7 +449,7 @@ Recommended changes:
 - Add a warning/status column when a match compares different regimes, such as
   cumulative irradiation damage to single-pulse electrical stress.
 - Require at least two shared damage axes for "usable" equivalence candidates
-  unless waveform phenotype is also strong.
+  unless waveform damage signature is also strong.
 
 ### Predicted Irradiation Damage Dashboard
 
@@ -497,7 +497,7 @@ Recommended new panels:
 
 1. The paper supports the current conclusion that energy alone is too weak.
 
-   Energy must be combined with stress regime, timescale, waveform phenotype,
+   Energy must be combined with stress regime, timescale, waveform damage signature,
    and post-IV damage.
 
 2. The paper suggests a better proxy-candidate model:
@@ -505,7 +505,7 @@ Recommended new panels:
    ```text
    candidate_score =
        waveform_similarity
-     + phenotype_compatibility
+     + damage_signature_compatibility
      + post_iv_damage_similarity
      + application_likeness
      - missing_context_penalties
@@ -570,7 +570,7 @@ Recommended new panels:
    This should combine:
 
    - waveform similarity;
-   - phenotype compatibility;
+   - damage signature compatibility;
    - damage fingerprint distance;
    - prediction support;
    - blockers.

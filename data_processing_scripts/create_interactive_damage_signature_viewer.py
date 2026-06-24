@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build one interactive HTML viewer for both APS phenotype-space 3D plots.
+Build one interactive HTML viewer for both APS damage-signature-space 3D plots.
 
 The HTML uses the already-exported source-record and pairwise-delta CSV files.
 When the downloaded Plotly browser asset is present beside those files, the
@@ -19,11 +19,11 @@ import pandas as pd
 
 
 OUT_DIR = Path("out/avalanche_irrad_pilot")
-SOURCE_CSV = OUT_DIR / "phenotype_sources_3d.csv"
-DELTA_CSV = OUT_DIR / "phenotype_delta_3d.csv"
+SOURCE_CSV = OUT_DIR / "damage_signature_sources_3d.csv"
+DELTA_CSV = OUT_DIR / "damage_signature_delta_3d.csv"
 PLOTLY_ASSET = OUT_DIR / "plotly-2.35.2.min.js"
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
-OUTPUT_HTML = OUT_DIR / "phenotype_3d_interactive.html"
+OUTPUT_HTML = OUT_DIR / "damage_signature_3d_interactive.html"
 
 
 SOURCE_STYLES = {
@@ -503,7 +503,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>APS interactive 3D phenotype viewer</title>
+<title>APS interactive 3D damage signature viewer</title>
 <style>
 :root {
   color-scheme: light;
@@ -587,7 +587,7 @@ __PLOTLY_SCRIPT__
 </head>
 <body>
 <header>
-  <h1>APS interactive 3D phenotype viewer</h1>
+  <h1>APS interactive 3D damage signature viewer</h1>
   <p>Two views of the same stress data: independent source records and ranked pairwise deltas.</p>
 </header>
 <div class="controls" role="tablist" aria-label="3D plot views">
@@ -628,7 +628,7 @@ __PLOTLY_SCRIPT__
     displaylogo: false,
     toImageButtonOptions: {
       format: "png",
-      filename: "aps_phenotype_3d",
+      filename: "aps_damage_signature_3d",
       width: 1800,
       height: 1200,
       scale: 1
@@ -689,7 +689,7 @@ def main() -> None:
     missing = [path for path in (SOURCE_CSV, DELTA_CSV) if not path.exists()]
     if missing:
         names = ", ".join(str(path) for path in missing)
-        raise SystemExit(f"Missing prerequisite phenotype CSV files: {names}")
+        raise SystemExit(f"Missing prerequisite damage signature CSV files: {names}")
 
     source_records = pd.read_csv(SOURCE_CSV)
     delta_comparisons = pd.read_csv(DELTA_CSV)

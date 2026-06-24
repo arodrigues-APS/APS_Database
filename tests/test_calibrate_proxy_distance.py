@@ -21,7 +21,7 @@ def default_settings():
         duration_log_weight=0.01,
         best_damage_distance_fallback=2.50,
         energy_out_of_range_log_delta=4.0,
-        phenotype_mismatch_distance=2.50,
+        damage_signature_mismatch_distance=2.50,
         measured_exact_waveform_max=1.75,
         predicted_waveform_max=1.75,
         device_run_waveform_max=2.25,
@@ -33,7 +33,7 @@ def default_settings():
 
 def calibration_row(normalized_vds_delta):
     return {
-        "target_match_tier": "energy_censored_phenotype_only",
+        "target_match_tier": "energy_censored_damage_signature_only",
         "log_energy_delta": None,
         "collapse_delta": 0.05,
         "gate_delta": 0.02,
@@ -52,15 +52,15 @@ class ProxyDistanceCalibrationTests(unittest.TestCase):
     def test_large_normalized_vds_delta_blocks_otherwise_close_candidate(self):
         scored = score_row(calibration_row(0.70), default_settings())
 
-        self.assertEqual(scored["phenotype_axes_used"], 3)
-        self.assertGreater(scored["phenotype_distance"], 2.50)
-        self.assertEqual(scored["candidate_status"], "phenotype_mismatch")
+        self.assertEqual(scored["damage_signature_axes_used"], 3)
+        self.assertGreater(scored["damage_signature_distance"], 2.50)
+        self.assertEqual(scored["candidate_status"], "damage_signature_mismatch")
 
     def test_omitted_avalanche_vds_axis_preserves_damage_candidate(self):
         scored = score_row(calibration_row(None), default_settings())
 
-        self.assertEqual(scored["phenotype_axes_used"], 2)
-        self.assertLess(scored["phenotype_distance"], 2.50)
+        self.assertEqual(scored["damage_signature_axes_used"], 2)
+        self.assertLess(scored["damage_signature_distance"], 2.50)
         self.assertEqual(scored["candidate_status"], "measured_damage_candidate")
 
 

@@ -58,8 +58,8 @@ CANDIDATE_COLORS = {
     "cross_device_screening_only": "#9edae5",
     "inspect_manually": "#9467bd",
     "missing_damage_context": "#8c564b",
-    "missing_phenotype_overlap": "#6b6ecf",
-    "phenotype_mismatch": "#d62728",
+    "missing_damage_signature_overlap": "#6b6ecf",
+    "damage_signature_mismatch": "#d62728",
     "energy_out_of_range": "#7f7f7f",
     "sc": "#4c78a8",
     "avalanche": "#f58518",
@@ -74,7 +74,7 @@ CANDIDATE_COLORS = {
     "MIXED": "#b279a2",
     "UNKNOWN": "#9d755d",
     "energy_comparable": "#1f77b4",
-    "energy_censored_phenotype_only": "#9467bd",
+    "energy_censored_damage_signature_only": "#9467bd",
     "thermal_runaway_pair": "#2ca02c",
     "thermal_runaway_pair_secondary": "#17becf",
     "gate_oxide_pair_repetitive_only": "#bcbd22",
@@ -214,17 +214,17 @@ DECISION_STATUS_SQL = (
     "candidate_status IN ("
     "'measured_damage_candidate', 'predicted_damage_candidate', "
     "'device_run_measured_candidate', 'weak_measured_candidate', "
-    "'analog_questionable', 'inspect_manually', 'phenotype_mismatch', "
+    "'analog_questionable', 'inspect_manually', 'damage_signature_mismatch', "
     "'energy_out_of_range', 'missing_damage_context')"
 )
-ENERGY_PHENOTYPE_DECISION_DESCRIPTION = (
+ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION = (
     "Top-ranked proxy per energy-comparable target, restricted to "
     "decision-driving statuses and genuine failure modes (measured / "
     "predicted / device-run / weak damage, analog-questionable, "
-    "inspect-manually, phenotype-mismatch, energy-out-of-range, "
+    "inspect-manually, damage-signature-mismatch, energy-out-of-range, "
     "missing-damage-context). Only the cross-device and waveform-only "
     "screening cloud is excluded; see the all-status diagnostic on Method "
-    "Diagnostics. Reference thresholds: phenotype mismatch cut-off = 2.50 "
+    "Diagnostics. Reference thresholds: damage signature mismatch cut-off = 2.50 "
     "(y); energy out-of-range cut-off |log(proxy/target energy)| = 4.0 "
     "(x) — points past it are energy failures."
 )
@@ -234,12 +234,12 @@ WAVEFORM_DAMAGE_DESCRIPTION = (
     "empty plot means damage evidence is missing for the top candidates, "
     "not that no candidates exist."
 )
-ENERGY_PHENOTYPE_ALL_DESCRIPTION = (
+ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION = (
     "All top-ranked candidates including cross-device and waveform-only "
     "screening rows. The dense low band is cross-device avalanche "
     "screening, which is capped at screening confidence by design. "
     "Diagnostic only; use the filtered version on the Candidate Triage tab "
-    "for decisions. Reference thresholds: phenotype mismatch = 2.50; "
+    "for decisions. Reference thresholds: damage signature mismatch = 2.50; "
     "energy out-of-range |log| = 4.0."
 )
 
@@ -806,7 +806,7 @@ def build_chart_defs(dataset_ids):
         "mechanism_status_ceiling",
         "mechanism_rationale",
         "path_penalty",
-        "phenotype_axes_used",
+        "damage_signature_axes_used",
         "measured_comparable_axes",
         "measured_comparable_axis_labels",
         "measured_sign_mismatch_axis_count",
@@ -1048,7 +1048,7 @@ def build_chart_defs(dataset_ids):
                 row_limit=50,
                 order_by=[["top_target_events", False]],
                 filters=[
-                    sql_filter("target_match_tier = 'energy_censored_phenotype_only'"),
+                    sql_filter("target_match_tier = 'energy_censored_damage_signature_only'"),
                     sql_filter("target_event_type = 'SEB'"),
                 ],
             ),
@@ -1076,14 +1076,14 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
-            "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Phenotype Mismatch",
+            "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Damage Signature Mismatch",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
                 "log_energy_delta",
-                "phenotype_distance",
+                "damage_signature_distance",
                 "|log(selected proxy energy / target irradiation energy)|",
-                "Phenotype mismatch distance",
+                "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
                     "candidate_status",
@@ -1091,7 +1091,7 @@ def build_chart_defs(dataset_ids):
                 ],
                 filters=[top_rank_filter, decision_status_filter],
                 show_legend=True,
-                description=ENERGY_PHENOTYPE_DECISION_DESCRIPTION,
+                description=ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION,
             ),
             12,
             54,
@@ -1122,14 +1122,14 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
-            "Proxy Readiness - Candidate Pairs: Energy vs Phenotype (All Statuses, Diagnostic)",
+            "Proxy Readiness - Candidate Pairs: Energy vs Damage Signature (All Statuses, Diagnostic)",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
                 "log_energy_delta",
-                "phenotype_distance",
+                "damage_signature_distance",
                 "|log(selected proxy energy / target irradiation energy)|",
-                "Phenotype mismatch distance",
+                "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
                     "candidate_status",
@@ -1137,7 +1137,7 @@ def build_chart_defs(dataset_ids):
                 ],
                 filters=[top_rank_filter],
                 show_legend=True,
-                description=ENERGY_PHENOTYPE_ALL_DESCRIPTION,
+                description=ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION,
             ),
             12,
             54,
@@ -1145,13 +1145,13 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
-            "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Phenotype Mismatch",
+            "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
-                "phenotype_distance",
+                "damage_signature_distance",
                 "energy_density_ratio",
-                "Phenotype mismatch distance",
+                "Damage signature mismatch distance",
                 "Proxy/target local energy-density ratio (log)",
                 groupby=[
                     "candidate_source",

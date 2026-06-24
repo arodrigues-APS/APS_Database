@@ -70,17 +70,17 @@ the commit message.
    demote `comparability_rank`: all-axes-mismatch → 4 ('inspect manually'),
    any-mismatch → max(rank, 3) ('weak'). Surface `sign_mismatch_axes` in
    match views + CSV export + `create_sc_irrad_dashboard.py` tooltip columns.
-2. `schema/025` candidate-view `distances` CTE: make phenotype distance
+2. `schema/025` candidate-view `distances` CTE: make damage signature distance
    pairwise like the damage matcher — sum only available terms, normalize by
    available weight; remove fixed imputations
    (`COALESCE(collapse_delta, 0.75)`, `COALESCE(gate_delta, 0.25)`). Keep
    `missing_collapse_overlap` / `missing_gate_overlap` blockers; add
-   `phenotype_axes_used` count column; require ≥1 phenotype axis else status
-   `missing_phenotype_overlap`.
+   `damage_signature_axes_used` count column; require ≥1 damage signature axis else status
+   `missing_damage_signature_overlap`.
 
 Verify: the C-ion ΔVth −1.21 vs SC +0.35 pair drops below 'usable'; no
 candidate-view row has distance driven purely by imputation constants
-(query `phenotype_axes_used = 0`).
+(query `damage_signature_axes_used = 0`).
 
 ## Phase 3 — Censored SEB target tier + mechanism classes (F1, priority 2+4)
 
@@ -89,7 +89,7 @@ All in `schema/025` `stress_proxy_candidate_view` (+ dashboard):
 1. **Target tiers**: replace the single `targets` CTE filter with
    `target_match_tier`:
    - `energy_comparable` — current filter, unchanged behavior.
-   - `energy_censored_phenotype_only` — detected single events failing the
+   - `energy_censored_damage_signature_only` — detected single events failing the
      energy gates; carry `energy_censored_reason`; compute
      `target_energy_floor_j` = `event_energy_vds_id_j` when
      `energy_censored_reason = 'failure_cutoff'` (right-censored lower
@@ -131,7 +131,7 @@ otherwise unchanged (diff counts).
 ## Phase 4 — Normalized axes + dose wiring (F3, priority 6)
 
 1. Add `normalized_vds_delta = |candidate.normalized_vds −
-   target.normalized_vds|` to the phenotype distance (pairwise, weight
+   target.normalized_vds|` to the damage signature distance (pairwise, weight
    ~/0.15 — literature: SEB bias fraction is the dominant axis) — matters
    most for the censored SEB tier where energy is excluded.
 2. Context view: add `stress_energy_density_j_cm3` for sc/avalanche =

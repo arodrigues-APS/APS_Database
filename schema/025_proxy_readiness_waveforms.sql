@@ -3,7 +3,7 @@
 -- apply_schema: pipeline-owned
 --
 -- This layer is intentionally descriptive.  It extracts waveform file/event
--- phenotypes and readiness coverage; it does not assert stress equivalence.
+-- damage signatures and readiness coverage; it does not assert stress equivalence.
 
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_experiment_plan_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_summary_view CASCADE;
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS stress_proxy_distance_settings (
     duration_log_weight double precision NOT NULL,
     best_damage_distance_fallback double precision NOT NULL,
     energy_out_of_range_log_delta double precision NOT NULL,
-    phenotype_mismatch_distance double precision NOT NULL,
+    damage_signature_mismatch_distance double precision NOT NULL,
     measured_exact_waveform_max double precision NOT NULL,
     predicted_waveform_max double precision NOT NULL,
     device_run_waveform_max double precision NOT NULL,
@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS stress_proxy_distance_settings (
     waveform_only_max double precision NOT NULL,
     high_confidence_combined_max double precision NOT NULL
 );
+
+-- Rename the legacy phenotype_mismatch_distance column on databases created
+-- before the phenotype -> damage_signature rename.  No-op on fresh databases
+-- (already created with the new name) and on already-migrated databases.
+DO $$ BEGIN
+    ALTER TABLE stress_proxy_distance_settings
+        RENAME COLUMN phenotype_mismatch_distance TO damage_signature_mismatch_distance;
+EXCEPTION WHEN undefined_column THEN NULL;
+END $$;
 
 -- Default proxy-distance constants mirrored from the pre-Phase-5 hard-coded
 -- candidate view: energy prefilter 5.0 ln units; collapse/gate/normalized-Vds
@@ -58,7 +67,7 @@ INSERT INTO stress_proxy_distance_settings (
     duration_log_weight,
     best_damage_distance_fallback,
     energy_out_of_range_log_delta,
-    phenotype_mismatch_distance,
+    damage_signature_mismatch_distance,
     measured_exact_waveform_max,
     predicted_waveform_max,
     device_run_waveform_max,
@@ -102,7 +111,7 @@ DO UPDATE SET
     duration_log_weight = EXCLUDED.duration_log_weight,
     best_damage_distance_fallback = EXCLUDED.best_damage_distance_fallback,
     energy_out_of_range_log_delta = EXCLUDED.energy_out_of_range_log_delta,
-    phenotype_mismatch_distance = EXCLUDED.phenotype_mismatch_distance,
+    damage_signature_mismatch_distance = EXCLUDED.damage_signature_mismatch_distance,
     measured_exact_waveform_max = EXCLUDED.measured_exact_waveform_max,
     predicted_waveform_max = EXCLUDED.predicted_waveform_max,
     device_run_waveform_max = EXCLUDED.device_run_waveform_max,
@@ -2268,7 +2277,7 @@ WITH targets AS (
 
     SELECT
         s.*,
-        'energy_censored_phenotype_only'::text AS target_match_tier,
+        'energy_censored_damage_signature_only'::text AS target_match_tier,
         CASE
             WHEN COALESCE(s.energy_censored_reason, 'none') = 'failure_cutoff'
               THEN s.event_energy_vds_id_j
@@ -2507,7 +2516,7 @@ pairs AS (
         settings.duration_log_weight,
         settings.best_damage_distance_fallback,
         settings.energy_out_of_range_log_delta,
-        settings.phenotype_mismatch_distance,
+        settings.damage_signature_mismatch_distance,
         settings.measured_exact_waveform_max,
         settings.predicted_waveform_max,
         settings.device_run_waveform_max,
@@ -2618,19 +2627,19 @@ distances AS (
     SELECT
         scored.*,
         CASE
-            WHEN scored.phenotype_axes_used > 0 THEN
-                SQRT(scored.phenotype_axis_distance_sq
+            WHEN scored.damage_signature_axes_used > 0 THEN
+                SQRT(scored.damage_signature_axis_distance_sq
                      + POWER(scored.path_penalty, 2))
-        END AS phenotype_distance,
+        END AS damage_signature_distance,
         CASE
-            WHEN scored.phenotype_axes_used > 0 THEN
+            WHEN scored.damage_signature_axes_used > 0 THEN
                 SQRT(
                     CASE
                         WHEN scored.target_match_tier = 'energy_comparable'
                           THEN scored.energy_log_weight * POWER(scored.log_energy_delta, 2)
                         ELSE 0.0
                     END
-                  + scored.phenotype_axis_distance_sq
+                  + scored.damage_signature_axis_distance_sq
                   + POWER(scored.path_penalty, 2)
                   + scored.duration_log_weight * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
                 )
@@ -2641,7 +2650,7 @@ distances AS (
             ((CASE WHEN p.collapse_delta IS NOT NULL THEN 1 ELSE 0 END)
              + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END)
              + (CASE WHEN p.normalized_vds_delta IS NOT NULL THEN 1 ELSE 0 END))
-                AS phenotype_axes_used,
+                AS damage_signature_axes_used,
             (
                 COALESCE(POWER(p.collapse_delta / p.collapse_delta_scale, 2), 0.0)
               + COALESCE(POWER(p.gate_delta / p.gate_delta_scale, 2), 0.0)
@@ -2651,7 +2660,7 @@ distances AS (
               + (CASE WHEN p.gate_delta IS NOT NULL THEN 1 ELSE 0 END)
               + (CASE WHEN p.normalized_vds_delta IS NOT NULL THEN 1 ELSE 0 END),
                 0
-            ) AS phenotype_axis_distance_sq
+            ) AS damage_signature_axis_distance_sq
         FROM pairs p
     ) scored
 ),
@@ -2788,8 +2797,8 @@ classified_raw AS (
         CASE
             WHEN e.target_match_tier = 'energy_comparable'
              AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_out_of_range'
-            WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap'
-            WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_mismatch'
+            WHEN e.damage_signature_axes_used = 0 THEN 'missing_damage_signature_overlap'
+            WHEN e.damage_signature_distance > e.damage_signature_mismatch_distance THEN 'damage_signature_mismatch'
             WHEN e.match_scope = 'cross_device' THEN 'cross_device_screening_only'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
              AND e.measured_match_scope = 'exact_condition'
@@ -2808,8 +2817,8 @@ classified_raw AS (
         ARRAY_REMOVE(ARRAY[
             CASE WHEN e.target_match_tier = 'energy_comparable'
                     AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_far_out_of_range' END,
-            CASE WHEN e.target_match_tier = 'energy_censored_phenotype_only'
-                 THEN 'target_energy_censored_phenotype_only' END,
+            CASE WHEN e.target_match_tier = 'energy_censored_damage_signature_only'
+                 THEN 'target_energy_censored_damage_signature_only' END,
             CASE WHEN e.target_energy_floor_j IS NOT NULL
                     AND e.candidate_energy_j < e.target_energy_floor_j
                  THEN 'candidate_energy_below_censored_floor' END,
@@ -2820,8 +2829,8 @@ classified_raw AS (
             CASE WHEN e.match_scope = 'cross_device'
                     AND e.target_technology_class IS DISTINCT FROM e.candidate_technology_class
                  THEN 'cross_device_technology_class_not_matched' END,
-            CASE WHEN e.phenotype_axes_used = 0 THEN 'missing_phenotype_overlap' END,
-            CASE WHEN e.phenotype_distance > e.phenotype_mismatch_distance THEN 'phenotype_distance_high' END,
+            CASE WHEN e.damage_signature_axes_used = 0 THEN 'missing_damage_signature_overlap' END,
+            CASE WHEN e.damage_signature_distance > e.damage_signature_mismatch_distance THEN 'damage_signature_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
             CASE WHEN e.gate_delta IS NULL THEN 'missing_gate_overlap' END,
             CASE WHEN e.normalized_vds_delta IS NULL
@@ -2896,8 +2905,8 @@ ranked AS (
             WHEN 'cross_device_screening_only' THEN 6
             WHEN 'inspect_manually' THEN 6
             WHEN 'missing_damage_context' THEN 5
-            WHEN 'missing_phenotype_overlap' THEN 6
-            WHEN 'phenotype_mismatch' THEN 6
+            WHEN 'missing_damage_signature_overlap' THEN 6
+            WHEN 'damage_signature_mismatch' THEN 6
             ELSE 7
         END AS candidate_status_priority,
         CASE
@@ -2933,8 +2942,8 @@ ranked AS (
                     WHEN 'cross_device_screening_only' THEN 6
                     WHEN 'inspect_manually' THEN 6
                     WHEN 'missing_damage_context' THEN 5
-                    WHEN 'missing_phenotype_overlap' THEN 6
-                    WHEN 'phenotype_mismatch' THEN 6
+                    WHEN 'missing_damage_signature_overlap' THEN 6
+                    WHEN 'damage_signature_mismatch' THEN 6
                     ELSE 7
                 END,
                 c.candidate_rank_penalty ASC,
@@ -3108,8 +3117,8 @@ SELECT
     mechanism_status_ceiling,
     mechanism_rationale,
     path_penalty,
-    phenotype_axes_used,
-    phenotype_distance,
+    damage_signature_axes_used,
+    damage_signature_distance,
     waveform_distance,
     measured_comparability_status,
     measured_comparable_axes,

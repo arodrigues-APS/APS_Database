@@ -11,7 +11,7 @@ or avalanche stress is equivalent to irradiation stress.
 The defensible path is a gated workflow:
 
 1. Use waveform/event features to generate candidates.
-2. Reject candidates with mismatched failure phenotype.
+2. Reject candidates with mismatched failure damage signature.
 3. Require measured or validation-gated predicted post-IV damage agreement
    before calling anything an equivalent stress.
 
@@ -135,7 +135,7 @@ Views:
 - `stress_proxy_readiness_view`
 - `stress_proxy_gate_zero_view`
 
-This layer extracts stress-exposure and failure-phenotype features:
+This layer extracts stress-exposure and failure-damage signature features:
 
 - integrated Vds times Id energy;
 - absolute energy;
@@ -203,7 +203,7 @@ Interpretation:
 
 - The proton subset does not look avalanche-UIS-like in instantaneous collapse.
 - The heavy-ion SEB contrast is much closer to avalanche UIS in collapse
-  phenotype.
+  damage signature.
 - Avalanche may be a better proxy candidate for hard-collapse heavy-ion SEB
   than for the current 200 MeV proton SEB subset.
 
@@ -232,7 +232,7 @@ Median context:
 
 Interpretation:
 
-Energy overlap exists, but it is not enough. The failure phenotype changes the
+Energy overlap exists, but it is not enough. The failure damage signature changes the
 answer almost completely.
 
 ## Recommended Combined Workflow
@@ -245,7 +245,7 @@ Use three evidence tiers:
   `damage_equivalence_*`;
 - predicted damage equivalence: validation-gated predicted irradiation
   fingerprints from `damage_equivalence_prediction_*`;
-- waveform phenotype similarity: energy, collapse, gate, current, duration, and
+- waveform damage signature similarity: energy, collapse, gate, current, duration, and
   path metrics from `stress_waveform_*`.
 
 Do not merge these into one opaque score yet. A candidate should show which
@@ -263,10 +263,10 @@ Candidate retrieval can start with:
 
 This finds plausible nearby stress points without claiming physics equivalence.
 
-### 3. Gate Candidates by Failure Phenotype
+### 3. Gate Candidates by Failure Damage Signature
 
 Before looking at damage-space distance, reject candidates with incompatible
-phenotype:
+damage signature:
 
 - Vds collapse fraction;
 - gate-current fraction;
@@ -277,7 +277,7 @@ phenotype:
 - current step magnitude class.
 
 For the current 200 MeV proton SEB subset, collapse is decisive: avalanche
-waveforms often match energy but not phenotype.
+waveforms often match energy but not damage signature.
 
 ### 4. Validate With Post-IV Damage Fingerprints
 
@@ -336,7 +336,7 @@ This is more defensible than a single "equivalent Joules" value.
 
    A new view should join waveform candidates to damage matches and emit one
    row per target irradiation condition and candidate SC/avalanche condition.
-   It should include energy distance, phenotype distance, damage distance,
+   It should include energy distance, damage signature distance, damage distance,
    evidence tier, status, and blockers.
 
 3. Add an experiment-planning dashboard.
@@ -398,18 +398,18 @@ This is more defensible than a single "equivalent Joules" value.
 ## Practical Near-Term Recommendation
 
 For the current dataset, short-circuit is the more credible immediate proxy
-candidate for the high-energy proton SEB subset when waveform phenotype is
+candidate for the high-energy proton SEB subset when waveform damage signature is
 included, because proton events have near-zero Vds collapse and the
 energy-plus-collapse diagnostic moves 43 of 44 events to SC waveforms.
 
 Avalanche remains a credible candidate for hard-collapse heavy-ion SEB-like
-phenotypes, but the codebase currently has too little avalanche post-IV damage
+damage signatures, but the codebase currently has too little avalanche post-IV damage
 coverage to validate that broadly.
 
 The next best implementation step is not a more complex model. It is a
 proxy-candidate table that combines:
 
-- energy and waveform phenotype similarity;
+- energy and waveform damage signature similarity;
 - measured damage-space nearest neighbors;
 - predicted irradiation damage where measured damage is missing;
 - explicit blockers and confidence flags.
