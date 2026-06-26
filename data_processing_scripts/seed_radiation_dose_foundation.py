@@ -29,17 +29,76 @@ from dataclasses import dataclass
 
 from psycopg2.extras import RealDictCursor
 
-from common import apply_schema
-from db_config import get_connection
+try:
+    from common import apply_schema
+    from db_config import get_connection
+except ModuleNotFoundError:  # pragma: no cover - exercised by package imports
+    from .common import apply_schema
+    from .db_config import get_connection
 
 
 SCRIPT_NAME = "seed_radiation_dose_foundation.py"
-SEED_VERSION = "seed_foundation_v1"
+SEED_VERSION = "seed_foundation_v2"
 SIC_DENSITY_G_CM3 = 3.21
 SIC_MATERIAL_KEY = "sic"
 SIC_MATERIAL_NAME = "Silicon carbide active-region estimate"
 DEFAULT_CURRENT_DENSITY_A_CM2 = 400.0
 DEFAULT_UNKNOWN_AREA_CM2 = 0.09
+KOSIER_TABLE_I_DOPING_BASIS = (
+    "kosier_2026_table_i_measured_epi_doping_by_voltage_class"
+)
+
+
+ACTIVE_SIC_CLASS_ESTIMATES = {
+    650: {
+        "thickness_um": 6.0,
+        "thickness_basis": "650v_class_active_sic_estimate_out_of_kosier_table_i_scope",
+        "net_doping_cm3": None,
+        "net_doping_basis": None,
+    },
+    900: {
+        "thickness_um": 8.0,
+        "thickness_basis": "900v_class_active_sic_estimate_out_of_kosier_table_i_scope",
+        "net_doping_cm3": None,
+        "net_doping_basis": None,
+    },
+    1200: {
+        "thickness_um": 10.0,
+        "thickness_basis": "kosier_2026_table_i_device_1_1200v_w_epi",
+        "net_doping_cm3": 8.0e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+    1700: {
+        "thickness_um": 12.0,
+        "thickness_basis": "kosier_2026_table_i_device_3_1700v_w_epi",
+        "net_doping_cm3": 7.0e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+    3300: {
+        "thickness_um": 30.0,
+        "thickness_basis": "kosier_2026_table_i_device_4_3300v_w_epi",
+        "net_doping_cm3": 3.0e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+    4500: {
+        "thickness_um": 40.0,
+        "thickness_basis": "kosier_2026_table_i_device_5_4500v_vbr_w_epi",
+        "net_doping_cm3": 2.0e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+    6500: {
+        "thickness_um": 70.0,
+        "thickness_basis": "kosier_2026_table_i_device_6_6500v_w_epi",
+        "net_doping_cm3": 1.3e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+    10000: {
+        "thickness_um": 110.0,
+        "thickness_basis": "kosier_2026_table_i_device_7_10000v_w_epi",
+        "net_doping_cm3": 0.6e15,
+        "net_doping_basis": KOSIER_TABLE_I_DOPING_BASIS,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -118,28 +177,70 @@ def voltage_from_device(row):
     if voltage:
         return voltage
     part = (row.get("device_type") or "").upper()
-    for candidate in (1700, 1200, 900, 650):
+    for candidate in (10000, 6500, 4500, 3300, 1700, 1200, 900, 650):
         if str(candidate) in part:
             return float(candidate)
-    if "1.7KV" in part:
-        return 1700.0
+    for label, value in (
+        ("10KV", 10000.0),
+        ("6.5KV", 6500.0),
+        ("4.5KV", 4500.0),
+        ("3.3KV", 3300.0),
+        ("1.7KV", 1700.0),
+    ):
+        if label in part:
+            return value
     return None
+
+
+def voltage_class_from_rating(voltage_rating_v):
+    """Return the nominal voltage class used for active-layer defaults."""
+    voltage = finite_float(voltage_rating_v)
+    if voltage is None:
+        return None
+    for upper_bound, voltage_class in (
+        (775.0, 650),
+        (1050.0, 900),
+        (1450.0, 1200),
+        (1900.0, 1700),
+        (3900.0, 3300),
+        (5500.0, 4500),
+        (8000.0, 6500),
+        (11000.0, 10000),
+    ):
+        if voltage <= upper_bound:
+            return voltage_class
+    return None
+
+
+def sic_active_layer_defaults(voltage_rating_v):
+    """Return active SiC thickness and optional measured epi doping defaults."""
+    voltage = finite_float(voltage_rating_v)
+    if voltage is None:
+        return 10.0, "unknown_voltage_default_1200v_like", None, None
+
+    voltage_class = voltage_class_from_rating(voltage)
+    estimate = ACTIVE_SIC_CLASS_ESTIMATES.get(voltage_class)
+    if estimate:
+        return (
+            estimate["thickness_um"],
+            estimate["thickness_basis"],
+            estimate["net_doping_cm3"],
+            estimate["net_doping_basis"],
+        )
+
+    return (
+        110.0,
+        "above_10000v_active_sic_estimate_from_kosier_table_i_upper_class",
+        None,
+        None,
+    )
 
 
 def sic_thickness_um(voltage_rating_v):
     """Return an active drift/epi thickness estimate by blocking class."""
-    voltage = finite_float(voltage_rating_v)
-    if voltage is None:
-        return 10.0, "unknown_voltage_default_1200v_like"
-    if voltage <= 700.0:
-        return 6.0, "650v_class_active_sic_estimate"
-    if voltage <= 1000.0:
-        return 8.0, "900v_class_active_sic_estimate"
-    if voltage <= 1300.0:
-        return 10.0, "1200v_class_active_sic_estimate"
-    if voltage <= 1800.0:
-        return 16.0, "1700v_class_active_sic_estimate"
-    return 20.0, "high_voltage_active_sic_estimate"
+    thickness_um, thickness_basis, _, _ = sic_active_layer_defaults(
+        voltage_rating_v)
+    return thickness_um, thickness_basis
 
 
 def exposed_area_estimate(row):
@@ -202,35 +303,51 @@ def seed_device_material_layers(cur):
     upserted = skipped = 0
     for row in rows:
         voltage = voltage_from_device(row)
-        thickness_um, thickness_basis = sic_thickness_um(voltage)
+        (
+            thickness_um,
+            thickness_basis,
+            net_doping_cm3,
+            net_doping_basis,
+        ) = sic_active_layer_defaults(voltage)
         area_cm2, area_basis, area_confidence = exposed_area_estimate(row)
         confidence = min(0.60, max(0.20, area_confidence))
+        doping_note = (
+            f"net_doping_basis={net_doping_basis}"
+            if net_doping_basis else
+            "net_doping_basis=unseeded_out_of_kosier_table_i_scope"
+        )
         notes = (
             "First-pass single-layer SiC active-region model. "
-            f"thickness_basis={thickness_basis}; area_basis={area_basis}. "
+            f"thickness_basis={thickness_basis}; {doping_note}; "
+            f"area_basis={area_basis}. "
             "Replace or extend with measured die geometry and package stack "
             "when available."
         )
         provenance = (
             f"{SCRIPT_NAME}:{SEED_VERSION}; voltage/current/dimension "
-            "heuristics from device_library and part-number labels"
+            "heuristics from device_library and part-number labels; Kosier "
+            "TDMR 2026 Table I W_EPI/N by voltage class where applicable"
         )
         cur.execute(
             """
             INSERT INTO device_material_layers
                 (device_type, layer_order, layer_name, material_key,
-                 density_g_cm3, thickness_um, exposed_area_cm2, area_basis,
+                 density_g_cm3, thickness_um, net_doping_cm3,
+                 net_doping_basis, exposed_area_cm2, area_basis,
                  coverage_fraction, incidence_angle_deg, confidence,
                  provenance, notes)
             VALUES
                 (%s, 0, 'sic_active_drift_region', %s,
-                 %s, %s, %s, %s,
+                 %s, %s, %s,
+                 %s, %s, %s,
                  1.0, 0.0, %s, %s, %s)
             ON CONFLICT (device_type, layer_order, layer_name)
             DO UPDATE SET
                 material_key = EXCLUDED.material_key,
                 density_g_cm3 = EXCLUDED.density_g_cm3,
                 thickness_um = EXCLUDED.thickness_um,
+                net_doping_cm3 = EXCLUDED.net_doping_cm3,
+                net_doping_basis = EXCLUDED.net_doping_basis,
                 exposed_area_cm2 = EXCLUDED.exposed_area_cm2,
                 area_basis = EXCLUDED.area_basis,
                 coverage_fraction = EXCLUDED.coverage_fraction,
@@ -246,6 +363,8 @@ def seed_device_material_layers(cur):
                 SIC_MATERIAL_KEY,
                 SIC_DENSITY_G_CM3,
                 thickness_um,
+                net_doping_cm3,
+                net_doping_basis,
                 area_cm2,
                 area_basis,
                 confidence,

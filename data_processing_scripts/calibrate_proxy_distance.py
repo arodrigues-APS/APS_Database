@@ -74,6 +74,124 @@ STATUS_PRIORITY = {
     "energy_out_of_range": 7,
 }
 
+# Damage-signature evidence-coverage model.  These mirror the CASE expressions
+# in schema/025_proxy_readiness_waveforms.sql (the `distances`/`coverage` CTEs)
+# and must be kept in sync with them.  Weights are for confidence labeling and
+# diagnostics only; they are deliberately NOT used to rank candidates.  See
+# docs/damage_signature_metric_evidence_rollout_results_2026-06-25.md.
+COVERAGE_AXIS_WEIGHTS = {
+    "collapse_delta": 0.45,
+    "normalized_vds_delta": 0.35,
+    "gate_delta": 0.20,
+}
+
+# Evidence class -> (numeric tier, missing-axis penalty for the EXPERIMENTAL
+# coverage-adjusted distance).  Lower tier is better.
+EVIDENCE_CLASS_TIER = {
+    "full_signature": 1,
+    "collapse_bias_signature": 2,
+    "collapse_gate_signature": 3,
+    "collapse_only_signature": 4,
+    "gate_only_signature": 5,
+    "bias_only_signature": 6,
+    "no_signature_overlap": 9,
+}
+
+EVIDENCE_CLASS_MISSING_AXIS_PENALTY = {
+    "full_signature": 0.0,
+    "collapse_bias_signature": 0.15,
+    "collapse_gate_signature": 0.20,
+    "collapse_only_signature": 0.40,
+    "gate_only_signature": 0.65,
+    "bias_only_signature": 0.80,
+    "no_signature_overlap": 1.00,
+}
+
+
+def damage_signature_evidence(
+    row: dict[str, Any],
+    damage_signature_distance: float | None = None,
+) -> dict[str, Any]:
+    """Pure-Python mirror of the SQL evidence-coverage descriptors.
+
+    Returns the overlap booleans, available/missing axis lists, axis mask,
+    coverage score, evidence class/tier, and the experimental
+    coverage-adjusted distance.  ``damage_signature_distance`` is optional; the
+    adjusted distance is ``None`` when it is not supplied.
+    """
+    has_collapse = finite_float(row.get("collapse_delta")) is not None
+    has_gate = finite_float(row.get("gate_delta")) is not None
+    has_norm = finite_float(row.get("normalized_vds_delta")) is not None
+
+    available = [
+        name
+        for name, present in (
+            ("collapse_delta", has_collapse),
+            ("gate_delta", has_gate),
+            ("normalized_vds_delta", has_norm),
+        )
+        if present
+    ]
+    missing = [
+        name
+        for name, present in (
+            ("collapse_delta", has_collapse),
+            ("gate_delta", has_gate),
+            ("normalized_vds_delta", has_norm),
+        )
+        if not present
+    ]
+    mask_parts = [
+        label
+        for label, present in (
+            ("collapse", has_collapse),
+            ("gate", has_gate),
+            ("normalized_vds", has_norm),
+        )
+        if present
+    ]
+    axis_mask = "+".join(mask_parts) if mask_parts else "none"
+
+    coverage_score = (
+        (COVERAGE_AXIS_WEIGHTS["collapse_delta"] if has_collapse else 0.0)
+        + (COVERAGE_AXIS_WEIGHTS["normalized_vds_delta"] if has_norm else 0.0)
+        + (COVERAGE_AXIS_WEIGHTS["gate_delta"] if has_gate else 0.0)
+    )
+
+    if has_collapse and has_gate and has_norm:
+        evidence_class = "full_signature"
+    elif has_collapse and has_norm:
+        evidence_class = "collapse_bias_signature"
+    elif has_collapse and has_gate:
+        evidence_class = "collapse_gate_signature"
+    elif has_collapse:
+        evidence_class = "collapse_only_signature"
+    elif has_gate:
+        evidence_class = "gate_only_signature"
+    elif has_norm:
+        evidence_class = "bias_only_signature"
+    else:
+        evidence_class = "no_signature_overlap"
+
+    adjusted = None
+    base = finite_float(damage_signature_distance)
+    if base is not None:
+        penalty = EVIDENCE_CLASS_MISSING_AXIS_PENALTY[evidence_class]
+        adjusted = math.sqrt(base ** 2 + penalty ** 2)
+
+    return {
+        "has_collapse_overlap": has_collapse,
+        "has_gate_overlap": has_gate,
+        "has_normalized_vds_overlap": has_norm,
+        "damage_signature_available_axes": available,
+        "damage_signature_missing_axes": missing,
+        "damage_signature_axis_mask": axis_mask,
+        "damage_signature_coverage_score": coverage_score,
+        "damage_signature_evidence_class": evidence_class,
+        "damage_signature_evidence_tier": EVIDENCE_CLASS_TIER[evidence_class],
+        "coverage_adjusted_damage_signature_distance": adjusted,
+    }
+
 
 @dataclass(frozen=True)
 class DistanceSettings:
@@ -655,8 +773,10 @@ def score_row(row: dict[str, Any], settings: DistanceSettings) -> dict[str, Any]
     floor = finite_float(row.get("target_energy_floor_j"))
     candidate_energy = finite_float(row.get("candidate_energy_j"))
     rank_penalty = 1 if floor is not None and candidate_energy is not None and candidate_energy < floor else 0
+    evidence = damage_signature_evidence(row, distances.get("damage_signature_distance"))
     return {
         **distances,
+        **evidence,
         "candidate_status": status,
         "candidate_status_priority": STATUS_PRIORITY.get(status, 7),
         "candidate_rank_penalty": rank_penalty,

@@ -161,12 +161,122 @@ AVALANCHE_NVDS_ARTIFACT_EXCLUSION = (
 
 AMPLIFICATION_DESCRIPTION = (
     "Energy amplification of irradiation single events: terminal electrical "
-    "energy released in the event window divided by the ion's deposited "
-    "energy (electronic component). Ratios of 1e6-1e10 show the ion acts "
-    "only as a trigger; the destructive energy is supplied by the blocking "
-    "bias circuit and device output capacitance. Rows without a positive "
-    "deposited-energy estimate are excluded."
+    "energy released in the event window divided by the ion's LET-based "
+    "ionizing/electronic deposited energy. This is intentionally the "
+    "electronic stopping channel because the single-event burnout picture is "
+    "triggered by ionization, while the destructive energy is supplied by the "
+    "blocking-bias circuit and device output capacitance. Rows without a "
+    "positive deposited-energy estimate are excluded."
 )
+IONIZING_DEPOSITED_ENERGY_DESCRIPTION = (
+    "This plot uses the LET-based ionizing/electronic deposited-energy "
+    "estimate carried as radiation_deposited_energy_j. In the current seed, "
+    "heavy-ion rows copy irradiation_runs.let_surface into electronic and "
+    "total stopping, and set nuclear stopping to 0 pending SRIM or equivalent "
+    "material-specific tables. Nuclear stopping should be treated as a "
+    "separate displacement-damage diagnostic, not as a co-equal SEB/SELC "
+    "burnout-energy series."
+)
+
+# Stored depletion energy is the pre-strike electrostatic field energy per area
+# in the reverse-biased depletion region (Kosier model). It is intentionally a
+# different quantity from terminal electrical energy and radiation deposited
+# energy: do not merge them into one scalar.
+DEPLETION_STORED_ENERGY_DESCRIPTION = (
+    "Pre-strike stored electrostatic field energy per area in the reverse-"
+    "biased depletion region (Kosier model), in uJ/cm2, against observed "
+    "normalized blocking bias. Dashed lines mark the Kosier SELC (60 uJ/cm2) "
+    "and SEB (207 uJ/cm2) critical areal-energy thresholds. This is "
+    "intentionally separate from terminal electrical energy and radiation "
+    "deposited energy. Rows use Kosier Table I measured epi doping where a "
+    "voltage class is covered; out-of-table classes fall back to the rated-"
+    "voltage reach-through estimate when possible. Missing depletion inputs "
+    "are excluded from this chart."
+)
+DEPLETION_RATIO_DESCRIPTION = (
+    "A ratio of 1.0 means the modeled stored-depletion-energy threshold is "
+    "reached. Net doping uses seeded Kosier Table I values when available "
+    "and otherwise falls back to the rated-voltage reach-through estimate. Grouped by "
+    "irradiation event_type so SEB and SELC populations can be compared "
+    "against the threshold line."
+)
+DEPLETION_TERMINAL_VS_SEB_DESCRIPTION = (
+    "Connects modeled stored-field susceptibility (SEB ratio, x) to the "
+    "terminal electrical energy actually released in the detected event "
+    "window (y, log). The vertical line marks SEB ratio = 1.0. These are "
+    "separate quantities: a high SEB ratio describes pre-strike field "
+    "susceptibility, terminal energy measures the electrical release. Only "
+    "detected single events with a positive terminal energy and a depletion "
+    "model are shown; SEB-typed rows currently lack positive terminal energy "
+    "in the seed, so the cloud is dominated by SELCII/SELCI events."
+)
+ENERGY_CHAIN_TABLE_DESCRIPTION = (
+    "Row-level alignment of the irradiation energy chain for each stress "
+    "record: ionizing deposited energy (trigger), stored depletion energy and "
+    "SEB/SELC ratios (modeled susceptibility), and terminal electrical energy "
+    "(measured release). These domains use different units and localization "
+    "assumptions and must not be read as interchangeable joules. "
+    "se_depletion_model_quality flags whether the depletion inputs are "
+    "measured from Kosier Table I or estimated."
+)
+
+# Superset's annotation-layer schema requires showMarkers/hideLine even for
+# FORMULA layers (see FIGURE1B_REFERENCE_LINES). Threshold lines are in the
+# same axis units as the plotted metric: uJ/cm2 for stored energy, unitless
+# ratio for the SEB/SELC ratio charts.
+DEPLETION_STORED_ENERGY_REFERENCE_LINES = [
+    {
+        "annotationType": "FORMULA",
+        "sourceType": "",
+        "name": "SELC threshold: 60 uJ/cm2",
+        "value": "60",
+        "style": "dashed",
+        "color": "#9467bd",
+        "opacity": "",
+        "width": 1,
+        "show": True,
+        "showLabel": True,
+        "showMarkers": False,
+        "hideLine": False,
+        "overrides": {"time_range": None},
+    },
+    {
+        "annotationType": "FORMULA",
+        "sourceType": "",
+        "name": "SEB threshold: 207 uJ/cm2",
+        "value": "207",
+        "style": "dashed",
+        "color": "#d62728",
+        "opacity": "",
+        "width": 1,
+        "show": True,
+        "showLabel": True,
+        "showMarkers": False,
+        "hideLine": False,
+        "overrides": {"time_range": None},
+    },
+]
+DEPLETION_RATIO_REFERENCE_LINE = [
+    {
+        "annotationType": "FORMULA",
+        "sourceType": "",
+        "name": "Threshold: 1.0",
+        "value": "1.0",
+        "style": "dashed",
+        "color": "#d62728",
+        "opacity": "",
+        "width": 1,
+        "show": True,
+        "showLabel": True,
+        "showMarkers": False,
+        "hideLine": False,
+        "overrides": {"time_range": None},
+    },
+]
+# SEB ratio spans ~0.04-3.5 and SELC ratio ~0.15-12 in the current seed, both
+# under two orders, so the ratio charts and the stored-energy chart use linear
+# y axes; the threshold lines stay legible without a log transform.
+DEPLETION_X_BOUNDS = [0.0, 1.0]
 
 
 TAB_READINESS = "Readiness & Actions"
@@ -182,27 +292,44 @@ TAB_IDS = {
 }
 MARKDOWN_PANELS = [
     {
-        "tab": TAB_READINESS,
+        "tab": TAB_CANDIDATE,
         "code": (
-            "## Proxy Readiness — read this first\n\n"
-            "**Question this dashboard answers:** is there enough overlapping "
-            "evidence to use short-circuit / avalanche stress as a proxy for "
-            "irradiation single-event failures?\n\n"
-            "**Gate-zero passes only when ≥ 3 device families have _both_** "
-            "(a) electrical-proxy (SC or UID/UIS avalanche) waveform **plus** "
-            "post-IV damage overlap **and** (b) irradiation waveform/event "
-            "**plus** post-IV damage overlap. The verdict table to the right "
-            "shows the current count and which side is the bottleneck.\n\n"
-            "**Tabs:** _Readiness & Actions_ (start here) · "
-            "_Candidate Triage_ · _Method Diagnostics_ · _Raw / QA_."
+            "### Read distance *with* evidence coverage\n\n"
+            "`damage_signature_distance` is a **screening distance**, not a "
+            "proxy-equivalence score. It is only comparable **within the same "
+            "evidence class**. Rows based on collapse only "
+            "(`collapse_only_signature`, the current avalanche cohort) must "
+            "not be treated as equivalent to rows with collapse plus "
+            "normalized-bias overlap (`collapse_bias_signature`, the current "
+            "SC cohort). Gate overlap is absent for every proxy row today, so "
+            "no comparison reaches `full_signature`. Always read the evidence "
+            "class and missing axes alongside the distance. "
+            "`coverage_adjusted_damage_signature_distance` is an experimental "
+            "triage diagnostic with uncalibrated penalties and is **not** used "
+            "to rank candidates."
         ),
         "width": 12,
-        "height": 10,
+        "height": 6,
     },
     {
         "tab": TAB_DIAGNOSTICS,
         "code": (
-            "[Open the interactive source-record and delta-comparison plots]"
+            "### Irradiation energy chain\n\n"
+            "Ionizing deposited energy estimates the radiation **trigger**. "
+            "Stored depletion energy estimates whether the reverse-biased "
+            "device had enough field energy to cross the Kosier **SEB/SELC "
+            "thresholds**. Terminal electrical energy measures the energy "
+            "**released** during the observed waveform window. These are "
+            "separate quantities with different units and should not be merged "
+            "into one scalar."
+        ),
+        "width": 12,
+        "height": 6,
+    },
+    {
+        "tab": TAB_DIAGNOSTICS,
+        "code": (
+            "[Open the interactive damage-signature and energy viewer]"
             "(https://rawdata.aps.ee.ethz.ch/data/www/tools/"
             "phenotype-3d/index.html)"
         ),
@@ -241,6 +368,15 @@ ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION = (
     "Diagnostic only; use the filtered version on the Candidate Triage tab "
     "for decisions. Reference thresholds: damage signature mismatch = 2.50; "
     "energy out-of-range |log| = 4.0."
+)
+EVIDENCE_CLASS_DISTANCE_DESCRIPTION = (
+    "Damage-signature distance separated by evidence tier so distances are "
+    "not read across classes. Tier 2 = collapse_bias_signature (current SC "
+    "cohort, collapse + normalized Vds); tier 4 = collapse_only_signature "
+    "(current avalanche cohort, collapse only; normalized Vds excluded by "
+    "design and gate unavailable). A small tier-4 distance rests on one axis "
+    "and is not equivalent to a small tier-2 distance. No proxy row reaches "
+    "tier 1 (full signature) today because gate overlap is absent everywhere."
 )
 
 def apply_proxy_schema() -> None:
@@ -700,9 +836,13 @@ def build_chart_defs(dataset_ids):
         "replacement_confidence",
         "top_target_events",
         "candidate_device_type_count",
+        "collapse_only_signature_top_events",
+        "collapse_bias_signature_top_events",
+        "full_signature_top_events",
         "median_combined_screening_distance",
         "median_waveform_distance",
         "median_damage_distance",
+        "median_damage_signature_distance",
     ]
     censored_cols = [
         "match_scope",
@@ -725,6 +865,11 @@ def build_chart_defs(dataset_ids):
         "candidate_status",
         "replacement_confidence",
         "match_scope",
+        "damage_signature_evidence_class",
+        "damage_signature_coverage_score",
+        "damage_signature_missing_axes",
+        "damage_signature_distance",
+        "coverage_adjusted_damage_signature_distance",
         "waveform_distance",
         "best_damage_distance",
         "combined_screening_distance",
@@ -807,6 +952,17 @@ def build_chart_defs(dataset_ids):
         "mechanism_rationale",
         "path_penalty",
         "damage_signature_axes_used",
+        "has_collapse_overlap",
+        "has_gate_overlap",
+        "has_normalized_vds_overlap",
+        "damage_signature_available_axes",
+        "damage_signature_missing_axes",
+        "damage_signature_axis_mask",
+        "damage_signature_coverage_score",
+        "damage_signature_evidence_class",
+        "damage_signature_evidence_tier",
+        "damage_signature_distance",
+        "coverage_adjusted_damage_signature_distance",
         "measured_comparable_axes",
         "measured_comparable_axis_labels",
         "measured_sign_mismatch_axis_count",
@@ -946,6 +1102,26 @@ def build_chart_defs(dataset_ids):
         "match_basis_class",
         "readiness_status",
         "quality_flags",
+    ]
+    energy_chain_cols = [
+        "stress_record_key",
+        "device_type",
+        "event_type",
+        "filename",
+        "normalized_vds",
+        "se_depletion_model_quality",
+        "se_depletion_stored_energy_j_cm2",
+        "se_depletion_ratio_to_selc",
+        "se_depletion_ratio_to_seb",
+        "radiation_deposited_energy_j",
+        "radiation_deposited_energy_total_j",
+        "electrical_terminal_energy_j",
+        "electrical_terminal_energy_basis",
+        "energy_is_comparable",
+        "energy_censored_reason",
+        "vds_collapse_fraction",
+        "gate_delta_fraction",
+        "context_flags",
     ]
 
     top_rank_filter = sql_filter("candidate_rank = 1")
@@ -1099,6 +1275,30 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
+            "Proxy Readiness - Damage Signature Distance by Evidence Class",
+            dataset_ids["candidates"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "damage_signature_evidence_tier",
+                "damage_signature_distance",
+                "Evidence tier (1=full ... 4=collapse-only; lower is richer)",
+                "Damage signature mismatch distance",
+                groupby=[
+                    "candidate_source",
+                    "damage_signature_evidence_class",
+                    "target_stress_record_key",
+                    "candidate_stress_record_key",
+                ],
+                filters=[top_rank_filter],
+                show_legend=True,
+                description=EVIDENCE_CLASS_DISTANCE_DESCRIPTION,
+            ),
+            12,
+            54,
+            TAB_CANDIDATE,
+            "candidate",
+        ),
+        (
             "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
@@ -1169,6 +1369,100 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
+            "Proxy Readiness - Irradiation Depletion Stored Energy vs Blocking Bias",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "se_depletion_stored_energy_j_cm2 * 1000000.0",
+                "Observed |VDS| / device voltage rating",
+                "Stored depletion energy (uJ/cm2; modeled)",
+                groupby=["event_type"],
+                filters=[
+                    sql_filter("source = 'irradiation'"),
+                    sql_filter("se_depletion_stored_energy_j_cm2 IS NOT NULL"),
+                ],
+                show_legend=True,
+                annotation_layers=DEPLETION_STORED_ENERGY_REFERENCE_LINES,
+                x_axis_bounds=DEPLETION_X_BOUNDS,
+                y_axis_bounds=[0.0, None],
+                description=DEPLETION_STORED_ENERGY_DESCRIPTION,
+            ),
+            12,
+            46,
+            TAB_DIAGNOSTICS,
+            "context",
+        ),
+        (
+            "Proxy Readiness - Irradiation Depletion Ratio to SEB vs Blocking Bias",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "se_depletion_ratio_to_seb",
+                "Observed |VDS| / device voltage rating",
+                "Stored depletion energy / SEB threshold (1.0 = threshold)",
+                groupby=["event_type"],
+                filters=[sql_filter("source = 'irradiation'")],
+                show_legend=True,
+                annotation_layers=DEPLETION_RATIO_REFERENCE_LINE,
+                x_axis_bounds=DEPLETION_X_BOUNDS,
+                y_axis_bounds=[0.0, None],
+                description=DEPLETION_RATIO_DESCRIPTION,
+            ),
+            12,
+            46,
+            TAB_DIAGNOSTICS,
+            "context",
+        ),
+        (
+            "Proxy Readiness - Irradiation Depletion Ratio to SELC vs Blocking Bias",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "normalized_vds",
+                "se_depletion_ratio_to_selc",
+                "Observed |VDS| / device voltage rating",
+                "Stored depletion energy / SELC threshold (1.0 = threshold)",
+                groupby=["event_type"],
+                filters=[sql_filter("source = 'irradiation'")],
+                show_legend=True,
+                annotation_layers=DEPLETION_RATIO_REFERENCE_LINE,
+                x_axis_bounds=DEPLETION_X_BOUNDS,
+                y_axis_bounds=[0.0, None],
+                description=DEPLETION_RATIO_DESCRIPTION,
+            ),
+            12,
+            46,
+            TAB_DIAGNOSTICS,
+            "context",
+        ),
+        (
+            "Proxy Readiness - Irradiation Terminal Energy vs Depletion SEB Ratio",
+            dataset_ids["context"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "se_depletion_ratio_to_seb",
+                "electrical_terminal_energy_j",
+                "Stored depletion energy / SEB threshold (1.0 = SEB threshold)",
+                "Terminal electrical energy released (J, log)",
+                groupby=["event_type"],
+                filters=[
+                    sql_filter("source = 'irradiation'"),
+                    sql_filter("event_record_type = 'detected_single_event'"),
+                    sql_filter("electrical_terminal_energy_j > 0.0"),
+                ],
+                show_legend=True,
+                log_y=True,
+                x_axis_bounds=[0.0, None],
+                description=DEPLETION_TERMINAL_VS_SEB_DESCRIPTION,
+            ),
+            12,
+            46,
+            TAB_DIAGNOSTICS,
+            "context",
+        ),
+        (
             "Proxy Readiness - Normalized Observed V/I Stress Scatter by Test Type",
             dataset_ids["context"],
             "echarts_timeseries_scatter",
@@ -1234,14 +1528,14 @@ def build_chart_defs(dataset_ids):
             "context",
         ),
         (
-            "Proxy Readiness - Irradiation Radiation Deposited Energy vs Blocking Bias",
+            "Proxy Readiness - Irradiation LET-Based Ionizing Deposited Energy vs Blocking Bias",
             dataset_ids["context"],
             "echarts_timeseries_scatter",
             scatter_params(
                 "normalized_vds",
                 "radiation_deposited_energy_j",
                 "Observed |VDS| / device voltage rating",
-                "Radiation deposited energy (J; electronic component)",
+                "LET-based ionizing deposited energy (J)",
                 groupby=["let_bin"],
                 filters=[
                     sql_filter("source = 'irradiation'"),
@@ -1251,6 +1545,7 @@ def build_chart_defs(dataset_ids):
                 show_legend=True,
                 log_y=True,
                 x_axis_bounds=[0.0, 1.0],
+                description=IONIZING_DEPOSITED_ENERGY_DESCRIPTION,
             ),
             12,
             44,
@@ -1266,7 +1561,7 @@ def build_chart_defs(dataset_ids):
                 "electrical_terminal_energy_j"
                 " / NULLIF(radiation_deposited_energy_j, 0.0)",
                 "Observed |VDS| / device voltage rating",
-                "Terminal energy / ion deposited energy (amplification, log)",
+                "Terminal energy / ionizing deposited energy (amplification, log)",
                 groupby=["let_bin"],
                 filters=[
                     sql_filter("source = 'irradiation'"),
@@ -1423,6 +1718,25 @@ def build_chart_defs(dataset_ids):
                 event_cols,
                 row_limit=2500,
                 order_by=[["source", True], ["device_type", True]],
+            ),
+            12,
+            48,
+            TAB_RAW,
+            None,
+        ),
+        (
+            "Proxy Readiness - Irradiation Energy Chain Detail",
+            dataset_ids["context"],
+            "table",
+            table_params(
+                energy_chain_cols,
+                row_limit=2500,
+                order_by=[
+                    ["se_depletion_ratio_to_seb", False],
+                    ["normalized_vds", False],
+                ],
+                filters=[sql_filter("source = 'irradiation'")],
+                description=ENERGY_CHAIN_TABLE_DESCRIPTION,
             ),
             12,
             48,

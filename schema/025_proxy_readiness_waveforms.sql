@@ -1639,6 +1639,10 @@ rated AS (
                 SUBSTRING(dl.voltage_rating FROM '[0-9]+[.]?[0-9]*')::double precision
                 * CASE WHEN dl.voltage_rating ~* 'k[[:space:]]*v|kv'
                        THEN 1000.0 ELSE 1.0 END
+            WHEN eb.device_type ~* '10[[:space:].-]*k[[:space:]]*v|10000' THEN 10000.0
+            WHEN eb.device_type ~* '6[.]?5[[:space:].-]*k[[:space:]]*v|6500' THEN 6500.0
+            WHEN eb.device_type ~* '4[.]?5[[:space:].-]*k[[:space:]]*v|4500' THEN 4500.0
+            WHEN eb.device_type ~* '3[.]?3[[:space:].-]*k[[:space:]]*v|3300' THEN 3300.0
             WHEN eb.device_type ~* '1700' THEN 1700.0
             WHEN eb.device_type ~* '1200' THEN 1200.0
             WHEN eb.device_type ~* '900' THEN 900.0
@@ -1668,6 +1672,8 @@ material_geometry AS (
     SELECT DISTINCT ON (device_type)
         device_type,
         thickness_um,
+        net_doping_cm3 AS material_net_doping_cm3,
+        net_doping_basis AS material_net_doping_basis,
         exposed_area_cm2,
         exposed_area_cm2 * thickness_um * 1e-4 AS active_volume_cm3,
         confidence AS geometry_confidence,
@@ -1709,6 +1715,14 @@ normalized AS (
              AND r.rated_voltage_v <= 1450.0 THEN 1200
             WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
              AND r.rated_voltage_v <= 1900.0 THEN 1700
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 3900.0 THEN 3300
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 5500.0 THEN 4500
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 8000.0 THEN 6500
+            WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
+             AND r.rated_voltage_v <= 11000.0 THEN 10000
         END AS voltage_class,
         CASE
             WHEN r.rated_voltage_v IS NOT NULL AND r.rated_voltage_v > 0.0
@@ -1738,6 +1752,8 @@ normalized AS (
             THEN r.stress_energy_j / r.stress_duration_s
         END AS average_terminal_power_w,
         mg.thickness_um AS se_depletion_active_thickness_um,
+        mg.material_net_doping_cm3 AS se_depletion_material_net_doping_cm3,
+        mg.material_net_doping_basis AS se_depletion_material_net_doping_basis,
         mg.active_volume_cm3 AS energy_density_active_volume_cm3,
         mg.geometry_confidence AS energy_density_geometry_confidence,
         mg.geometry_provenance AS energy_density_geometry_provenance,
@@ -1794,10 +1810,7 @@ se_depletion_model AS (
             WHEN n.source = 'irradiation' THEN n.observed_abs_vds_v
         END AS se_depletion_voltage_v,
         dm.net_doping_cm3 AS se_depletion_net_doping_cm3,
-        CASE
-            WHEN dm.net_doping_cm3 IS NOT NULL
-                THEN 'rated_voltage_reachthrough_active_sic_thickness_estimate'
-        END AS se_depletion_net_doping_basis,
+        dm.net_doping_basis AS se_depletion_net_doping_basis,
         ds.depletion_width_um AS se_depletion_width_um,
         ds.peak_field_v_cm AS se_depletion_peak_field_v_cm,
         ds.stored_energy_j_cm2 AS se_depletion_stored_energy_j_cm2,
@@ -1816,12 +1829,16 @@ se_depletion_model AS (
                 THEN 'not_applicable_non_irradiation'
             WHEN n.observed_abs_vds_v IS NULL
                 THEN 'missing_observed_vds'
-            WHEN n.rated_voltage_v IS NULL
+            WHEN n.se_depletion_material_net_doping_cm3 IS NULL
+             AND n.rated_voltage_v IS NULL
                 THEN 'missing_rated_voltage_for_doping_estimate'
-            WHEN n.se_depletion_active_thickness_um IS NULL
+            WHEN n.se_depletion_material_net_doping_cm3 IS NULL
+             AND n.se_depletion_active_thickness_um IS NULL
                 THEN 'missing_active_sic_thickness_for_doping_estimate'
             WHEN dm.net_doping_cm3 IS NULL
                 THEN 'invalid_depletion_model_inputs'
+            WHEN n.se_depletion_material_net_doping_cm3 IS NOT NULL
+                THEN 'measured_from_kosier_table_i_voltage_class'
             ELSE 'estimated_from_rated_voltage_and_active_sic_thickness'
         END AS se_depletion_model_quality
     FROM normalized n
@@ -1829,6 +1846,10 @@ se_depletion_model AS (
     LEFT JOIN LATERAL (
         SELECT
             CASE
+                WHEN n.source = 'irradiation'
+                 AND n.se_depletion_material_net_doping_cm3 IS NOT NULL
+                 AND n.se_depletion_material_net_doping_cm3 > 0.0
+                    THEN n.se_depletion_material_net_doping_cm3
                 WHEN n.source = 'irradiation'
                  AND n.rated_voltage_v IS NOT NULL
                  AND n.rated_voltage_v > 0.0
@@ -1839,7 +1860,22 @@ se_depletion_model AS (
                             dc.elementary_charge_c
                             * POWER(n.se_depletion_active_thickness_um * 1e-4, 2)
                          )
-            END AS net_doping_cm3
+            END AS net_doping_cm3,
+            CASE
+                WHEN n.source = 'irradiation'
+                 AND n.se_depletion_material_net_doping_cm3 IS NOT NULL
+                 AND n.se_depletion_material_net_doping_cm3 > 0.0
+                    THEN COALESCE(
+                        n.se_depletion_material_net_doping_basis,
+                        'seeded_active_layer_net_doping'
+                    )
+                WHEN n.source = 'irradiation'
+                 AND n.rated_voltage_v IS NOT NULL
+                 AND n.rated_voltage_v > 0.0
+                 AND n.se_depletion_active_thickness_um IS NOT NULL
+                 AND n.se_depletion_active_thickness_um > 0.0
+                    THEN 'rated_voltage_reachthrough_active_sic_thickness_estimate'
+            END AS net_doping_basis
     ) dm ON TRUE
     LEFT JOIN LATERAL (
         SELECT
@@ -2197,10 +2233,12 @@ SELECT
         CASE WHEN s.source = 'irradiation'
                AND s.se_depletion_stored_energy_j_cm2 IS NULL
              THEN 'missing_se_depletion_threshold_model' END,
-        CASE WHEN s.se_depletion_model_quality = 'estimated_from_rated_voltage_and_active_sic_thickness'
+        CASE WHEN s.se_depletion_stored_energy_j_cm2 IS NOT NULL
              THEN 'se_depletion_threshold_model_available' END,
-        CASE WHEN s.se_depletion_model_quality = 'estimated_from_rated_voltage_and_active_sic_thickness'
+        CASE WHEN s.se_depletion_net_doping_basis = 'rated_voltage_reachthrough_active_sic_thickness_estimate'
              THEN 'se_depletion_net_doping_estimated_not_measured' END,
+        CASE WHEN s.se_depletion_net_doping_basis = 'kosier_2026_table_i_measured_epi_doping_by_voltage_class'
+             THEN 'se_depletion_net_doping_kosier_table_i' END,
         CASE WHEN s.vds_collapse_fraction IS NULL THEN 'missing_vds_collapse' END,
         CASE WHEN s.gate_delta_fraction IS NULL THEN 'missing_gate_coupling' END,
         CASE WHEN NOT s.has_condition_post_iv THEN 'missing_condition_post_iv' END,
@@ -2626,6 +2664,38 @@ pairs AS (
 distances AS (
     SELECT
         scored.*,
+        -- Evidence-coverage descriptors (additive; the raw distance below is
+        -- intentionally left unchanged).  They make explicit *how much*
+        -- damage-signature evidence each comparison rests on, so one-axis
+        -- comparisons are not silently treated as equivalent to richer ones.
+        -- See docs/damage_signature_metric_evidence_rollout_results_2026-06-25.md.
+        (scored.collapse_delta IS NOT NULL) AS has_collapse_overlap,
+        (scored.gate_delta IS NOT NULL) AS has_gate_overlap,
+        (scored.normalized_vds_delta IS NOT NULL) AS has_normalized_vds_overlap,
+        ARRAY_REMOVE(ARRAY[
+            CASE WHEN scored.collapse_delta IS NOT NULL THEN 'collapse_delta' END,
+            CASE WHEN scored.gate_delta IS NOT NULL THEN 'gate_delta' END,
+            CASE WHEN scored.normalized_vds_delta IS NOT NULL THEN 'normalized_vds_delta' END
+        ], NULL)::text[] AS damage_signature_available_axes,
+        ARRAY_REMOVE(ARRAY[
+            CASE WHEN scored.collapse_delta IS NULL THEN 'collapse_delta' END,
+            CASE WHEN scored.gate_delta IS NULL THEN 'gate_delta' END,
+            CASE WHEN scored.normalized_vds_delta IS NULL THEN 'normalized_vds_delta' END
+        ], NULL)::text[] AS damage_signature_missing_axes,
+        COALESCE(NULLIF(CONCAT_WS(
+            '+',
+            CASE WHEN scored.collapse_delta IS NOT NULL THEN 'collapse' END,
+            CASE WHEN scored.gate_delta IS NOT NULL THEN 'gate' END,
+            CASE WHEN scored.normalized_vds_delta IS NOT NULL THEN 'normalized_vds' END
+        ), ''), 'none') AS damage_signature_axis_mask,
+        -- Confidence-labeling weight ONLY (uncalibrated; never used for
+        -- ranking).  Avalanche normalized_vds_delta is NULL by design (clamp),
+        -- so avalanche rows structurally cannot earn the 0.35 normalized term.
+        (
+            CASE WHEN scored.collapse_delta IS NOT NULL THEN 0.45 ELSE 0.0 END
+          + CASE WHEN scored.normalized_vds_delta IS NOT NULL THEN 0.35 ELSE 0.0 END
+          + CASE WHEN scored.gate_delta IS NOT NULL THEN 0.20 ELSE 0.0 END
+        ) AS damage_signature_coverage_score,
         CASE
             WHEN scored.damage_signature_axes_used > 0 THEN
                 SQRT(scored.damage_signature_axis_distance_sq
@@ -2664,6 +2734,66 @@ distances AS (
         FROM pairs p
     ) scored
 ),
+coverage AS (
+    -- Stratify each comparison by which damage-signature axes actually
+    -- overlapped.  These are labels/diagnostics only; ranking is unchanged.
+    SELECT
+        d.*,
+        CASE
+            WHEN d.has_collapse_overlap
+             AND d.has_gate_overlap
+             AND d.has_normalized_vds_overlap THEN 'full_signature'
+            WHEN d.has_collapse_overlap
+             AND d.has_normalized_vds_overlap THEN 'collapse_bias_signature'
+            WHEN d.has_collapse_overlap
+             AND d.has_gate_overlap THEN 'collapse_gate_signature'
+            WHEN d.has_collapse_overlap THEN 'collapse_only_signature'
+            WHEN d.has_gate_overlap THEN 'gate_only_signature'
+            WHEN d.has_normalized_vds_overlap THEN 'bias_only_signature'
+            ELSE 'no_signature_overlap'
+        END AS damage_signature_evidence_class,
+        CASE
+            WHEN d.has_collapse_overlap
+             AND d.has_gate_overlap
+             AND d.has_normalized_vds_overlap THEN 1
+            WHEN d.has_collapse_overlap
+             AND d.has_normalized_vds_overlap THEN 2
+            WHEN d.has_collapse_overlap
+             AND d.has_gate_overlap THEN 3
+            WHEN d.has_collapse_overlap THEN 4
+            WHEN d.has_gate_overlap THEN 5
+            WHEN d.has_normalized_vds_overlap THEN 6
+            ELSE 9
+        END AS damage_signature_evidence_tier,
+        -- EXPERIMENTAL / DIAGNOSTIC ONLY.  Penalty constants are uncalibrated
+        -- and are deliberately NOT wired into candidate_rank: a before/after
+        -- audit showed evidence-tier ordering flips ~78% of rank-1 picks
+        -- avalanche->sc, demoting avalanche even for SEB targets where the
+        -- seeded mechanism table treats avalanche as the first-order analog.
+        -- Always >= raw damage_signature_distance (penalty >= 0).
+        CASE
+            WHEN d.damage_signature_distance IS NOT NULL THEN SQRT(
+                POWER(d.damage_signature_distance, 2)
+              + POWER(
+                    CASE
+                        WHEN d.has_collapse_overlap
+                         AND d.has_gate_overlap
+                         AND d.has_normalized_vds_overlap THEN 0.0
+                        WHEN d.has_collapse_overlap
+                         AND d.has_normalized_vds_overlap THEN 0.15
+                        WHEN d.has_collapse_overlap
+                         AND d.has_gate_overlap THEN 0.20
+                        WHEN d.has_collapse_overlap THEN 0.40
+                        WHEN d.has_gate_overlap THEN 0.65
+                        WHEN d.has_normalized_vds_overlap THEN 0.80
+                        ELSE 1.00
+                    END,
+                    2
+                )
+            )
+        END AS coverage_adjusted_damage_signature_distance
+    FROM distances d
+),
 evidence AS (
     SELECT
         d.*,
@@ -2695,7 +2825,7 @@ evidence AS (
             WHEN pm.nearest_distance IS NOT NULL THEN 'predicted_damage'
             ELSE 'waveform_only'
         END AS damage_evidence_tier
-    FROM distances d
+    FROM coverage d
     LEFT JOIN LATERAL (
         SELECT
             m.comparability_status,
@@ -3119,6 +3249,16 @@ SELECT
     path_penalty,
     damage_signature_axes_used,
     damage_signature_distance,
+    has_collapse_overlap,
+    has_gate_overlap,
+    has_normalized_vds_overlap,
+    damage_signature_available_axes,
+    damage_signature_missing_axes,
+    damage_signature_axis_mask,
+    damage_signature_coverage_score,
+    damage_signature_evidence_class,
+    damage_signature_evidence_tier,
+    coverage_adjusted_damage_signature_distance,
     waveform_distance,
     measured_comparability_status,
     measured_comparable_axes,
@@ -3200,6 +3340,18 @@ SELECT
         AS median_waveform_distance,
     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY best_damage_distance)
         AS median_damage_distance,
+    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY damage_signature_distance)
+        AS median_damage_signature_distance,
+    COUNT(*) FILTER (WHERE damage_signature_evidence_class = 'full_signature')
+        AS full_signature_top_events,
+    COUNT(*) FILTER (WHERE damage_signature_evidence_class = 'collapse_bias_signature')
+        AS collapse_bias_signature_top_events,
+    COUNT(*) FILTER (WHERE damage_signature_evidence_class = 'collapse_gate_signature')
+        AS collapse_gate_signature_top_events,
+    COUNT(*) FILTER (WHERE damage_signature_evidence_class = 'collapse_only_signature')
+        AS collapse_only_signature_top_events,
+    COUNT(*) FILTER (WHERE damage_signature_evidence_class = 'no_signature_overlap')
+        AS no_signature_overlap_top_events,
     STRING_AGG(DISTINCT device_type, ', ' ORDER BY device_type)
         AS device_types,
     STRING_AGG(DISTINCT candidate_device_type, ', ' ORDER BY candidate_device_type)

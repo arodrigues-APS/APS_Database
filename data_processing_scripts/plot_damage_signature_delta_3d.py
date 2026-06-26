@@ -61,7 +61,49 @@ SELECT target_stress_record_key,
        normalized_vds_delta,
        damage_signature_axes_used,
        damage_signature_distance,
-       candidate_status
+       has_collapse_overlap,
+       has_gate_overlap,
+       has_normalized_vds_overlap,
+       damage_signature_available_axes,
+       damage_signature_missing_axes,
+       damage_signature_axis_mask,
+       damage_signature_coverage_score,
+       damage_signature_evidence_class,
+       damage_signature_evidence_tier,
+       coverage_adjusted_damage_signature_distance,
+       candidate_status,
+       waveform_distance,
+       best_damage_distance,
+       combined_screening_distance,
+       candidate_blockers,
+       mechanism_match_class,
+       mechanism_rationale,
+       target_energy_j,
+       target_energy_basis,
+       target_energy_is_comparable,
+       target_energy_censored_reason,
+       target_energy_level,
+       target_radiation_deposited_energy_j,
+       target_radiation_deposited_energy_total_j,
+       target_radiation_dose_gy,
+       target_se_depletion_model_quality,
+       target_se_depletion_stored_energy_j_cm2,
+       target_se_depletion_ratio_to_seb,
+       target_se_depletion_ratio_to_selc,
+       target_se_depletion_predicted_seb_voltage_v,
+       target_se_depletion_predicted_selc_voltage_v,
+       target_stress_energy_density_j_cm3,
+       target_energy_density_basis,
+       target_energy_localization_class,
+       candidate_energy_j,
+       candidate_energy_basis,
+       candidate_energy_is_comparable,
+       candidate_energy_level,
+       candidate_stress_energy_density_j_cm3,
+       candidate_energy_density_basis,
+       candidate_energy_localization_class,
+       energy_density_ratio,
+       log_energy_delta
 FROM stress_proxy_candidate_view
 WHERE candidate_source IN ('sc', 'avalanche')
 ORDER BY candidate_source, target_stress_record_key, candidate_rank;
@@ -97,6 +139,30 @@ def summarize_coverage(comparisons: pd.DataFrame) -> pd.DataFrame:
                     "normalized_vds_delta"
                 ].notna().sum(),
                 "n_complete_3d": complete.sum(),
+                "dominant_evidence_class": (
+                    group["damage_signature_evidence_class"].mode().iat[0]
+                    if "damage_signature_evidence_class" in group
+                    and not group["damage_signature_evidence_class"].dropna().empty
+                    else "unknown"
+                ),
+                "n_collapse_only_signature": (
+                    (group.get("damage_signature_evidence_class")
+                     == "collapse_only_signature").sum()
+                    if "damage_signature_evidence_class" in group
+                    else 0
+                ),
+                "n_collapse_bias_signature": (
+                    (group.get("damage_signature_evidence_class")
+                     == "collapse_bias_signature").sum()
+                    if "damage_signature_evidence_class" in group
+                    else 0
+                ),
+                "n_full_signature": (
+                    (group.get("damage_signature_evidence_class")
+                     == "full_signature").sum()
+                    if "damage_signature_evidence_class" in group
+                    else 0
+                ),
             }
         )
     return pd.DataFrame(rows)
@@ -294,6 +360,21 @@ There are therefore no fully measured three-axis comparisons in the current
 materialized data. The plot still compares both proxy types on collapse delta
 and compares irradiation-to-SC pairs on normalized-Vds delta. The exact source
 rows, with NULLs preserved, are in `damage_signature_delta_3d.csv`.
+
+## Evidence coverage
+
+Each comparison now carries a `damage_signature_evidence_class` describing which
+axes actually overlapped. Distances are only comparable *within* a class:
+
+- `collapse_only_signature` (current avalanche cohort) rests on one axis.
+- `collapse_bias_signature` (current SC cohort) rests on collapse + normalized
+  Vds.
+
+A lower-dimensional comparison can show a deceptively small distance, so the
+`damage_signature_distance` is a screening distance within its evidence class,
+not a cross-class equivalence score. The experimental
+`coverage_adjusted_damage_signature_distance` adds an uncalibrated missing-axis
+penalty for triage only; it is never used to rank candidates.
 """
     out_path.write_text(text)
 

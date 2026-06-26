@@ -11,7 +11,7 @@
 data/
 
 # Local reference library
-docs/relevant_papers/
+docs/
 
 # Generated analysis outputs
 # Existing tracked files under out/ stay tracked.
