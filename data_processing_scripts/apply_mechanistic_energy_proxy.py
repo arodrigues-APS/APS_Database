@@ -63,6 +63,7 @@ REQUIRED_OBJECTS = (
     "stress_energy_equivalence_features",
     "stress_regime_compatibility",
     "stress_proxy_candidate_energy_v2",
+    "proxy_truth_labels",
 )
 
 
@@ -232,6 +233,77 @@ def validate(conn) -> bool:
             """
         )
         _print_rows("v1 -> v2 rank-1 source shifts:", cur.fetchall())
+
+        # Phase 5: severity band + point-ratio columns are exposed and coherent.
+        # The nominal point ratio must lie within its [low, high] band (bands are
+        # the point divided/multiplied by EXP(0.5*sigma)); a violation means the
+        # SEB/SELC CASE branch for the band and the point ratio disagree, i.e. an
+        # axis mismatch.  Referencing the columns also fails loudly if 028 was
+        # not re-applied with the Phase-5 extension.
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS rank1_rows,
+                COUNT(*) FILTER (
+                    WHERE target_severity_point_ratio IS NOT NULL
+                      AND target_severity_low IS NOT NULL
+                      AND target_severity_high IS NOT NULL
+                      AND NOT (target_severity_point_ratio
+                               BETWEEN target_severity_low AND target_severity_high)
+                ) AS target_point_outside_band,
+                COUNT(*) FILTER (
+                    WHERE candidate_severity_point_ratio IS NOT NULL
+                      AND candidate_severity_low IS NOT NULL
+                      AND candidate_severity_high IS NOT NULL
+                      AND NOT (candidate_severity_point_ratio
+                               BETWEEN candidate_severity_low AND candidate_severity_high)
+                ) AS candidate_point_outside_band
+            FROM stress_proxy_candidate_energy_v2
+            WHERE mechanistic_energy_candidate_rank = 1
+            """
+        )
+        band = cur.fetchone()
+        _print_rows("Phase 5 severity band/point coherence (both must be 0):", [band])
+        if band["target_point_outside_band"] or band["candidate_point_outside_band"]:
+            ok = False
+            print("  FAIL: a severity point ratio falls outside its band (axis mismatch)")
+
+        # Phase 4: curated truth-label coverage.  These are the human-labeled
+        # pairs the v2 calibrator scores against.  An empty table is the
+        # expected initial state (curation is a live step) and is NOT a failure;
+        # it just means the calibrator's hit-rate fails closed until seeded.
+        cur.execute(
+            """
+            SELECT
+                label,
+                label_basis,
+                COUNT(*) AS rows,
+                COUNT(*) FILTER (
+                    WHERE EXISTS (
+                        SELECT 1 FROM stress_proxy_candidate_energy_v2 v2
+                        WHERE v2.target_stress_record_key = t.target_stress_record_key
+                          AND v2.candidate_stress_record_key = t.candidate_stress_record_key
+                    )
+                ) AS resolve_to_v2_pair
+            FROM proxy_truth_labels t
+            GROUP BY label, label_basis
+            ORDER BY rows DESC
+            """
+        )
+        truth_rows = cur.fetchall()
+        _print_rows("Phase 4 curated truth-label coverage:", truth_rows)
+        if not truth_rows:
+            print("  (no curated truth labels yet — calibrator hit-rate will fail closed)")
+        else:
+            unresolved = sum(
+                r["rows"] - r["resolve_to_v2_pair"] for r in truth_rows
+            )
+            if unresolved:
+                print(
+                    f"  NOTE: {unresolved} labeled pair(s) do not resolve to a v2"
+                    " candidate row (target/candidate key not in the top-10 pool"
+                    " or stale key)."
+                )
 
     print("\nPhase 1-3 checks:", "PASS" if ok else "FAIL")
     return ok

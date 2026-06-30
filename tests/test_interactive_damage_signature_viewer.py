@@ -3,9 +3,14 @@ import unittest
 import pandas as pd
 
 from data_processing_scripts.create_interactive_damage_signature_viewer import (
+    CRITICAL_OVERLAP_COLORS,
     KOSIER_2026_SELC_CRITICAL_J_CM2,
     energy_balance_plot_payload,
     irradiation_energy_summary,
+    v2_interval_overlap_plot_payload,
+)
+from data_processing_scripts.export_proxy_candidate_energy_v2_csv import (
+    _flatten_array,
 )
 
 
@@ -104,6 +109,96 @@ class InteractiveDamageSignatureViewerTests(unittest.TestCase):
         payload = energy_balance_plot_payload(records)
         self.assertEqual(payload["traces"], [])
         self.assertIn("No per-device irradiation energy", payload["note"])
+
+
+def _v2_row(device: str, rank: int, overlap: str, key: str) -> dict:
+    """One v2 candidate row with coherent (low <= point <= high) bands."""
+    return {
+        "mechanistic_energy_candidate_rank": rank,
+        "candidate_rank_v1": 2,
+        "device_type": device,
+        "target_stress_record_key": key,
+        "target_event_type": "SEB",
+        "target_mechanistic_regime": "heavy_ion_hard_collapse_seb",
+        "candidate_source": "avalanche",
+        "candidate_mechanistic_regime": "avalanche_hard_collapse",
+        "regime_match_class": "first_order_analog",
+        "mechanistic_energy_candidate_status": "mechanistic_measured_candidate",
+        "critical_severity_overlap_class": overlap,
+        "localization_mismatch_log10": 3.2,
+        "target_severity_low": 0.5,
+        "target_severity_high": 2.0,
+        "target_severity_point_ratio": 1.0,
+        "candidate_severity_low": 0.4,
+        "candidate_severity_high": 1.6,
+        "candidate_severity_point_ratio": 0.8,
+        "energy_v2_blockers": "regime_mismatch; cross_device_screening_only",
+        "energy_v2_notes": "critical_severity_is_screening_descriptor_only",
+    }
+
+
+class V2IntervalOverlapPayloadTests(unittest.TestCase):
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            _v2_row("DUT-A", 1, "strong_overlap", "k-a1"),
+            _v2_row("DUT-A", 1, "far_miss", "k-a2"),
+            _v2_row("DUT-A", 2, "partial_overlap", "k-a3"),  # rank 2 -> excluded
+            _v2_row("DUT-B", 1, "partial_overlap", "k-b1"),
+        ])
+
+    def test_empty_frame_returns_empty_payload(self):
+        payload = v2_interval_overlap_plot_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No v2 rank-1 candidate", payload["note"])
+
+    def test_two_traces_per_device_and_filter_contract(self):
+        payload = v2_interval_overlap_plot_payload(self._frame())
+        # 2 devices x (target + candidate) = 4 traces.
+        self.assertEqual(len(payload["traces"]), 4)
+        f = payload["filter"]
+        self.assertEqual(f["devices"], ["DUT-A", "DUT-B"])
+        self.assertEqual(f["traceDevices"], ["DUT-A", "DUT-A", "DUT-B", "DUT-B"])
+        self.assertEqual(f["allShowsOnly"], "DUT-A")
+
+    def test_rank2_excluded_from_first_device(self):
+        payload = v2_interval_overlap_plot_payload(self._frame())
+        target_trace = payload["traces"][0]  # DUT-A target trace
+        # Only the two rank-1 DUT-A targets, not the rank-2 row.
+        self.assertEqual(len(target_trace["y"]), 2)
+
+    def test_candidate_marker_colors_follow_overlap_class(self):
+        payload = v2_interval_overlap_plot_payload(self._frame())
+        candidate_trace = payload["traces"][1]  # DUT-A candidate trace
+        self.assertEqual(
+            candidate_trace["marker"]["color"],
+            [CRITICAL_OVERLAP_COLORS["strong_overlap"],
+             CRITICAL_OVERLAP_COLORS["far_miss"]],
+        )
+
+    def test_hover_carries_status_and_blockers(self):
+        payload = v2_interval_overlap_plot_payload(self._frame())
+        candidate_trace = payload["traces"][1]
+        # customdata[6] = status, customdata[9] = blockers (acceptance: numbers
+        # never shown without evidence class + blockers).
+        first = candidate_trace["customdata"][0]
+        self.assertEqual(first[6], "mechanistic_measured_candidate")
+        self.assertIn("regime_mismatch", first[9])
+        self.assertIn("Blockers", candidate_trace["hovertemplate"])
+        self.assertIn("Status", candidate_trace["hovertemplate"])
+
+    def test_point_within_band_error_bars_nonnegative(self):
+        payload = v2_interval_overlap_plot_payload(self._frame())
+        for trace in payload["traces"]:
+            err = trace["error_x"]
+            self.assertTrue(all(v >= 0 for v in err["array"]))
+            self.assertTrue(all(v >= 0 for v in err["arrayminus"]))
+
+
+class ExporterHelperTests(unittest.TestCase):
+    def test_flatten_array_join_and_null(self):
+        self.assertEqual(_flatten_array(["a", "b"]), "a; b")
+        self.assertEqual(_flatten_array(None), "")
+        self.assertEqual(_flatten_array("already"), "already")
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ DATASET_TABLES = {
     "candidates": "stress_proxy_candidate_view",
     "candidate_summary": "stress_proxy_candidate_summary_view",
     "experiment_plan": "stress_proxy_experiment_plan_view",
+    "candidates_v2": "stress_proxy_candidate_energy_v2",
 }
 
 CANDIDATE_COLORS = {
@@ -222,6 +223,17 @@ ENERGY_CHAIN_TABLE_DESCRIPTION = (
     "measured from Kosier Table I or estimated."
 )
 
+V2_MECHANISTIC_TABLE_DESCRIPTION = (
+    "v2 mechanistic-energy candidate ranking (stress_proxy_candidate_energy_v2). "
+    "This is a staged, per-axis-overlap screening ranking, NOT a fitted score. "
+    "Read every overlap class and ratio together with "
+    "mechanistic_energy_candidate_status and energy_v2_blockers: a numeric "
+    "overlap is a retrieval hint, never an equivalence claim. Target severity "
+    "(stored depletion ratio) and candidate severity (bulk terminal ratio) are "
+    "different physical quantities kept in separate columns. Localization "
+    "mismatch is a context note, never a blocker."
+)
+
 # Superset's annotation-layer schema requires showMarkers/hideLine even for
 # FORMULA layers (see FIGURE1B_REFERENCE_LINES). Threshold lines are in the
 # same axis units as the plotted metric: uJ/cm2 for stored energy, unitless
@@ -283,12 +295,14 @@ DEPLETION_X_BOUNDS = [0.0, 1.0]
 
 TAB_READINESS = "Readiness & Actions"
 TAB_CANDIDATE = "Candidate Triage"
+TAB_MECHANISTIC = "v2 / Mechanistic"
 TAB_DIAGNOSTICS = "Method Diagnostics"
 TAB_RAW = "Raw / QA"
-TAB_ORDER = [TAB_READINESS, TAB_CANDIDATE, TAB_DIAGNOSTICS, TAB_RAW]
+TAB_ORDER = [TAB_READINESS, TAB_CANDIDATE, TAB_MECHANISTIC, TAB_DIAGNOSTICS, TAB_RAW]
 TAB_IDS = {
     TAB_READINESS: "TAB-proxy-readiness",
     TAB_CANDIDATE: "TAB-proxy-candidate",
+    TAB_MECHANISTIC: "TAB-proxy-mechanistic",
     TAB_DIAGNOSTICS: "TAB-proxy-diagnostics",
     TAB_RAW: "TAB-proxy-raw",
 }
@@ -695,6 +709,7 @@ def select_filter(filter_id: str, name: str, targets, scoped_chart_ids,
 
 def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
     candidate_ids = chart_groups["candidate"]
+    candidate_v2_ids = chart_groups.get("candidate_v2", [])
     context_ids = chart_groups["context"]
     readiness_ids = chart_groups["readiness"]
     planning_ids = chart_groups["planning"]
@@ -702,9 +717,11 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
     all_ids = list(all_chart_ids)
 
     cand = dataset_ids["candidates"]
+    cand_v2 = dataset_ids["candidates_v2"]
     ctx = dataset_ids["context"]
     tab_readiness = TAB_IDS[TAB_READINESS]
     tab_candidate = TAB_IDS[TAB_CANDIDATE]
+    tab_mechanistic = TAB_IDS[TAB_MECHANISTIC]
     tab_diag = TAB_IDS[TAB_DIAGNOSTICS]
 
     device_filter_id = "NATIVE_FILTER-proxy-device"
@@ -714,6 +731,13 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             fid, label, [(cand, column)], candidate_ids, all_ids,
             parent_ids=[device_filter_id],
             tabs_in_scope=[tab_candidate, tab_diag],
+        )
+
+    def candidate_v2_filter(fid, label, column):
+        return select_filter(
+            fid, label, [(cand_v2, column)], candidate_v2_ids, all_ids,
+            parent_ids=[device_filter_id],
+            tabs_in_scope=[tab_mechanistic],
         )
 
     def context_filter(fid, label, column):
@@ -728,14 +752,16 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             "Device Type",
             [
                 (cand, "device_type"),
+                (cand_v2, "device_type"),
                 (ctx, "device_type"),
                 (dataset_ids["readiness"], "device_type"),
                 (dataset_ids["experiment_plan"], "measurement_device_type"),
                 (dataset_ids["destruction_boundary"], "device_type"),
             ],
-            candidate_ids + context_ids + readiness_ids + planning_ids + device_only_ids,
+            candidate_ids + candidate_v2_ids + context_ids + readiness_ids
+            + planning_ids + device_only_ids,
             all_ids,
-            tabs_in_scope=[tab_readiness, tab_candidate, tab_diag],
+            tabs_in_scope=[tab_readiness, tab_candidate, tab_mechanistic, tab_diag],
         ),
         candidate_filter(
             "NATIVE_FILTER-proxy-target-event", "Target Event", "target_event_type"
@@ -769,6 +795,25 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
         candidate_filter(
             "NATIVE_FILTER-proxy-target-regime", "Target Regime",
             "target_stress_regime"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-regime", "v2 Target Regime",
+            "target_mechanistic_regime"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-status", "v2 Candidate Status",
+            "mechanistic_energy_candidate_status"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-scope", "v2 Match Scope", "match_scope"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-overlap", "v2 Severity Overlap",
+            "critical_severity_overlap_class"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-source", "v2 Candidate Source",
+            "candidate_source"
         ),
         context_filter("NATIVE_FILTER-proxy-context-source", "Context Source", "source"),
         context_filter(
@@ -1130,6 +1175,36 @@ def build_chart_defs(dataset_ids):
     top_rank_filter = sql_filter("candidate_rank = 1")
     top_ten_filter = sql_filter("candidate_rank <= 10")
     decision_status_filter = sql_filter(DECISION_STATUS_SQL)
+
+    # v2 mechanistic-energy candidate columns.  Every table keeps the status and
+    # blockers beside the numeric ratios/classes (Phase-5 acceptance: no scalar
+    # without its evidence class + blockers).  Target vs candidate severity stay
+    # in separate columns (separation invariant #1).
+    v2_cols = [
+        "target_stress_record_key",
+        "device_type",
+        "target_event_type",
+        "target_ion_species",
+        "match_scope",
+        "target_mechanistic_regime",
+        "candidate_source",
+        "candidate_mechanistic_regime",
+        "regime_match_class",
+        "candidate_rank_v1",
+        "mechanistic_energy_candidate_rank",
+        "mechanistic_energy_candidate_status",
+        "critical_severity_overlap_class",
+        "terminal_energy_overlap_class",
+        "cumulative_exposure_overlap_class",
+        "power_rate_overlap_class",
+        "localization_mismatch_log10",
+        "target_severity_point_ratio",
+        "candidate_severity_point_ratio",
+        "damage_evidence_class",
+        "energy_v2_blockers",
+        "energy_v2_notes",
+    ]
+    v2_rank1_filter = sql_filter("mechanistic_energy_candidate_rank = 1")
 
     return [
         (
@@ -1746,6 +1821,42 @@ def build_chart_defs(dataset_ids):
             TAB_RAW,
             None,
         ),
+        (
+            "Proxy Readiness - v2 Rank-1 Mechanistic Candidate",
+            dataset_ids["candidates_v2"],
+            "table",
+            table_params(
+                v2_cols,
+                row_limit=500,
+                order_by=[
+                    ["mechanistic_energy_status_priority", True],
+                    ["mechanistic_energy_candidate_rank", True],
+                ],
+                filters=[v2_rank1_filter],
+                description=V2_MECHANISTIC_TABLE_DESCRIPTION,
+            ),
+            12,
+            48,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
+        (
+            "Proxy Readiness - v2 Candidate Pool (Top 10)",
+            dataset_ids["candidates_v2"],
+            "table",
+            table_params(
+                v2_cols,
+                row_limit=2000,
+                order_by=[
+                    ["target_stress_record_key", True],
+                    ["mechanistic_energy_candidate_rank", True],
+                ],
+            ),
+            12,
+            56,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
     ]
 
 
@@ -1779,6 +1890,7 @@ def create_dashboard() -> int | None:
 
     chart_groups = {
         "candidate": groups.get("candidate", []),
+        "candidate_v2": groups.get("candidate_v2", []),
         "context": groups.get("context", []),
         "readiness": groups.get("readiness", []),
         "planning": groups.get("planning", []),

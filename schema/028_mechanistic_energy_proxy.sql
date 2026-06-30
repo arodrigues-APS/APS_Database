@@ -150,6 +150,84 @@ ON CONFLICT (target_regime, candidate_regime) DO UPDATE SET
     rationale = EXCLUDED.rationale;
 
 
+-- Phase 4: curated truth labels for calibrating the v2 mechanistic ranking.
+--
+-- This is the human-labeled supplement to the sparse auto-truth source
+-- (damage_equivalence_match_view strong/usable rows).  It exists because the
+-- Phase-3 live run proved the binding constraint is DATA, not method: tuning a
+-- high-dimensional score against the auto-derived rank-1 output would look
+-- precise and not be falsifiable.  Real (target, candidate) pairs are curated
+-- against the live DB from known-good cases (e.g. the C2M0080120D
+-- avalanche/proton pilot) before any weight/threshold tuning.
+--
+-- Keys are text stress_record_key values (schema/025, built by string concat),
+-- NOT numeric ids.  label_basis records how strong the evidence is so the
+-- calibrator can weight measured post-IV labels above expert/pilot judgement.
+CREATE TABLE IF NOT EXISTS proxy_truth_labels (
+    target_stress_record_key     text NOT NULL,
+    candidate_stress_record_key  text NOT NULL,
+    label                        text NOT NULL,
+    label_basis                  text NOT NULL,
+    reviewer                     text,
+    review_date                  date,
+    notes                        text,
+    PRIMARY KEY (target_stress_record_key, candidate_stress_record_key),
+    CHECK (label IN ('equivalent', 'not_equivalent', 'uncertain')),
+    CHECK (label_basis IN ('measured_post_iv', 'expert', 'pilot'))
+);
+
+-- Idempotent seed/upsert.  Intentionally a no-op until real live keys are added
+-- as UNION ALL SELECT rows below: the keys must come from the target database,
+-- so curation is a live step (the assistant verifies SQL offline only).  The
+-- WHERE FALSE seed guarantees copying this block never inserts placeholder
+-- labels.  Mirrors the stress_regime_compatibility / settings upsert pattern.
+WITH seed (
+    target_stress_record_key,
+    candidate_stress_record_key,
+    label,
+    label_basis,
+    reviewer,
+    review_date,
+    notes
+) AS (
+    SELECT
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::date,
+        NULL::text
+    WHERE FALSE
+    -- UNION ALL SELECT
+    --     'LIVE_TARGET_STRESS_RECORD_KEY',
+    --     'LIVE_CANDIDATE_STRESS_RECORD_KEY',
+    --     'equivalent',
+    --     'pilot',
+    --     'aps',
+    --     DATE '2026-06-30',
+    --     'C2M0080120D avalanche/proton pilot; curated from live DB keys'
+)
+INSERT INTO proxy_truth_labels
+    (target_stress_record_key, candidate_stress_record_key,
+     label, label_basis, reviewer, review_date, notes)
+SELECT
+    target_stress_record_key,
+    candidate_stress_record_key,
+    label,
+    label_basis,
+    reviewer,
+    review_date,
+    notes
+FROM seed
+ON CONFLICT (target_stress_record_key, candidate_stress_record_key) DO UPDATE SET
+    label = EXCLUDED.label,
+    label_basis = EXCLUDED.label_basis,
+    reviewer = EXCLUDED.reviewer,
+    review_date = EXCLUDED.review_date,
+    notes = EXCLUDED.notes;
+
+
 CREATE VIEW stress_energy_equivalence_features AS
 WITH base AS (
     SELECT
@@ -576,7 +654,16 @@ WITH paired AS (
              ELSE cf.terminal_ratio_to_seb_lower END AS candidate_severity_low,
         CASE WHEN UPPER(COALESCE(v1.target_event_type, '')) IN ('SELCI', 'SELCII')
              THEN cf.terminal_ratio_to_selc_upper
-             ELSE cf.terminal_ratio_to_seb_upper END AS candidate_severity_high
+             ELSE cf.terminal_ratio_to_seb_upper END AS candidate_severity_high,
+        -- Axis-matched nominal (point) ratios for the band chart.  Same
+        -- target/candidate separation as the bands: target uses its stored
+        -- depletion ratio, candidate uses its bulk terminal-critical ratio.
+        CASE WHEN UPPER(COALESCE(v1.target_event_type, '')) IN ('SELCI', 'SELCII')
+             THEN tf.se_depletion_ratio_to_selc
+             ELSE tf.se_depletion_ratio_to_seb END AS target_severity_point_ratio,
+        CASE WHEN UPPER(COALESCE(v1.target_event_type, '')) IN ('SELCI', 'SELCII')
+             THEN cf.terminal_ratio_to_selc_critical
+             ELSE cf.terminal_ratio_to_seb_critical END AS candidate_severity_point_ratio
     FROM stress_proxy_candidate_ranked_view v1
     LEFT JOIN stress_energy_equivalence_features tf
         ON tf.stress_record_key = v1.target_stress_record_key
@@ -791,6 +878,15 @@ SELECT
     power_rate_overlap_class,
     cumulative_exposure_overlap_class,
     damage_evidence_class,
+    -- Severity bands + axis-matched point ratios for the Phase-5 interval chart.
+    -- Target vs candidate stay in separate columns (separation invariant #1):
+    -- target_* are stored depletion ratios, candidate_* are bulk terminal ratios.
+    target_severity_low,
+    target_severity_high,
+    target_severity_point_ratio,
+    candidate_severity_low,
+    candidate_severity_high,
+    candidate_severity_point_ratio,
     mechanistic_energy_screening_bucket,
     mechanistic_energy_candidate_status,
     mechanistic_energy_status_priority,

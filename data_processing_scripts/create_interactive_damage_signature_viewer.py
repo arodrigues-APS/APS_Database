@@ -32,6 +32,9 @@ except ImportError:  # Allows running from inside data_processing_scripts/.
 OUT_DIR = Path("out/avalanche_irrad_pilot")
 SOURCE_CSV = OUT_DIR / "damage_signature_sources_3d.csv"
 DELTA_CSV = OUT_DIR / "damage_signature_delta_3d.csv"
+# Optional: written by export_proxy_candidate_energy_v2_csv.py.  When absent the
+# v2 tab renders its empty-state note instead of failing the whole build.
+V2_CSV = OUT_DIR / "proxy_candidate_energy_v2.csv"
 PLOTLY_ASSET = OUT_DIR / "plotly-2.35.2.min.js"
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 OUTPUT_HTML = OUT_DIR / "damage_signature_3d_interactive.html"
@@ -1628,6 +1631,215 @@ def energy_balance_plot_payload(records: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+CRITICAL_OVERLAP_COLORS = {
+    "strong_overlap": "#1a9850",
+    "partial_overlap": "#a6d96a",
+    "near_miss": "#fdae61",
+    "far_miss": "#d73027",
+    "missing_interval": "#999999",
+}
+V2_TARGET_BAND_COLOR = "#4575b4"
+V2_NEEDED_BAND_COLUMNS = [
+    "target_severity_low",
+    "target_severity_high",
+    "target_severity_point_ratio",
+    "candidate_severity_low",
+    "candidate_severity_high",
+    "candidate_severity_point_ratio",
+]
+
+
+def _v2_clean(value: Any) -> str:
+    """CSV/array cell -> display string ('' for NULL/NaN)."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    return str(value)
+
+
+def _v2_target_label(rec: dict[str, Any]) -> str:
+    key = _v2_clean(rec.get("target_stress_record_key"))
+    event = _v2_clean(rec.get("target_event_type")) or "target"
+    return f"{event} · {key[-18:]}" if key else event
+
+
+def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """Per-target severity-interval overlap for v2's rank-1 candidate.
+
+    For each target, draw the target stored-field severity band and the rank-1
+    candidate's terminal-critical severity band as horizontal intervals (error
+    bars around the nominal point ratio) on a shared log severity-ratio axis,
+    colored by the critical-severity overlap class.  Target and candidate stay
+    semantically separate (separation invariant #1): this is a *screening
+    descriptor*, never an equivalence claim, so every hover carries the v2
+    status and blockers next to the numbers (Phase-5 acceptance).
+    """
+    base_title = "v2 severity-interval overlap (rank-1 candidate per target)"
+    empty_note = (
+        "No v2 rank-1 candidate rows with severity bands are available. Export "
+        "stress_proxy_candidate_energy_v2 with "
+        "export_proxy_candidate_energy_v2_csv.py after applying schema/028."
+    )
+
+    def empty() -> dict[str, Any]:
+        return {
+            "traces": [],
+            "layout": common_cartesian_layout(base_title),
+            "note": empty_note,
+        }
+
+    if rows is None or rows.empty:
+        return empty()
+    df = rows.copy()
+    if "mechanistic_energy_candidate_rank" in df.columns:
+        df = df[df["mechanistic_energy_candidate_rank"] == 1]
+    if any(col not in df.columns for col in V2_NEEDED_BAND_COLUMNS):
+        return empty()
+    df = df.dropna(subset=V2_NEEDED_BAND_COLUMNS)
+    if df.empty:
+        return empty()
+
+    has_device = "device_type" in df.columns
+    devices = sorted(df["device_type"].dropna().unique()) if has_device else [None]
+
+    target_hover = (
+        "<b>Target %{y}</b><br>"
+        "Stored-field severity ratio: %{x:.3g}<br>"
+        "Band: [%{customdata[0]}, %{customdata[1]}]<br>"
+        "Event %{customdata[2]} · regime %{customdata[3]}"
+        "<extra>Target (stored depletion ratio)</extra>"
+    )
+    candidate_hover = (
+        "<b>Candidate %{customdata[0]}</b><br>"
+        "Terminal-critical severity ratio: %{x:.3g}<br>"
+        "Band: [%{customdata[1]}, %{customdata[2]}]<br>"
+        "Severity overlap: %{customdata[3]}<br>"
+        "v1 rank %{customdata[4]} → v2 rank %{customdata[5]}<br>"
+        "Status: %{customdata[6]}<br>"
+        "Regime match: %{customdata[7]} · localization log10: %{customdata[8]}<br>"
+        "Blockers: %{customdata[9]}<br>"
+        "Notes: %{customdata[10]}"
+        "<extra>Candidate (bulk terminal ratio)</extra>"
+    )
+
+    traces: list[dict[str, Any]] = []
+    trace_device: list[Any] = []
+    titles: dict[str, str] = {}
+    for dev in devices:
+        sub = df if dev is None else df[df["device_type"] == dev]
+        recs = sub.to_dict("records")
+        y_labels = [_v2_target_label(r) for r in recs]
+
+        t_x = [float(r["target_severity_point_ratio"]) for r in recs]
+        t_plus = [float(r["target_severity_high"]) - x for r, x in zip(recs, t_x)]
+        t_minus = [x - float(r["target_severity_low"]) for r, x in zip(recs, t_x)]
+        traces.append({
+            "type": "scatter",
+            "mode": "markers",
+            "name": "Target severity band",
+            "legendgroup": "target",
+            "showlegend": dev == devices[0],
+            "x": t_x,
+            "y": y_labels,
+            "error_x": {
+                "type": "data", "symmetric": False,
+                "array": t_plus, "arrayminus": t_minus,
+                "color": V2_TARGET_BAND_COLOR, "thickness": 2, "width": 6,
+            },
+            "marker": {"color": V2_TARGET_BAND_COLOR, "symbol": "line-ns-open", "size": 9},
+            "customdata": [[
+                display_value(r["target_severity_low"]),
+                display_value(r["target_severity_high"]),
+                _v2_clean(r.get("target_event_type")),
+                _v2_clean(r.get("target_mechanistic_regime")),
+            ] for r in recs],
+            "hovertemplate": target_hover,
+            "visible": True,
+        })
+
+        c_x = [float(r["candidate_severity_point_ratio"]) for r in recs]
+        c_plus = [float(r["candidate_severity_high"]) - x for r, x in zip(recs, c_x)]
+        c_minus = [x - float(r["candidate_severity_low"]) for r, x in zip(recs, c_x)]
+        marker_colors = [
+            CRITICAL_OVERLAP_COLORS.get(
+                _v2_clean(r.get("critical_severity_overlap_class")), "#999999")
+            for r in recs
+        ]
+        traces.append({
+            "type": "scatter",
+            "mode": "markers",
+            "name": "Candidate severity band",
+            "legendgroup": "candidate",
+            "showlegend": dev == devices[0],
+            "x": c_x,
+            "y": y_labels,
+            "error_x": {
+                "type": "data", "symmetric": False,
+                "array": c_plus, "arrayminus": c_minus,
+                "color": "#8c959f", "thickness": 2, "width": 6,
+            },
+            "marker": {"color": marker_colors, "symbol": "diamond", "size": 10,
+                       "line": {"color": "#24292f", "width": 0.5}},
+            "customdata": [[
+                _v2_clean(r.get("candidate_source")),
+                display_value(r["candidate_severity_low"]),
+                display_value(r["candidate_severity_high"]),
+                _v2_clean(r.get("critical_severity_overlap_class")),
+                _v2_clean(r.get("candidate_rank_v1")),
+                _v2_clean(r.get("mechanistic_energy_candidate_rank")),
+                _v2_clean(r.get("mechanistic_energy_candidate_status")),
+                _v2_clean(r.get("regime_match_class")),
+                _v2_clean(r.get("localization_mismatch_log10")),
+                _v2_clean(r.get("energy_v2_blockers")) or "(none)",
+                _v2_clean(r.get("energy_v2_notes")) or "(none)",
+            ] for r in recs],
+            "hovertemplate": candidate_hover,
+            "visible": True,
+        })
+        trace_device.extend([dev, dev])
+        if dev is not None:
+            titles[dev] = f"{base_title}<br>{dev}"
+
+    layout = common_cartesian_layout(base_title)
+    if devices and devices[0] is not None:
+        layout["title"]["text"] = titles[devices[0]]
+    layout.update({
+        "showlegend": True,
+        "legend": {"orientation": "h", "x": 0.5, "xanchor": "center",
+                   "y": 1.04, "yanchor": "bottom"},
+        "xaxis": {"title": {"text": "Severity ratio to threshold (log; 1.0 = threshold)"},
+                  "type": "log", "gridcolor": "#d8dee4", "zerolinecolor": "#8c959f"},
+        "yaxis": {"title": {"text": "Target"}, "automargin": True,
+                  "gridcolor": "#eef1f4"},
+        "shapes": [{"type": "line", "x0": 1.0, "x1": 1.0, "y0": 0, "y1": 1,
+                    "yref": "paper", "line": {"color": "#8c959f", "dash": "dot", "width": 1}}],
+    })
+
+    note = (
+        "Each row is one target's rank-1 v2 candidate. The blue band is the "
+        "target stored-field severity interval (depletion ratio to its SEB/SELC "
+        "threshold); the diamond band is the candidate's bulk terminal-critical "
+        "ratio, colored by the critical-severity overlap class (green strong → "
+        "red far-miss). These are different physical quantities on a shared "
+        "screening axis — overlap is a retrieval hint, not an equivalence claim. "
+        "Every candidate hover shows the v2 status and blockers next to the "
+        "numbers. Use the device filter at the top to switch device."
+    )
+    return {
+        "traces": traces,
+        "layout": layout,
+        "note": note,
+        "filter": {
+            "devices": [d for d in devices if d is not None],
+            "traceDevices": trace_device,
+            "titleAll": base_title,
+            "titles": titles,
+            "allShowsOnly": devices[0] if devices and devices[0] is not None else None,
+        },
+    }
+
+
 def plotly_script_tag() -> str:
     if PLOTLY_ASSET.exists():
         runtime = PLOTLY_ASSET.read_text()
@@ -1749,9 +1961,10 @@ __PLOTLY_SCRIPT__
 <body>
 <header>
   <h1>APS interactive damage-signature and energy viewer</h1>
-  <p>Five views of the same stress data: independent source records, ranked
-  pairwise deltas, two energy-context scenes, and a per-device per-event
-  energy comparison against Kosier SELC/SEB thresholds.</p>
+  <p>Six views of the same stress data: independent source records, ranked
+  pairwise deltas, two energy-context scenes, a per-device per-event energy
+  comparison against Kosier SELC/SEB thresholds, and the v2 mechanistic
+  severity-interval overlap for each target's rank-1 candidate.</p>
 </header>
 <div class="controls" role="tablist" aria-label="Plot views">
   <button id="source-tab" class="tab active" role="tab" aria-selected="true"
@@ -1764,6 +1977,8 @@ __PLOTLY_SCRIPT__
     data-view="energyDelta">Proxy energy context</button>
   <button id="energySums-tab" class="tab" role="tab" aria-selected="false"
     data-view="energySums">Energy by device</button>
+  <button id="v2overlap-tab" class="tab" role="tab" aria-selected="false"
+    data-view="v2overlap">v2 severity overlap</button>
 </div>
 <div class="help">
   For 3D scenes, drag to rotate and use the wheel or pinch to zoom. Hover for
@@ -1784,6 +1999,7 @@ __PLOTLY_SCRIPT__
   <div id="energy-plot" class="plot" role="tabpanel" hidden></div>
   <div id="energyDelta-plot" class="plot" role="tabpanel" hidden></div>
   <div id="energySums-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v2overlap-plot" class="plot" role="tabpanel" hidden></div>
   <div id="plot-note" class="note"></div>
 </main>
 <script id="source-payload" type="application/json">__SOURCE_PAYLOAD__</script>
@@ -1791,6 +2007,7 @@ __PLOTLY_SCRIPT__
 <script id="energy-payload" type="application/json">__ENERGY_PAYLOAD__</script>
 <script id="energy-delta-payload" type="application/json">__ENERGY_DELTA_PAYLOAD__</script>
 <script id="energy-sums-payload" type="application/json">__ENERGY_SUMS_PAYLOAD__</script>
+<script id="v2overlap-payload" type="application/json">__V2_PAYLOAD__</script>
 <script id="device-options" type="application/json">__DEVICE_OPTIONS__</script>
 <script>
 (function () {
@@ -1801,7 +2018,8 @@ __PLOTLY_SCRIPT__
     return;
   }
 
-  const VIEWS = ["source", "delta", "energy", "energyDelta", "energySums"];
+  const VIEWS = ["source", "delta", "energy", "energyDelta", "energySums",
+    "v2overlap"];
   const payloads = {
     source: JSON.parse(document.getElementById("source-payload").textContent),
     delta: JSON.parse(document.getElementById("delta-payload").textContent),
@@ -1811,11 +2029,14 @@ __PLOTLY_SCRIPT__
     ),
     energySums: JSON.parse(
       document.getElementById("energy-sums-payload").textContent
+    ),
+    v2overlap: JSON.parse(
+      document.getElementById("v2overlap-payload").textContent
     )
   };
   const rendered = {
     source: false, delta: false, energy: false, energyDelta: false,
-    energySums: false
+    energySums: false, v2overlap: false
   };
   const config = {
     responsive: true,
@@ -1948,11 +2169,14 @@ def main() -> None:
 
     source_records = pd.read_csv(SOURCE_CSV)
     delta_comparisons = pd.read_csv(DELTA_CSV)
+    # v2 export is optional: absent ⇒ the tab shows its empty-state note.
+    v2_records = pd.read_csv(V2_CSV) if V2_CSV.exists() else pd.DataFrame()
     source_payload = source_plot_payload(source_records)
     delta_payload = delta_plot_payload(delta_comparisons)
     energy_payload = energy_context_plot_payload(source_records)
     energy_delta_payload = energy_delta_plot_payload(delta_comparisons)
     energy_sums_payload = energy_balance_plot_payload(source_records)
+    v2_payload = v2_interval_overlap_plot_payload(v2_records)
 
     # Union of per-view device options, in tab order, deduped, for the one
     # global device filter that drives every tab.
@@ -1963,6 +2187,7 @@ def main() -> None:
         delta_payload,
         energy_delta_payload,
         energy_sums_payload,
+        v2_payload,
     ):
         for dev in payload.get("filter", {}).get("devices", []):
             if dev not in device_options:
@@ -1975,6 +2200,7 @@ def main() -> None:
         .replace("__ENERGY_PAYLOAD__", json_for_html(energy_payload))
         .replace("__ENERGY_DELTA_PAYLOAD__", json_for_html(energy_delta_payload))
         .replace("__ENERGY_SUMS_PAYLOAD__", json_for_html(energy_sums_payload))
+        .replace("__V2_PAYLOAD__", json_for_html(v2_payload))
         .replace("__DEVICE_OPTIONS__", json_for_html(device_options))
     )
     OUTPUT_HTML.write_text(html)
@@ -1994,7 +2220,8 @@ def main() -> None:
         f"{count_points(delta_payload):,} delta; "
         f"{count_points(energy_payload):,} energy-context; "
         f"{count_points(energy_delta_payload):,} proxy-energy-context; "
-        f"{count_points(energy_sums_payload):,} per-device energy bars"
+        f"{count_points(energy_sums_payload):,} per-device energy bars; "
+        f"{count_points(v2_payload):,} v2 severity-interval points"
     )
 
 
