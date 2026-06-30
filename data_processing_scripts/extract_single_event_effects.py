@@ -63,6 +63,9 @@ DETECTOR_VERSION = "single_event_detector_v3_source_aware"
 EVENT_TYPES = ("SEB", "SELCI", "SELCII", "MIXED", "UNKNOWN")
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
 PROXY_READINESS_SCHEMA = SCHEMA_DIR / "025_proxy_readiness_waveforms.sql"
+# Depends on stress_test_context_view from 025; re-applied alongside it so the
+# CASCADE drop in 025 never leaves the feature view missing.
+MECH_ENERGY_SCHEMA = SCHEMA_DIR / "028_mechanistic_energy_proxy.sql"
 
 
 @dataclass(frozen=True)
@@ -1221,6 +1224,10 @@ def ensure_proxy_readiness_views(cur):
         raise FileNotFoundError(
             f"Missing proxy-readiness schema: {PROXY_READINESS_SCHEMA}")
     cur.execute(PROXY_READINESS_SCHEMA.read_text())
+    if not MECH_ENERGY_SCHEMA.exists():
+        raise FileNotFoundError(
+            f"Missing mechanistic-energy schema: {MECH_ENERGY_SCHEMA}")
+    cur.execute(MECH_ENERGY_SCHEMA.read_text())
     return True
 
 

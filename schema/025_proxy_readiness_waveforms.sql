@@ -9,6 +9,7 @@ DROP MATERIALIZED VIEW IF EXISTS stress_proxy_experiment_plan_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_summary_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_destruction_boundary_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_view CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS stress_proxy_candidate_ranked_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_test_context_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_gate_zero_view CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS stress_proxy_readiness_view CASCADE;
@@ -2295,7 +2296,11 @@ CREATE INDEX idx_stress_destruction_boundary_device
 CREATE INDEX idx_stress_destruction_boundary_voltage_class
     ON stress_destruction_boundary_view(voltage_class);
 
-CREATE MATERIALIZED VIEW stress_proxy_candidate_view AS
+-- Uncapped ranked pairs.  The public stress_proxy_candidate_view below is a
+-- top-10 wrapper over this so v1 consumers are unchanged, while the
+-- mechanistic v2 view (schema/028) can read the full candidate pool and
+-- recover candidates v1 ranked below 10.
+CREATE MATERIALIZED VIEW stress_proxy_candidate_ranked_view AS
 WITH targets AS (
     SELECT
         s.*,
@@ -3291,7 +3296,17 @@ SELECT
     candidate_status_priority,
     replacement_confidence,
     candidate_blockers
-FROM ranked
+FROM ranked;
+
+CREATE INDEX idx_stress_proxy_candidate_ranked_target_rank
+    ON stress_proxy_candidate_ranked_view(target_stress_record_key, candidate_rank);
+CREATE INDEX idx_stress_proxy_candidate_ranked_device
+    ON stress_proxy_candidate_ranked_view(device_type);
+
+-- Public top-10 view (unchanged contract for v1 consumers: dashboards,
+-- calibrate_proxy_distance.py, plot_damage_signature_delta_3d.py).
+CREATE MATERIALIZED VIEW stress_proxy_candidate_view AS
+SELECT * FROM stress_proxy_candidate_ranked_view
 WHERE candidate_rank <= 10;
 
 CREATE INDEX idx_stress_proxy_candidate_target_rank

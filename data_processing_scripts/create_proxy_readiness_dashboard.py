@@ -28,6 +28,8 @@ from superset_api import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 SCHEMA_PATH = REPO_ROOT / "schema" / "025_proxy_readiness_waveforms.sql"
+# Applied right after 025 because it depends on stress_test_context_view.
+MECH_ENERGY_SCHEMA_PATH = REPO_ROOT / "schema" / "028_mechanistic_energy_proxy.sql"
 PIPELINE_SCHEMAS = {
     "022_irradiation_single_events.sql",
     "027_radiation_stress_dose.sql",
@@ -385,6 +387,7 @@ def apply_proxy_schema() -> None:
         apply_common_schema(conn, include_pipeline=PIPELINE_SCHEMAS)
         with conn.cursor() as cur:
             cur.execute(SCHEMA_PATH.read_text())
+            cur.execute(MECH_ENERGY_SCHEMA_PATH.read_text())
         conn.commit()
 
 
