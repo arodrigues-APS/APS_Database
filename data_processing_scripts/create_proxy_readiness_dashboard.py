@@ -234,6 +234,28 @@ V2_MECHANISTIC_TABLE_DESCRIPTION = (
     "mismatch is a context note, never a blocker."
 )
 
+V2_PARITY_SCATTER_DESCRIPTION = (
+    "Energy-equivalence parity: each rank-1 candidate's target severity ratio "
+    "(X = stored depletion energy / its own SEB·SELC critical) vs candidate "
+    "severity ratio (Y = bulk terminal areal energy / Kosier U_crit, log scale). "
+    "Both axes are energy normalized to their OWN failure threshold, so points "
+    "near Y=X are a screening equivalence — comparable multiples of each "
+    "threshold — never a claim the raw joules are equal. Points high above the "
+    "line are candidates that over-deposit relative to the irradiation "
+    "susceptibility. Colored by critical_severity_overlap_class. (For the full "
+    "log-log parity with the diagonal and ±dex bands, see the interactive "
+    "viewer's 'v2 energy equivalence' tab — Superset cannot log the X axis.)"
+)
+
+V2_OVERLAP_BAR_DESCRIPTION = (
+    "Where we got: rank-1 candidate counts per overlap class, split by match "
+    "scope (same-device vs cross-device). The headline equivalence read is the "
+    "contrast between axes — terminal-energy overlap is mostly strong while "
+    "critical-severity overlap is mostly far-miss: candidates release comparable "
+    "raw energy but sit at very different multiples of the failure threshold. "
+    "Strong overlap concentrated in same-device is the trustworthy signal."
+)
+
 # Superset's annotation-layer schema requires showMarkers/hideLine even for
 # FORMULA layers (see FIGURE1B_REFERENCE_LINES). Threshold lines are in the
 # same axis units as the plotted metric: uJ/cm2 for stored energy, unitless
@@ -520,6 +542,33 @@ def scatter_params(x_col: str, y_col: str, x_label: str, y_label: str,
         # Superset ignores y_axis_bounds unless the axis is truncated.
         params["y_axis_bounds"] = list(y_axis_bounds)
         params["truncateYAxis"] = True
+    if description is not None:
+        params["_description"] = description
+    return params
+
+
+def bar_params(x_col: str, x_label: str, y_label: str, groupby=None,
+               filters=None, metric_label="pairs", metric_sql="COUNT(*)",
+               stack=True, description=None) -> dict:
+    """Categorical distribution bar (echarts_timeseries_bar over a text x_axis)."""
+    params = {
+        "x_axis": x_col,
+        "metrics": [metric(metric_label, metric_sql)],
+        "groupby": list(groupby or []),
+        "adhoc_filters": [sql_filter(f"{x_col} IS NOT NULL"), *(filters or [])],
+        "row_limit": 1000,
+        "x_axis_title": x_label,
+        "x_axis_title_margin": 30,
+        "y_axis_title": y_label,
+        "y_axis_title_margin": 30,
+        "y_axis_format": ",d",
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "stack": "Stack" if stack else None,
+        "order_desc": True,
+        "sort_series_type": "sum",
+    }
     if description is not None:
         params["_description"] = description
     return params
@@ -1820,6 +1869,64 @@ def build_chart_defs(dataset_ids):
             48,
             TAB_RAW,
             None,
+        ),
+        (
+            "Proxy Readiness - v2 Energy Equivalence Parity (Severity)",
+            dataset_ids["candidates_v2"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "target_severity_point_ratio",
+                "candidate_severity_point_ratio",
+                "Target severity ratio (÷ own SEB/SELC critical)",
+                "Candidate severity ratio (÷ Kosier U_crit, log)",
+                groupby=[
+                    "critical_severity_overlap_class",
+                    "target_stress_record_key",
+                    "candidate_stress_record_key",
+                ],
+                filters=[v2_rank1_filter],
+                log_y=True,
+                show_legend=False,
+                description=V2_PARITY_SCATTER_DESCRIPTION,
+            ),
+            12,
+            50,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
+        (
+            "Proxy Readiness - v2 Critical-Severity Overlap by Scope",
+            dataset_ids["candidates_v2"],
+            "echarts_timeseries_bar",
+            bar_params(
+                "critical_severity_overlap_class",
+                "Critical-severity overlap class",
+                "rank-1 candidates",
+                groupby=["match_scope"],
+                filters=[v2_rank1_filter],
+                description=V2_OVERLAP_BAR_DESCRIPTION,
+            ),
+            6,
+            40,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
+        (
+            "Proxy Readiness - v2 Terminal-Energy Overlap by Scope",
+            dataset_ids["candidates_v2"],
+            "echarts_timeseries_bar",
+            bar_params(
+                "terminal_energy_overlap_class",
+                "Terminal-energy overlap class",
+                "rank-1 candidates",
+                groupby=["match_scope"],
+                filters=[v2_rank1_filter],
+                description=V2_OVERLAP_BAR_DESCRIPTION,
+            ),
+            6,
+            40,
+            TAB_MECHANISTIC,
+            "candidate_v2",
         ),
         (
             "Proxy Readiness - v2 Rank-1 Mechanistic Candidate",

@@ -3,11 +3,15 @@ import unittest
 import pandas as pd
 
 from data_processing_scripts.create_interactive_damage_signature_viewer import (
+    CONCORDANCE_STYLE,
     CRITICAL_OVERLAP_COLORS,
     KOSIER_2026_SELC_CRITICAL_J_CM2,
+    concordance_3d_plot_payload,
     energy_balance_plot_payload,
     irradiation_energy_summary,
     v2_interval_overlap_plot_payload,
+    v2_overlap_summary_plot_payload,
+    v2_severity_parity_plot_payload,
 )
 from data_processing_scripts.export_proxy_candidate_energy_v2_csv import (
     _flatten_array,
@@ -199,6 +203,194 @@ class ExporterHelperTests(unittest.TestCase):
         self.assertEqual(_flatten_array(["a", "b"]), "a; b")
         self.assertEqual(_flatten_array(None), "")
         self.assertEqual(_flatten_array("already"), "already")
+
+
+class V2SeverityParityPayloadTests(unittest.TestCase):
+    def _frame(self) -> pd.DataFrame:
+        rows = [
+            _v2_row("DUT-A", 1, "strong_overlap", "k-a1"),
+            _v2_row("DUT-A", 1, "far_miss", "k-a2"),
+            _v2_row("DUT-A", 2, "partial_overlap", "k-a3"),  # rank 2 -> excluded
+            _v2_row("DUT-B", 1, "near_miss", "k-b1"),
+        ]
+        bad = _v2_row("DUT-B", 1, "strong_overlap", "k-b2")
+        bad["candidate_severity_point_ratio"] = 0.0  # non-positive -> excluded
+        rows.append(bad)
+        return pd.DataFrame(rows)
+
+    def test_empty_returns_empty_payload(self):
+        payload = v2_severity_parity_plot_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No v2 rank-1", payload["note"])
+
+    def test_device_traces_plus_legend_proxies_and_filter(self):
+        payload = v2_severity_parity_plot_payload(self._frame())
+        # 2 device traces + 5 legend-proxy traces.
+        self.assertEqual(len(payload["traces"]), 2 + len(CRITICAL_OVERLAP_COLORS))
+        f = payload["filter"]
+        self.assertEqual(f["devices"], ["DUT-A", "DUT-B"])
+        # device traces carry their device, legend proxies carry None.
+        self.assertEqual(f["traceDevices"][:2], ["DUT-A", "DUT-B"])
+        self.assertTrue(all(d is None for d in f["traceDevices"][2:]))
+
+    def test_log_axes_and_guide_shapes(self):
+        payload = v2_severity_parity_plot_payload(self._frame())
+        layout = payload["layout"]
+        self.assertEqual(layout["xaxis"]["type"], "log")
+        self.assertEqual(layout["yaxis"]["type"], "log")
+        # identity + 4 dex bands + 2 crosshairs.
+        self.assertGreaterEqual(len(layout["shapes"]), 7)
+
+    def test_marker_colors_follow_overlap_class_and_exclusions(self):
+        payload = v2_severity_parity_plot_payload(self._frame())
+        dut_a = payload["traces"][0]
+        # rank-2 and non-positive rows excluded -> 2 points for DUT-A.
+        self.assertEqual(len(dut_a["x"]), 2)
+        self.assertEqual(
+            dut_a["marker"]["color"],
+            [CRITICAL_OVERLAP_COLORS["strong_overlap"],
+             CRITICAL_OVERLAP_COLORS["far_miss"]],
+        )
+        self.assertIn("Blockers", dut_a["hovertemplate"])
+
+    def test_all_nonpositive_fails_to_empty(self):
+        rows = [_v2_row("DUT-A", 1, "strong_overlap", "k")]
+        rows[0]["target_severity_point_ratio"] = -1.0
+        payload = v2_severity_parity_plot_payload(pd.DataFrame(rows))
+        self.assertEqual(payload["traces"], [])
+
+
+def _v2_summary_row(crit: str, term: str, power: str) -> dict:
+    return {
+        "mechanistic_energy_candidate_rank": 1,
+        "critical_severity_overlap_class": crit,
+        "terminal_energy_overlap_class": term,
+        "power_rate_overlap_class": power,
+        "cumulative_exposure_overlap_class": "cumulative_present",
+    }
+
+
+class V2OverlapSummaryPayloadTests(unittest.TestCase):
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            _v2_summary_row("far_miss", "strong_overlap", "near_miss"),
+            _v2_summary_row("far_miss", "strong_overlap", "near_miss"),
+            _v2_summary_row("strong_overlap", "missing_interval", "far_miss"),
+        ])
+
+    def test_empty_returns_empty_payload(self):
+        payload = v2_overlap_summary_plot_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+
+    def test_stacked_bars_over_three_axes_with_counts(self):
+        payload = v2_overlap_summary_plot_payload(self._frame())
+        self.assertEqual(payload["layout"]["barmode"], "stack")
+        by_class = {t["name"]: t for t in payload["traces"]}
+        # every trace spans the 3 comparable axes.
+        for t in payload["traces"]:
+            self.assertEqual(t["type"], "bar")
+            self.assertEqual(len(t["x"]), 3)  # critical, terminal, power
+        # strong: critical=1, terminal=2, power=0
+        self.assertEqual(by_class["strong overlap (equivalent)"]["x"], [1, 2, 0])
+        # far_miss: critical=2, terminal=0, power=1
+        self.assertEqual(by_class["far miss"]["x"], [2, 0, 1])
+
+    def test_note_summarizes_cumulative_axis(self):
+        payload = v2_overlap_summary_plot_payload(self._frame())
+        self.assertIn("Cumulative", payload["note"])
+        self.assertIn("cumulative_present", payload["note"])
+
+
+def _conc_row(target, candidate, v1_rank, v2_rank, csr, ds, led,
+              device="DUT-A", tsr=1.0) -> dict:
+    return {
+        "target_stress_record_key": target,
+        "candidate_stress_record_key": candidate,
+        "device_type": device,
+        "target_event_type": "SEB",
+        "candidate_source": "avalanche",
+        "match_scope": "same_device",
+        "v1_rank": v1_rank,
+        "v2_rank": v2_rank,
+        "mechanistic_energy_candidate_status": "mechanistic_measured_candidate",
+        "critical_severity_overlap_class": "strong_overlap",
+        "target_severity_point_ratio": tsr,
+        "candidate_severity_point_ratio": csr,
+        "log_energy_delta": led,
+        "damage_signature_distance": ds,
+        "energy_v2_blockers": "",
+    }
+
+
+class Concordance3DPayloadTests(unittest.TestCase):
+    def _frame(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            # T1 consensus: the v2 rank-1 pair is also v1 rank-1.
+            _conc_row("T1", "c1", v1_rank=1, v2_rank=1, csr=1.0, ds=0.2, led=0.1),
+            # T2 mild: v2 rank-1 (v1 rank 4) and v1 rank-1 (v2 rank 2) differ.
+            _conc_row("T2", "c2a", v1_rank=4, v2_rank=1, csr=100.0, ds=0.9, led=0.5),
+            _conc_row("T2", "c2b", v1_rank=1, v2_rank=2, csr=2.0, ds=0.1, led=0.2),
+            # T3 strong: no v1 rank-1 in the pool (v1's pick demoted out of top-10).
+            _conc_row("T3", "c3", v1_rank=6, v2_rank=1, csr=1000.0, ds=1.5, led=2.0),
+        ])
+
+    def test_empty_returns_empty_payload(self):
+        payload = concordance_3d_plot_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No concordance rows", payload["note"])
+
+    def test_categories_counted_in_note(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        self.assertIn("1 consensus", payload["note"])
+        self.assertIn("1 mild disagreement", payload["note"])
+        self.assertIn("1 strong disagreement", payload["note"])
+
+    def test_marker_points_colors_and_symbols(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        # consensus, mild v2-pick, mild v1-pick, strong = 4 plotted points.
+        self.assertEqual(len(markers["x"]), 4)
+        self.assertEqual(markers["marker"]["color"], [
+            CONCORDANCE_STYLE["consensus"][0],
+            CONCORDANCE_STYLE["v2_pick"][0],
+            CONCORDANCE_STYLE["v1_pick"][0],
+            CONCORDANCE_STYLE["strong_disagree"][0],
+        ])
+        self.assertEqual(markers["marker"]["symbol"][0], "diamond")
+
+    def test_severity_axis_is_log_distance(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        # y for the consensus point: |log10(1) - log10(1)| = 0; strong: log10(1000)=3.
+        self.assertAlmostEqual(markers["y"][0], 0.0)
+        self.assertAlmostEqual(markers["y"][3], 3.0)
+
+    def test_connector_drawn_for_mild_disagreement(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        conn = next(t for t in payload["traces"]
+                    if t["type"] == "scatter3d" and t["mode"] == "lines"
+                    and t["x"] and t["x"][0] is not None)
+        # segment v1-pick -> v2-pick -> None (damage-sig x: 0.1 then 0.9).
+        self.assertEqual(conn["x"][:3], [0.1, 0.9, None])
+
+    def test_filter_contract_and_legend_proxies(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        f = payload["filter"]
+        self.assertEqual(f["devices"], ["DUT-A"])
+        self.assertEqual(f["allShowsOnly"], "DUT-A")
+        # 4 category proxies + 1 connector proxy, all device-independent (None).
+        proxies = [t for t in payload["traces"] if t.get("showlegend") is True]
+        self.assertEqual(len(proxies), 5)
+
+    def test_nonpositive_ratio_is_unplottable(self):
+        rows = [_conc_row("T", "c", v1_rank=1, v2_rank=1, csr=0.0, ds=0.2, led=0.1)]
+        payload = concordance_3d_plot_payload(pd.DataFrame(rows))
+        # The single target is unplottable -> no device point traces.
+        self.assertEqual(payload["traces"], [])
 
 
 if __name__ == "__main__":

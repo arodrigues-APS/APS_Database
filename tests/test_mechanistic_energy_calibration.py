@@ -3,6 +3,7 @@ import unittest
 from data_processing_scripts.calibrate_mechanistic_energy_proxy import (
     compute_truth_metrics,
     compute_truth_metrics_by_basis,
+    render_concordance,
     render_regression_checks,
     render_report,
     render_table,
@@ -158,6 +159,47 @@ class RenderTests(unittest.TestCase):
     def test_render_regression_checks_empty(self):
         out = "\n".join(render_regression_checks([]))
         self.assertIn("not evaluated", out)
+
+
+class RenderConcordanceTests(unittest.TestCase):
+    def _conc(self) -> dict:
+        return {
+            "summary": {
+                "targets": 1300,
+                "v2_eq_v1_combined": 416,
+                "v2_eq_v1_damagesig": 174,
+            },
+            "by_scope": [
+                {"scope": "same_device", "targets": 183,
+                 "independent_agree": 137, "blended_agree": 150},
+                {"scope": "cross_device", "targets": 1117,
+                 "independent_agree": 37, "blended_agree": 266},
+            ],
+            "curation_queue": [
+                {"v2_pick_evidence_class": "measured_strong",
+                 "disagreement_targets": 40},
+            ],
+        }
+
+    def test_reports_blended_and_independent_rates(self):
+        out = "\n".join(render_concordance(self._conc()))
+        self.assertIn("Cross-method concordance", out)
+        # 416/1300 = 32.0%, 174/1300 = 13.4%
+        self.assertIn("32.0%", out)
+        self.assertIn("13.4%", out)
+        self.assertIn("energy ablation", out)
+
+    def test_includes_scope_and_curation_tables(self):
+        out = "\n".join(render_concordance(self._conc()))
+        self.assertIn("by match scope", out)
+        self.assertIn("same_device", out)
+        self.assertIn("curation queue", out)
+        self.assertIn("measured_strong", out)
+
+    def test_handles_empty_concordance(self):
+        out = "\n".join(render_concordance({}))
+        self.assertIn("Cross-method concordance", out)
+        self.assertIn("n/a", out)
 
 
 if __name__ == "__main__":

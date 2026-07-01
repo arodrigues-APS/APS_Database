@@ -193,7 +193,8 @@ def render_regression_checks(regression_checks: list[dict[str, Any]]) -> list[st
 def render_report(sections: dict[str, list[dict[str, Any]]],
                   truth_by_basis: dict[str, dict[str, Any]],
                   regression_checks: list[dict[str, Any]],
-                  generated_at: str) -> str:
+                  generated_at: str,
+                  concordance: dict[str, Any] | None = None) -> str:
     """Assemble the full markdown audit report from the manifest sections."""
     truth_metrics = truth_by_basis["all"]
     out: list[str] = [
@@ -207,6 +208,8 @@ def render_report(sections: dict[str, list[dict[str, Any]]],
         "",
     ]
     out += render_regression_checks(regression_checks)
+    if concordance is not None:
+        out += render_concordance(concordance)
     out += ["## Truth-hit rate (curated `proxy_truth_labels`)", ""]
     if truth_metrics["fail_closed"]:
         out += [
@@ -516,6 +519,128 @@ def load_truth_label_rows(conn) -> list[dict[str, Any]]:
     """)
 
 
+# Per-target rank-1 pick by each method.  combined_pick = v1's published pick
+# (energy-BLENDED combined distance); dssig_pick = v1's pick ranked by
+# damage_signature_distance ALONE (energy-FREE, the independent comparator);
+# v2_pick = the energy proxy's pick.
+_CONCORDANCE_PICKS_CTE = """
+    WITH ranked AS (
+        SELECT
+            r.target_stress_record_key AS t,
+            r.candidate_stress_record_key AS c,
+            r.candidate_rank AS combined_rank,
+            r.damage_signature_evidence_class AS evidence,
+            ROW_NUMBER() OVER (
+                PARTITION BY r.target_stress_record_key
+                ORDER BY r.damage_signature_distance ASC NULLS LAST
+            ) AS dssig_rank,
+            v2.mechanistic_energy_candidate_rank AS v2_rank,
+            v2.match_scope AS scope
+        FROM stress_proxy_candidate_ranked_view r
+        LEFT JOIN stress_proxy_candidate_energy_v2 v2
+            ON v2.target_stress_record_key = r.target_stress_record_key
+           AND v2.candidate_stress_record_key = r.candidate_stress_record_key
+    ),
+    picks AS (
+        SELECT
+            t,
+            MAX(c) FILTER (WHERE v2_rank = 1) AS v2_pick,
+            MAX(c) FILTER (WHERE combined_rank = 1) AS combined_pick,
+            MAX(c) FILTER (WHERE dssig_rank = 1) AS dssig_pick,
+            MAX(scope) FILTER (WHERE v2_rank = 1) AS scope,
+            MAX(evidence) FILTER (WHERE v2_rank = 1) AS v2_pick_evidence
+        FROM ranked
+        GROUP BY t
+    )
+"""
+
+
+def load_concordance(conn) -> dict[str, Any]:
+    """v1 (damage-signature) vs v2 (energy) rank-1 agreement, with the energy
+    ablation that separates independent corroboration from shared-energy
+    circularity.
+    """
+    summary = _fetch(conn, _CONCORDANCE_PICKS_CTE + """
+        SELECT
+            COUNT(*) AS targets,
+            COUNT(*) FILTER (WHERE v2_pick = combined_pick) AS v2_eq_v1_combined,
+            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS v2_eq_v1_damagesig
+        FROM picks
+        WHERE v2_pick IS NOT NULL
+    """)[0]
+    by_scope = _fetch(conn, _CONCORDANCE_PICKS_CTE + """
+        SELECT
+            scope,
+            COUNT(*) AS targets,
+            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS independent_agree,
+            COUNT(*) FILTER (WHERE v2_pick = combined_pick) AS blended_agree
+        FROM picks
+        WHERE v2_pick IS NOT NULL
+        GROUP BY scope
+        ORDER BY targets DESC
+    """)
+    # Curation queue: targets where the energy proxy and the independent
+    # damage-signature ranking disagree, grouped by the v2 pick's evidence class.
+    # Disagreements with measured/strong evidence are the highest-value pairs to
+    # curate into proxy_truth_labels.
+    curation_queue = _fetch(conn, _CONCORDANCE_PICKS_CTE + """
+        SELECT
+            COALESCE(v2_pick_evidence, '(none)') AS v2_pick_evidence_class,
+            COUNT(*) AS disagreement_targets
+        FROM picks
+        WHERE v2_pick IS NOT NULL
+          AND v2_pick IS DISTINCT FROM dssig_pick
+        GROUP BY v2_pick_evidence
+        ORDER BY disagreement_targets DESC
+    """)
+    return {"summary": summary, "by_scope": by_scope, "curation_queue": curation_queue}
+
+
+def render_concordance(conc: dict[str, Any]) -> list[str]:
+    """Markdown for the cross-method concordance + energy-ablation section."""
+    s = conc.get("summary") or {}
+    targets = s.get("targets") or 0
+    blended = s.get("v2_eq_v1_combined") or 0
+    independent = s.get("v2_eq_v1_damagesig") or 0
+    out = [
+        "## Cross-method concordance (v1 damage-signature vs v2 energy)",
+        "",
+        "Rank-1 agreement between the energy proxy and v1, measured two ways. The "
+        "gap is the energy ablation: v1's *combined* score already contains an "
+        "energy term, so agreement with it is partly circular; agreement with v1's "
+        "*damage-signature-only* ranking is the independent corroboration.",
+        "",
+        f"- targets compared: {targets}",
+        f"- v2 == v1 **combined** rank-1 (energy-blended, circular): "
+        f"{blended} ({fmt_rate(rate(blended, targets))})",
+        f"- v2 == v1 **damage-signature-only** rank-1 (energy-free, independent): "
+        f"{independent} ({fmt_rate(rate(independent, targets))})",
+        "",
+        "If the independent rate is far below the blended rate, the apparent "
+        "agreement was driven by shared energy, not cross-method corroboration.",
+        "",
+        "### Independent agreement by match scope",
+        "",
+        render_table(
+            ["scope", "targets", "independent_agree", "blended_agree"],
+            conc.get("by_scope") or [],
+        ),
+        "",
+        "### Disagreement curation queue (energy vs independent damage-signature)",
+        "",
+        "Targets where the two methods disagree at rank-1, by the v2 pick's "
+        "evidence class. Rows with measured/strong evidence are the priority "
+        "pairs to adjudicate into `proxy_truth_labels`.",
+        "",
+        render_table(
+            ["v2_pick_evidence_class", "disagreement_targets"],
+            conc.get("curation_queue") or [],
+        ),
+        "",
+    ]
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -536,15 +661,18 @@ def collect_sections(conn) -> dict[str, list[dict[str, Any]]]:
 def write_outputs(out_dir: Path,
                   sections: dict[str, list[dict[str, Any]]],
                   truth_by_basis: dict[str, dict[str, Any]],
-                  regression_checks: list[dict[str, Any]]) -> str:
+                  regression_checks: list[dict[str, Any]],
+                  concordance: dict[str, Any] | None = None) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
-    report = render_report(sections, truth_by_basis, regression_checks, generated_at)
+    report = render_report(sections, truth_by_basis, regression_checks,
+                           generated_at, concordance=concordance)
     (out_dir / "report.md").write_text(report)
     payload = {
         "generated_at": generated_at,
         "truth_metrics": truth_by_basis,
         "regression_checks": regression_checks,
+        "concordance": concordance,
         "sections": sections,
         "caveat": "Read-only v2 audit; not fitted constants. Data coverage, "
                   "not method, is the binding constraint.",
@@ -570,8 +698,10 @@ def main() -> int:
         sections = collect_sections(conn)
         truth_by_basis = compute_truth_metrics_by_basis(load_truth_label_rows(conn))
         regression_checks = load_v2_regression_checks(conn)
+        concordance = load_concordance(conn)
 
-    write_outputs(args.out_dir, sections, truth_by_basis, regression_checks)
+    write_outputs(args.out_dir, sections, truth_by_basis, regression_checks,
+                  concordance=concordance)
     truth_metrics = truth_by_basis["all"]
     print(f"Wrote {args.out_dir / 'report.md'}")
     print(f"Wrote {args.out_dir / 'results.json'}")
@@ -584,6 +714,15 @@ def main() -> int:
             f"top3={fmt_rate(truth_metrics['top3_rate'])}, "
             f"not_blocked={fmt_rate(truth_metrics['not_blocked_rate'])}"
         )
+
+    cs = concordance.get("summary") or {}
+    ct = cs.get("targets") or 0
+    print(
+        "Concordance (v2==v1 rank-1): "
+        f"blended={fmt_rate(rate(cs.get('v2_eq_v1_combined') or 0, ct))}, "
+        f"independent={fmt_rate(rate(cs.get('v2_eq_v1_damagesig') or 0, ct))} "
+        "(gap = shared-energy circularity)"
+    )
 
     failed = [c["name"] for c in regression_checks if not c["passed"]]
     for chk in regression_checks:

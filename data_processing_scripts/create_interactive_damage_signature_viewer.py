@@ -35,6 +35,8 @@ DELTA_CSV = OUT_DIR / "damage_signature_delta_3d.csv"
 # Optional: written by export_proxy_candidate_energy_v2_csv.py.  When absent the
 # v2 tab renders its empty-state note instead of failing the whole build.
 V2_CSV = OUT_DIR / "proxy_candidate_energy_v2.csv"
+# Optional: written by export_proxy_method_concordance_csv.py (v1×v2 join).
+CONCORDANCE_CSV = OUT_DIR / "proxy_method_concordance.csv"
 PLOTLY_ASSET = OUT_DIR / "plotly-2.35.2.min.js"
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 OUTPUT_HTML = OUT_DIR / "damage_signature_3d_interactive.html"
@@ -1840,6 +1842,482 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+SEVERITY_CLASS_ORDER = [
+    "strong_overlap", "partial_overlap", "near_miss", "far_miss", "missing_interval",
+]
+SEVERITY_CLASS_LABELS = {
+    "strong_overlap": "strong overlap (equivalent)",
+    "partial_overlap": "partial overlap",
+    "near_miss": "near miss",
+    "far_miss": "far miss",
+    "missing_interval": "missing interval",
+}
+# The three comparable energy-overlap axes (shared strong→far vocabulary).
+# cumulative-exposure uses a different present/missing vocabulary and is
+# summarized separately.
+V2_OVERLAP_SUMMARY_AXES = [
+    ("critical_severity_overlap_class", "Critical severity"),
+    ("terminal_energy_overlap_class", "Terminal energy"),
+    ("power_rate_overlap_class", "Power / rate"),
+]
+
+
+def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """Target vs candidate severity-ratio equivalence parity scatter.
+
+    Each point is one target's rank-1 candidate. X is the target stored-field
+    severity ratio (depletion energy / its own SEB·SELC critical); Y is the
+    candidate bulk terminal-critical ratio (terminal areal energy / Kosier
+    U_crit). Both axes are energy normalized to *their own* failure threshold, so
+    proximity to the y=x diagonal is a SCREENING equivalence (comparable
+    multiples of each threshold) — never a claim the raw joules are equal
+    (separation invariant #1). The ±0.5 / ±1.5 dex guides are the strong /
+    partial overlap-class boundaries; the x=1 / y=1 crosshairs mark each side's
+    critical threshold.
+    """
+    base_title = "v2 severity-ratio equivalence (rank-1; log-log parity)"
+    empty_note = (
+        "No v2 rank-1 rows with positive target and candidate severity ratios. "
+        "Export stress_proxy_candidate_energy_v2 with "
+        "export_proxy_candidate_energy_v2_csv.py after applying schema/028."
+    )
+
+    def empty() -> dict[str, Any]:
+        return {"traces": [], "layout": common_cartesian_layout(base_title),
+                "note": empty_note}
+
+    if rows is None or rows.empty:
+        return empty()
+    df = rows.copy()
+    if "mechanistic_energy_candidate_rank" in df.columns:
+        df = df[df["mechanistic_energy_candidate_rank"] == 1]
+    need = ["target_severity_point_ratio", "candidate_severity_point_ratio"]
+    if any(c not in df.columns for c in need):
+        return empty()
+    df = df.dropna(subset=need)
+    df = df[(df["target_severity_point_ratio"] > 0)
+            & (df["candidate_severity_point_ratio"] > 0)]
+    if df.empty:
+        return empty()
+
+    has_device = "device_type" in df.columns
+    devices = sorted(df["device_type"].dropna().unique()) if has_device else [None]
+    lo = float(min(df["target_severity_point_ratio"].min(),
+                   df["candidate_severity_point_ratio"].min()))
+    hi = float(max(df["target_severity_point_ratio"].max(),
+                   df["candidate_severity_point_ratio"].max()))
+    lo_log = math.floor(math.log10(lo))
+    hi_log = math.ceil(math.log10(hi))
+
+    hover = (
+        "<b>%{customdata[0]}</b><br>"
+        "Target severity ratio: %{x:.3g}<br>"
+        "Candidate severity ratio: %{y:.3g}<br>"
+        "Overlap: %{customdata[1]}<br>"
+        "Candidate %{customdata[2]} · status %{customdata[3]}<br>"
+        "Blockers: %{customdata[4]}"
+        "<extra></extra>"
+    )
+
+    traces: list[dict[str, Any]] = []
+    trace_device: list[Any] = []
+    titles: dict[str, str] = {}
+    for dev in devices:
+        sub = df if dev is None else df[df["device_type"] == dev]
+        recs = sub.to_dict("records")
+        colors = [
+            CRITICAL_OVERLAP_COLORS.get(
+                _v2_clean(r.get("critical_severity_overlap_class")), "#999999")
+            for r in recs
+        ]
+        traces.append({
+            "type": "scatter", "mode": "markers",
+            "name": _v2_clean(dev) or "pairs",
+            "showlegend": False,
+            "x": [float(r["target_severity_point_ratio"]) for r in recs],
+            "y": [float(r["candidate_severity_point_ratio"]) for r in recs],
+            "marker": {"color": colors, "size": 7, "opacity": 0.82,
+                       "line": {"color": "#24292f", "width": 0.4}},
+            "customdata": [[
+                (_v2_clean(r.get("target_event_type")) + " · "
+                 + _v2_clean(r.get("target_stress_record_key"))[-14:]),
+                _v2_clean(r.get("critical_severity_overlap_class")),
+                _v2_clean(r.get("candidate_source")),
+                _v2_clean(r.get("mechanistic_energy_candidate_status")),
+                _v2_clean(r.get("energy_v2_blockers")) or "(none)",
+            ] for r in recs],
+            "hovertemplate": hover,
+            "visible": True,
+        })
+        trace_device.append(dev)
+        if dev is not None:
+            titles[dev] = f"{base_title}<br>{dev}"
+
+    # Stable color key (always visible, device-independent) so the legend does
+    # not vanish when the device filter hides a device's data trace.
+    for cls in SEVERITY_CLASS_ORDER:
+        traces.append({
+            "type": "scatter", "mode": "markers",
+            "name": SEVERITY_CLASS_LABELS[cls],
+            "x": [None], "y": [None],
+            "marker": {"color": CRITICAL_OVERLAP_COLORS[cls], "size": 10},
+            "showlegend": True, "hoverinfo": "skip", "visible": True,
+        })
+        trace_device.append(None)
+
+    # Identity, ±dex overlap bands, and ratio=1 crosshairs. Plotly shape
+    # coordinates on a log axis are in log10 units, so a y=x diagonal is the
+    # line log10(y)=log10(x) and the ±dex bands are parallel offsets.
+    def diag(offset: float, dash: str, color: str, width: float) -> dict[str, Any]:
+        return {"type": "line", "xref": "x", "yref": "y",
+                "x0": lo_log, "y0": lo_log + offset,
+                "x1": hi_log, "y1": hi_log + offset,
+                "line": {"color": color, "dash": dash, "width": width}}
+    shapes = [
+        diag(0.0, "solid", "#24292f", 1.4),
+        diag(0.5, "dash", "#1a9850", 1.0), diag(-0.5, "dash", "#1a9850", 1.0),
+        diag(1.5, "dot", "#fdae61", 1.0), diag(-1.5, "dot", "#fdae61", 1.0),
+        {"type": "line", "xref": "x", "yref": "y", "x0": 0.0, "y0": lo_log,
+         "x1": 0.0, "y1": hi_log, "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
+        {"type": "line", "xref": "x", "yref": "y", "x0": lo_log, "y0": 0.0,
+         "x1": hi_log, "y1": 0.0, "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
+    ]
+
+    layout = common_cartesian_layout(base_title)
+    if devices and devices[0] is not None:
+        layout["title"]["text"] = titles[devices[0]]
+    layout.update({
+        "showlegend": True,
+        "legend": {"orientation": "h", "x": 0.5, "xanchor": "center",
+                   "y": 1.04, "yanchor": "bottom"},
+        "xaxis": {"title": {"text": "Target severity ratio "
+                            "(stored depletion ÷ its SEB·SELC critical; log)"},
+                  "type": "log", "range": [lo_log, hi_log], "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Candidate severity ratio "
+                            "(bulk terminal ÷ Kosier U_crit; log)"},
+                  "type": "log", "range": [lo_log, hi_log], "gridcolor": "#d8dee4"},
+        "shapes": shapes,
+    })
+    note = (
+        "Each point is one target's rank-1 candidate. Points ON the black "
+        "diagonal are severity-equivalent; green dashed = ±0.5 dex strong-overlap "
+        "band, orange dotted = ±1.5 dex partial band. Gray crosshairs at ratio=1 "
+        "mark each side's critical threshold. Most rank-1 candidates sit far "
+        "ABOVE the diagonal — they reach a far higher multiple of their own "
+        "threshold than the irradiation target does, which is why critical "
+        "severity overlap is mostly far-miss. Both axes are normalized to their "
+        "OWN threshold, so this is a screening comparison, not a claim the raw "
+        "joules are equal. Use the device filter at the top to switch device."
+    )
+    return {
+        "traces": traces, "layout": layout, "note": note,
+        "filter": {
+            "devices": [d for d in devices if d is not None],
+            "traceDevices": trace_device,
+            "titleAll": base_title, "titles": titles,
+            "allShowsOnly": devices[0] if devices and devices[0] is not None else None,
+        },
+    }
+
+
+def v2_overlap_summary_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """Stacked bar: rank-1 candidates per overlap class, for each energy axis.
+
+    The one-glance "where we got": how many rank-1 candidates fall in
+    strong/partial/near/far/missing overlap on each comparable energy axis
+    (critical severity, terminal energy, power/rate). Cumulative-exposure is an
+    evidence-availability axis (present/missing), not an overlap axis, so it is
+    summarized in the note instead of the shared color legend. Global summary —
+    no device filter (use the parity tab for per-device detail).
+    """
+    base_title = "v2 energy-equivalence overlap summary (rank-1)"
+    empty_note = (
+        "No v2 rank-1 rows to summarize. Export "
+        "stress_proxy_candidate_energy_v2 with "
+        "export_proxy_candidate_energy_v2_csv.py after applying schema/028."
+    )
+    if rows is None or rows.empty:
+        return {"traces": [], "layout": common_cartesian_layout(base_title),
+                "note": empty_note}
+    df = rows.copy()
+    if "mechanistic_energy_candidate_rank" in df.columns:
+        df = df[df["mechanistic_energy_candidate_rank"] == 1]
+    present_axes = [(c, l) for c, l in V2_OVERLAP_SUMMARY_AXES if c in df.columns]
+    if df.empty or not present_axes:
+        return {"traces": [], "layout": common_cartesian_layout(base_title),
+                "note": empty_note}
+
+    axis_labels = [lbl for _, lbl in present_axes]
+    total = len(df)
+    traces: list[dict[str, Any]] = []
+    for cls in SEVERITY_CLASS_ORDER:
+        counts = [int((df[col] == cls).sum()) for col, _ in present_axes]
+        if sum(counts) == 0:
+            continue
+        traces.append({
+            "type": "bar", "orientation": "h",
+            "name": SEVERITY_CLASS_LABELS[cls],
+            "y": axis_labels, "x": counts,
+            "marker": {"color": CRITICAL_OVERLAP_COLORS[cls],
+                       "line": {"color": "#24292f", "width": 0.4}},
+            "customdata": [[f"{(c / total * 100):.0f}%" if total else "0%"]
+                           for c in counts],
+            "hovertemplate": ("<b>%{y}</b><br>" + SEVERITY_CLASS_LABELS[cls]
+                              + ": %{x} (%{customdata[0]})<extra></extra>"),
+        })
+
+    layout = common_cartesian_layout(base_title)
+    layout.update({
+        "barmode": "stack",
+        "showlegend": True,
+        "legend": {"orientation": "h", "x": 0.5, "xanchor": "center",
+                   "y": 1.04, "yanchor": "bottom"},
+        "xaxis": {"title": {"text": f"Rank-1 candidates (n={total})"},
+                  "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Energy axis"}, "automargin": True},
+    })
+    cum_note = ""
+    if "cumulative_exposure_overlap_class" in df.columns:
+        cc = df["cumulative_exposure_overlap_class"].value_counts().to_dict()
+        cum_note = (" Cumulative-exposure (evidence availability, not overlap): "
+                    + ", ".join(f"{k}={v}" for k, v in cc.items()) + ".")
+    note = (
+        f"Rank-1 candidates (n={total}) by overlap class on each comparable "
+        "energy axis. Headline equivalence read: terminal-energy overlap is "
+        "mostly strong while critical-severity overlap is mostly far-miss — "
+        "candidates release comparable raw energy but sit at very different "
+        "multiples of the irradiation failure threshold. Green=strong "
+        "(equivalent) → red=far-miss; gray=missing interval." + cum_note
+        + " Global summary; use the parity tab for per-device, per-pair detail."
+    )
+    return {"traces": traces, "layout": layout, "note": note}
+
+
+# v1 (damage-signature) vs v2 (energy) concordance categories.
+CONCORDANCE_STYLE = {
+    "consensus": ("#1a9850", "diamond"),        # both methods rank-1 the same pair
+    "v2_pick": ("#e6731a", "circle"),           # v2's pick (mild disagreement)
+    "v1_pick": ("#4575b4", "square"),           # v1's pick (mild disagreement)
+    "strong_disagree": ("#d73027", "circle"),   # v2 pick; v1 pick demoted out of v2 top-10
+}
+CONCORDANCE_LABELS = {
+    "consensus": "Consensus (both rank-1)",
+    "v2_pick": "v2 (energy) pick",
+    "v1_pick": "v1 (damage-sig) pick",
+    "strong_disagree": "v2 pick · v1 demoted",
+}
+
+
+def _concordance_coords(rec: dict[str, Any]) -> tuple[float, float, float] | None:
+    """(damage-sig distance, severity dist [dex], terminal dist [dex]) or None.
+
+    X is v1's energy-free damage_signature_distance; Y is the v2 severity-ratio
+    log-distance (both sides ÷ own threshold); Z is |log10 terminal-energy
+    delta|. A point at the origin is an identical proxy on all three.
+    """
+    try:
+        x = float(rec.get("damage_signature_distance"))
+        tsr = float(rec.get("target_severity_point_ratio"))
+        csr = float(rec.get("candidate_severity_point_ratio"))
+        led = float(rec.get("log_energy_delta"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x) and math.isfinite(led)) or tsr <= 0 or csr <= 0:
+        return None
+    return (x, abs(math.log10(csr) - math.log10(tsr)), abs(led))
+
+
+def _concordance_customdata(rec: dict[str, Any], category: str) -> list[str]:
+    return [
+        CONCORDANCE_LABELS[category],
+        (_v2_clean(rec.get("target_event_type")) + " · "
+         + _v2_clean(rec.get("target_stress_record_key"))[-12:]),
+        _v2_clean(rec.get("candidate_source")),
+        _v2_clean(rec.get("v1_rank")),
+        _v2_clean(rec.get("v2_rank")),
+        _v2_clean(rec.get("mechanistic_energy_candidate_status")),
+        _v2_clean(rec.get("critical_severity_overlap_class")),
+        _v2_clean(rec.get("energy_v2_blockers")) or "(none)",
+    ]
+
+
+def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """3D distance space comparing the two proxy methods' rank-1 picks.
+
+    Per target, the v1 (damage-signature) pick and v2 (energy) pick are placed
+    in a shared distance space — X = v1 energy-free damage_signature_distance,
+    Y = v2 severity-ratio distance (dex), Z = terminal-energy distance (dex) —
+    and joined by a line whose length is literally how far apart the two methods'
+    chosen proxies are. Consensus picks coincide (zero-length); disagreements
+    pull toward different axes. Colored by agreement; v1 picks demoted out of
+    v2's top-10 are flagged as strong disagreement.
+    """
+    base_title = "v1 damage-signature vs v2 energy — proxy concordance (3D)"
+    empty_note = (
+        "No concordance rows. Export the v1×v2 join with "
+        "export_proxy_method_concordance_csv.py after applying schema/028."
+    )
+    scene = {
+        "dragmode": "orbit",
+        "xaxis": {"title": {"text": "v1 damage-signature distance (energy-free)"}},
+        "yaxis": {"title": {"text": "v2 severity distance (dex)"}},
+        "zaxis": {"title": {"text": "terminal-energy distance (dex)"}},
+    }
+
+    def empty() -> dict[str, Any]:
+        return {"traces": [], "layout": common_layout(base_title, scene),
+                "note": empty_note}
+
+    if rows is None or rows.empty:
+        return empty()
+    df = rows.copy()
+    required = ["target_stress_record_key", "v1_rank", "v2_rank",
+                "damage_signature_distance", "target_severity_point_ratio",
+                "candidate_severity_point_ratio", "log_energy_delta"]
+    if any(c not in df.columns for c in required):
+        return empty()
+    for col in ("v1_rank", "v2_rank", "damage_signature_distance",
+                "target_severity_point_ratio", "candidate_severity_point_ratio",
+                "log_energy_delta"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # device -> parallel point arrays; device -> connector segments.
+    dev_x: dict[Any, list] = {}
+    dev_pts: dict[Any, dict[str, list]] = {}
+    dev_conn: dict[Any, dict[str, list]] = {}
+    counts = {"consensus": 0, "mild": 0, "strong": 0, "unplottable": 0}
+
+    def _add_point(device, coord, category, rec):
+        p = dev_pts.setdefault(device, {"x": [], "y": [], "z": [],
+                                        "color": [], "symbol": [], "cdat": []})
+        color, symbol = CONCORDANCE_STYLE[category]
+        p["x"].append(coord[0]); p["y"].append(coord[1]); p["z"].append(coord[2])
+        p["color"].append(color); p["symbol"].append(symbol)
+        p["cdat"].append(_concordance_customdata(rec, category))
+
+    for _tkey, group in df.groupby("target_stress_record_key"):
+        recs = group.to_dict("records")
+        v2_pick = next((r for r in recs if r.get("v2_rank") == 1), None)
+        if v2_pick is None:
+            continue
+        device = _v2_clean(v2_pick.get("device_type")) or None
+        v2c = _concordance_coords(v2_pick)
+        v1_pick = next((r for r in recs if r.get("v1_rank") == 1), None)
+        if v1_pick is not None and v2_pick.get("v1_rank") == 1:
+            if v2c is None:
+                counts["unplottable"] += 1
+                continue
+            _add_point(device, v2c, "consensus", v2_pick)
+            counts["consensus"] += 1
+        elif v1_pick is not None:
+            v1c = _concordance_coords(v1_pick)
+            if v2c is None or v1c is None:
+                counts["unplottable"] += 1
+                continue
+            _add_point(device, v2c, "v2_pick", v2_pick)
+            _add_point(device, v1c, "v1_pick", v1_pick)
+            conn = dev_conn.setdefault(device, {"x": [], "y": [], "z": []})
+            conn["x"] += [v1c[0], v2c[0], None]
+            conn["y"] += [v1c[1], v2c[1], None]
+            conn["z"] += [v1c[2], v2c[2], None]
+            counts["mild"] += 1
+        else:
+            if v2c is None:
+                counts["unplottable"] += 1
+                continue
+            _add_point(device, v2c, "strong_disagree", v2_pick)
+            counts["strong"] += 1
+
+    if not dev_pts:
+        return empty()
+    devices = sorted(d for d in dev_pts if d is not None)
+    ordered = devices or [None]
+
+    hover = (
+        "<b>%{customdata[0]}</b><br>"
+        "%{customdata[1]} · cand %{customdata[2]}<br>"
+        "v1 rank %{customdata[3]} → v2 rank %{customdata[4]}<br>"
+        "damage-sig %{x:.3g} · severity %{y:.2f} dex · terminal %{z:.2f} dex<br>"
+        "v2 %{customdata[5]} · overlap %{customdata[6]}<br>"
+        "blockers: %{customdata[7]}<extra></extra>"
+    )
+
+    traces: list[dict[str, Any]] = []
+    trace_device: list[Any] = []
+    titles: dict[str, str] = {}
+    for dev in ordered:
+        p = dev_pts.get(dev)
+        if p and p["x"]:
+            traces.append({
+                "type": "scatter3d", "mode": "markers",
+                "name": _v2_clean(dev) or "picks", "showlegend": False,
+                "x": p["x"], "y": p["y"], "z": p["z"],
+                "marker": {"size": 4, "color": p["color"], "symbol": p["symbol"],
+                           "line": {"color": "#24292f", "width": 0.3}, "opacity": 0.9},
+                "customdata": p["cdat"], "hovertemplate": hover, "visible": True,
+            })
+            trace_device.append(dev)
+        conn = dev_conn.get(dev)
+        if conn and conn["x"]:
+            traces.append({
+                "type": "scatter3d", "mode": "lines",
+                "name": "v1↔v2 distance", "showlegend": False,
+                "x": conn["x"], "y": conn["y"], "z": conn["z"],
+                "line": {"color": "#8c959f", "width": 2},
+                "hoverinfo": "skip", "visible": True,
+            })
+            trace_device.append(dev)
+        if dev is not None:
+            titles[dev] = f"{base_title}<br>{dev}"
+
+    # Legend proxies (always visible) for the agreement categories + connector.
+    for cat in ("consensus", "v2_pick", "v1_pick", "strong_disagree"):
+        color, symbol = CONCORDANCE_STYLE[cat]
+        traces.append({
+            "type": "scatter3d", "mode": "markers",
+            "name": CONCORDANCE_LABELS[cat], "x": [None], "y": [None], "z": [None],
+            "marker": {"size": 6, "color": color, "symbol": symbol},
+            "showlegend": True, "hoverinfo": "skip", "visible": True,
+        })
+        trace_device.append(None)
+    traces.append({
+        "type": "scatter3d", "mode": "lines", "name": "v1↔v2 distance",
+        "x": [None], "y": [None], "z": [None],
+        "line": {"color": "#8c959f", "width": 2},
+        "showlegend": True, "hoverinfo": "skip", "visible": True,
+    })
+    trace_device.append(None)
+
+    layout = common_layout(base_title, scene)
+    if ordered and ordered[0] is not None:
+        layout["title"]["text"] = titles[ordered[0]]
+    plotted = counts["consensus"] + counts["mild"] + counts["strong"]
+    note = (
+        f"Each target places its v1 (damage-signature) and v2 (energy) rank-1 "
+        f"pick in a shared distance space; the gray line is the distance between "
+        f"the two methods' choices. Near the origin = strong proxy on all axes. "
+        f"Of {plotted} plotted targets: {counts['consensus']} consensus (both "
+        f"rank-1 the same candidate — points coincide), {counts['mild']} mild "
+        f"disagreement (different pick inside v2's top-10, connected by a line), "
+        f"{counts['strong']} strong disagreement (v1's pick demoted out of v2's "
+        f"top-10 — only v2's pick shown, in red). {counts['unplottable']} more "
+        f"targets can't be placed in 3D (a distance axis is missing — usually "
+        f"terminal energy), itself a data-coverage signal. X is energy-FREE "
+        f"(damage_signature_distance), so agreement here is an independent "
+        f"cross-method check, not circular. Drag to orbit; use the device "
+        f"filter to switch device."
+    )
+    return {
+        "traces": traces, "layout": layout, "note": note,
+        "filter": {
+            "devices": [d for d in ordered if d is not None],
+            "traceDevices": trace_device,
+            "titleAll": base_title, "titles": titles,
+            "allShowsOnly": ordered[0] if ordered and ordered[0] is not None else None,
+        },
+    }
+
+
 def plotly_script_tag() -> str:
     if PLOTLY_ASSET.exists():
         runtime = PLOTLY_ASSET.read_text()
@@ -1961,10 +2439,12 @@ __PLOTLY_SCRIPT__
 <body>
 <header>
   <h1>APS interactive damage-signature and energy viewer</h1>
-  <p>Six views of the same stress data: independent source records, ranked
+  <p>Nine views of the same stress data: independent source records, ranked
   pairwise deltas, two energy-context scenes, a per-device per-event energy
-  comparison against Kosier SELC/SEB thresholds, and the v2 mechanistic
-  severity-interval overlap for each target's rank-1 candidate.</p>
+  comparison against Kosier SELC/SEB thresholds, three v2 mechanistic views
+  (per-target severity-interval overlap, the energy-equivalence parity scatter,
+  and the overlap-class summary), and a 3D concordance scene comparing the v1
+  damage-signature proxy against the v2 energy proxy.</p>
 </header>
 <div class="controls" role="tablist" aria-label="Plot views">
   <button id="source-tab" class="tab active" role="tab" aria-selected="true"
@@ -1979,6 +2459,12 @@ __PLOTLY_SCRIPT__
     data-view="energySums">Energy by device</button>
   <button id="v2overlap-tab" class="tab" role="tab" aria-selected="false"
     data-view="v2overlap">v2 severity overlap</button>
+  <button id="v2parity-tab" class="tab" role="tab" aria-selected="false"
+    data-view="v2parity">v2 energy equivalence</button>
+  <button id="v2summary-tab" class="tab" role="tab" aria-selected="false"
+    data-view="v2summary">v2 overlap summary</button>
+  <button id="concordance-tab" class="tab" role="tab" aria-selected="false"
+    data-view="concordance">v1↔v2 concordance (3D)</button>
 </div>
 <div class="help">
   For 3D scenes, drag to rotate and use the wheel or pinch to zoom. Hover for
@@ -2000,6 +2486,9 @@ __PLOTLY_SCRIPT__
   <div id="energyDelta-plot" class="plot" role="tabpanel" hidden></div>
   <div id="energySums-plot" class="plot" role="tabpanel" hidden></div>
   <div id="v2overlap-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v2parity-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v2summary-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="concordance-plot" class="plot" role="tabpanel" hidden></div>
   <div id="plot-note" class="note"></div>
 </main>
 <script id="source-payload" type="application/json">__SOURCE_PAYLOAD__</script>
@@ -2008,6 +2497,9 @@ __PLOTLY_SCRIPT__
 <script id="energy-delta-payload" type="application/json">__ENERGY_DELTA_PAYLOAD__</script>
 <script id="energy-sums-payload" type="application/json">__ENERGY_SUMS_PAYLOAD__</script>
 <script id="v2overlap-payload" type="application/json">__V2_PAYLOAD__</script>
+<script id="v2parity-payload" type="application/json">__V2_PARITY_PAYLOAD__</script>
+<script id="v2summary-payload" type="application/json">__V2_SUMMARY_PAYLOAD__</script>
+<script id="concordance-payload" type="application/json">__CONCORDANCE_PAYLOAD__</script>
 <script id="device-options" type="application/json">__DEVICE_OPTIONS__</script>
 <script>
 (function () {
@@ -2019,7 +2511,7 @@ __PLOTLY_SCRIPT__
   }
 
   const VIEWS = ["source", "delta", "energy", "energyDelta", "energySums",
-    "v2overlap"];
+    "v2overlap", "v2parity", "v2summary", "concordance"];
   const payloads = {
     source: JSON.parse(document.getElementById("source-payload").textContent),
     delta: JSON.parse(document.getElementById("delta-payload").textContent),
@@ -2032,11 +2524,21 @@ __PLOTLY_SCRIPT__
     ),
     v2overlap: JSON.parse(
       document.getElementById("v2overlap-payload").textContent
+    ),
+    v2parity: JSON.parse(
+      document.getElementById("v2parity-payload").textContent
+    ),
+    v2summary: JSON.parse(
+      document.getElementById("v2summary-payload").textContent
+    ),
+    concordance: JSON.parse(
+      document.getElementById("concordance-payload").textContent
     )
   };
   const rendered = {
     source: false, delta: false, energy: false, energyDelta: false,
-    energySums: false, v2overlap: false
+    energySums: false, v2overlap: false, v2parity: false, v2summary: false,
+    concordance: false
   };
   const config = {
     responsive: true,
@@ -2176,7 +2678,13 @@ def main() -> None:
     energy_payload = energy_context_plot_payload(source_records)
     energy_delta_payload = energy_delta_plot_payload(delta_comparisons)
     energy_sums_payload = energy_balance_plot_payload(source_records)
+    concordance_records = (
+        pd.read_csv(CONCORDANCE_CSV) if CONCORDANCE_CSV.exists() else pd.DataFrame()
+    )
     v2_payload = v2_interval_overlap_plot_payload(v2_records)
+    v2_parity_payload = v2_severity_parity_plot_payload(v2_records)
+    v2_summary_payload = v2_overlap_summary_plot_payload(v2_records)
+    concordance_payload = concordance_3d_plot_payload(concordance_records)
 
     # Union of per-view device options, in tab order, deduped, for the one
     # global device filter that drives every tab.
@@ -2188,6 +2696,9 @@ def main() -> None:
         energy_delta_payload,
         energy_sums_payload,
         v2_payload,
+        v2_parity_payload,
+        v2_summary_payload,
+        concordance_payload,
     ):
         for dev in payload.get("filter", {}).get("devices", []):
             if dev not in device_options:
@@ -2201,6 +2712,9 @@ def main() -> None:
         .replace("__ENERGY_DELTA_PAYLOAD__", json_for_html(energy_delta_payload))
         .replace("__ENERGY_SUMS_PAYLOAD__", json_for_html(energy_sums_payload))
         .replace("__V2_PAYLOAD__", json_for_html(v2_payload))
+        .replace("__V2_PARITY_PAYLOAD__", json_for_html(v2_parity_payload))
+        .replace("__V2_SUMMARY_PAYLOAD__", json_for_html(v2_summary_payload))
+        .replace("__CONCORDANCE_PAYLOAD__", json_for_html(concordance_payload))
         .replace("__DEVICE_OPTIONS__", json_for_html(device_options))
     )
     OUTPUT_HTML.write_text(html)
@@ -2221,7 +2735,10 @@ def main() -> None:
         f"{count_points(energy_payload):,} energy-context; "
         f"{count_points(energy_delta_payload):,} proxy-energy-context; "
         f"{count_points(energy_sums_payload):,} per-device energy bars; "
-        f"{count_points(v2_payload):,} v2 severity-interval points"
+        f"{count_points(v2_payload):,} v2 severity-interval points; "
+        f"{count_points(v2_parity_payload):,} v2 parity points; "
+        f"{count_points(v2_summary_payload):,} v2 summary bars; "
+        f"{count_points(concordance_payload):,} concordance points"
     )
 
 
