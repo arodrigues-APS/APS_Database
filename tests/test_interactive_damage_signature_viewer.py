@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import pandas as pd
@@ -5,9 +6,14 @@ import pandas as pd
 from data_processing_scripts.create_interactive_damage_signature_viewer import (
     CONCORDANCE_STYLE,
     CRITICAL_OVERLAP_COLORS,
+    HTML_TEMPLATE,
     KOSIER_2026_SELC_CRITICAL_J_CM2,
+    _v2_key_tail,
+    _v2_target_label,
     concordance_3d_plot_payload,
+    dex_series,
     energy_balance_plot_payload,
+    energy_delta_plot_payload,
     irradiation_energy_summary,
     v2_interval_overlap_plot_payload,
     v2_overlap_summary_plot_payload,
@@ -15,6 +21,9 @@ from data_processing_scripts.create_interactive_damage_signature_viewer import (
 )
 from data_processing_scripts.export_proxy_candidate_energy_v2_csv import (
     _flatten_array,
+)
+from data_processing_scripts.export_proxy_truth_curation_queue import (
+    _flatten_array as _flatten_queue_array,
 )
 
 
@@ -138,6 +147,16 @@ def _v2_row(device: str, rank: int, overlap: str, key: str) -> dict:
         "candidate_severity_point_ratio": 0.8,
         "energy_v2_blockers": "regime_mismatch; cross_device_screening_only",
         "energy_v2_notes": "critical_severity_is_screening_descriptor_only",
+        "proxy_claim_status": "curation_candidate",
+        "proxy_claim_basis": "same_device_needs_truth_curation",
+        "proxy_claim_blockers": "no_curated_truth_label",
+        "proxy_claim_summary": "Promising row for human truth-label curation.",
+        "truth_validation_status": "no_curated_truth",
+        "truth_label": "",
+        "truth_label_basis": "",
+        "proxy_claim_status_v1": "curation_candidate",
+        "decision_safe_rank_v1": 1,
+        "signature_claim_quality_v1": "two_axis",
     }
 
 
@@ -182,13 +201,16 @@ class V2IntervalOverlapPayloadTests(unittest.TestCase):
     def test_hover_carries_status_and_blockers(self):
         payload = v2_interval_overlap_plot_payload(self._frame())
         candidate_trace = payload["traces"][1]
-        # customdata[6] = status, customdata[9] = blockers (acceptance: numbers
-        # never shown without evidence class + blockers).
+        # customdata[6] = v2 candidate status, customdata[9] = energy blockers,
+        # customdata[11] = fail-closed proxy claim status.
         first = candidate_trace["customdata"][0]
         self.assertEqual(first[6], "mechanistic_measured_candidate")
         self.assertIn("regime_mismatch", first[9])
+        self.assertEqual(first[11], "curation_candidate")
+        self.assertEqual(first[13], "no_curated_truth")
         self.assertIn("Blockers", candidate_trace["hovertemplate"])
         self.assertIn("Status", candidate_trace["hovertemplate"])
+        self.assertIn("Proxy claim", candidate_trace["hovertemplate"])
 
     def test_point_within_band_error_bars_nonnegative(self):
         payload = v2_interval_overlap_plot_payload(self._frame())
@@ -203,6 +225,7 @@ class ExporterHelperTests(unittest.TestCase):
         self.assertEqual(_flatten_array(["a", "b"]), "a; b")
         self.assertEqual(_flatten_array(None), "")
         self.assertEqual(_flatten_array("already"), "already")
+        self.assertEqual(_flatten_queue_array(("x", "y")), "x; y")
 
 
 class V2SeverityParityPayloadTests(unittest.TestCase):
@@ -213,6 +236,9 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
             _v2_row("DUT-A", 2, "partial_overlap", "k-a3"),  # rank 2 -> excluded
             _v2_row("DUT-B", 1, "near_miss", "k-b1"),
         ]
+        # DUT-B's candidate sits decades above DUT-A's so the two devices get
+        # distinct per-device axis windows.
+        rows[3]["candidate_severity_point_ratio"] = 250.0
         bad = _v2_row("DUT-B", 1, "strong_overlap", "k-b2")
         bad["candidate_severity_point_ratio"] = 0.0  # non-positive -> excluded
         rows.append(bad)
@@ -232,6 +258,27 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
         # device traces carry their device, legend proxies carry None.
         self.assertEqual(f["traceDevices"][:2], ["DUT-A", "DUT-B"])
         self.assertTrue(all(d is None for d in f["traceDevices"][2:]))
+        # "All devices" genuinely shows every device on this tab.
+        self.assertIsNone(f["allShowsOnly"])
+
+    def test_per_device_axis_ranges_and_global_default(self):
+        payload = v2_severity_parity_plot_payload(self._frame())
+        f = payload["filter"]
+        # DUT-A ratios span 0.8..1.0 -> decade window [-1, 0];
+        # DUT-B spans 1.0..250 -> [0, 3]; global covers both.
+        self.assertEqual(f["ranges"]["DUT-A"], [-1.0, 0.0])
+        self.assertEqual(f["ranges"]["DUT-B"], [0.0, 3.0])
+        self.assertEqual(f["rangeAll"], [-1.0, 3.0])
+        # The default (all-devices) layout uses the global range on both axes.
+        self.assertEqual(payload["layout"]["xaxis"]["range"], [-1.0, 3.0])
+        self.assertEqual(payload["layout"]["yaxis"]["range"], [-1.0, 3.0])
+
+    def test_single_point_device_range_widens_to_one_decade(self):
+        rows = [_v2_row("DUT-A", 1, "strong_overlap", "k")]
+        rows[0]["target_severity_point_ratio"] = 1.0
+        rows[0]["candidate_severity_point_ratio"] = 1.0
+        payload = v2_severity_parity_plot_payload(pd.DataFrame(rows))
+        self.assertEqual(payload["filter"]["ranges"]["DUT-A"], [0.0, 1.0])
 
     def test_log_axes_and_guide_shapes(self):
         payload = v2_severity_parity_plot_payload(self._frame())
@@ -252,6 +299,7 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
              CRITICAL_OVERLAP_COLORS["far_miss"]],
         )
         self.assertIn("Blockers", dut_a["hovertemplate"])
+        self.assertIn("Proxy claim", dut_a["hovertemplate"])
 
     def test_all_nonpositive_fails_to_empty(self):
         rows = [_v2_row("DUT-A", 1, "strong_overlap", "k")]
@@ -319,6 +367,11 @@ def _conc_row(target, candidate, v1_rank, v2_rank, csr, ds, led,
         "log_energy_delta": led,
         "damage_signature_distance": ds,
         "energy_v2_blockers": "",
+        "proxy_claim_status": "curation_candidate",
+        "proxy_claim_basis": "same_device_needs_truth_curation",
+        "truth_validation_status": "no_curated_truth",
+        "proxy_claim_status_v1": "curation_candidate",
+        "signature_claim_quality_v1": "two_axis",
     }
 
 
@@ -369,6 +422,15 @@ class Concordance3DPayloadTests(unittest.TestCase):
         self.assertAlmostEqual(markers["y"][0], 0.0)
         self.assertAlmostEqual(markers["y"][3], 3.0)
 
+    def test_hover_carries_proxy_claim_status(self):
+        payload = concordance_3d_plot_payload(self._frame())
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        self.assertEqual(markers["customdata"][0][8], "curation_candidate")
+        self.assertEqual(markers["customdata"][0][10], "no_curated_truth")
+        self.assertIn("proxy claim", markers["hovertemplate"])
+
     def test_connector_drawn_for_mild_disagreement(self):
         payload = concordance_3d_plot_payload(self._frame())
         conn = next(t for t in payload["traces"]
@@ -381,7 +443,8 @@ class Concordance3DPayloadTests(unittest.TestCase):
         payload = concordance_3d_plot_payload(self._frame())
         f = payload["filter"]
         self.assertEqual(f["devices"], ["DUT-A"])
-        self.assertEqual(f["allShowsOnly"], "DUT-A")
+        # "All devices" genuinely shows the whole cloud on this tab.
+        self.assertIsNone(f["allShowsOnly"])
         # 4 category proxies + 1 connector proxy, all device-independent (None).
         proxies = [t for t in payload["traces"] if t.get("showlegend") is True]
         self.assertEqual(len(proxies), 5)
@@ -391,6 +454,139 @@ class Concordance3DPayloadTests(unittest.TestCase):
         payload = concordance_3d_plot_payload(pd.DataFrame(rows))
         # The single target is unplottable -> no device point traces.
         self.assertEqual(payload["traces"], [])
+
+    def test_terminal_axis_falls_back_to_nats_over_ln10_when_dex_absent(self):
+        # _conc_row's fixture has no log_energy_delta_dex column (older-CSV
+        # shape), so Z must be derived from the natural-log log_energy_delta
+        # by dividing once by ln(10).
+        payload = concordance_3d_plot_payload(self._frame())
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        self.assertAlmostEqual(markers["z"][0], 0.1 / math.log(10))
+        self.assertAlmostEqual(markers["z"][3], 2.0 / math.log(10))
+
+    def test_terminal_axis_prefers_precomputed_dex_column(self):
+        # When log_energy_delta_dex is present it must be used as-is -- never
+        # divided by ln(10) again. led=999 is deliberately far from the dex
+        # value so a double-conversion bug would fail this assertion loudly.
+        row = _conc_row("T", "c", v1_rank=1, v2_rank=1, csr=1.0, ds=0.2, led=999.0)
+        row["log_energy_delta_dex"] = 0.75
+        payload = concordance_3d_plot_payload(pd.DataFrame([row]))
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        self.assertAlmostEqual(markers["z"][0], 0.75)
+
+
+class V2KeyTailTests(unittest.TestCase):
+    """Axis/hover labels must never cut a record key mid-token."""
+
+    def test_typical_key_shown_whole(self):
+        self.assertEqual(
+            _v2_key_tail("irradiation:10843:11297"),
+            "irradiation:10843:11297",
+        )
+
+    def test_long_key_cut_at_token_boundary_with_ellipsis(self):
+        tail = _v2_key_tail("campaign:2026:irradiation:1084355:1129777")
+        self.assertTrue(tail.startswith("…"))
+        # No mid-token fragment like 'iation:...': the cut lands after a ':'.
+        self.assertEqual(tail, "…irradiation:1084355:1129777")
+
+    def test_target_label_keeps_typical_key_whole(self):
+        label = _v2_target_label({
+            "target_stress_record_key": "irradiation:10843:11297",
+            "target_event_type": "SEB",
+        })
+        self.assertEqual(label, "SEB · irradiation:10843:11297")
+
+
+class LegendRowLayoutTests(unittest.TestCase):
+    """Tabs stacking a two-line title + horizontal legend need a top margin
+    that can hold both; 88px rendered them on top of each other."""
+
+    def _v2_frame(self) -> pd.DataFrame:
+        return pd.DataFrame([_v2_row("DUT-A", 1, "strong_overlap", "k-a1")])
+
+    def test_v2_cartesian_payloads_reserve_title_and_legend_room(self):
+        for payload in (
+            v2_interval_overlap_plot_payload(self._v2_frame()),
+            v2_severity_parity_plot_payload(self._v2_frame()),
+            v2_overlap_summary_plot_payload(self._v2_frame()),
+        ):
+            layout = payload["layout"]
+            self.assertGreaterEqual(layout["margin"]["t"], 170)
+            self.assertEqual(layout["title"]["yanchor"], "top")
+            self.assertEqual(layout["title"]["y"], 1.0)
+            if "legend" in layout:
+                self.assertEqual(layout["legend"]["yanchor"], "top")
+                self.assertLessEqual(layout["legend"]["y"], layout["title"]["y"])
+
+
+class TemplateDeviceFilterHonestyTests(unittest.TestCase):
+    """The 'All devices' fallback on per-device tabs must be labeled, not
+    silent: the dropdown said All while the chart showed one device."""
+
+    def test_template_marks_per_device_fallback_in_title_and_note(self):
+        self.assertIn("per-device view", HTML_TEMPLATE)
+        self.assertIn("first of", HTML_TEMPLATE)
+        self.assertIn("noteFor", HTML_TEMPLATE)
+
+    def test_template_applies_per_device_axis_ranges(self):
+        self.assertIn("xaxis.range", HTML_TEMPLATE)
+        self.assertIn("rangeAll", HTML_TEMPLATE)
+
+
+class DexSeriesTests(unittest.TestCase):
+    """Unit coverage for the single log_energy_delta -> dex conversion point."""
+
+    def test_converts_nats_when_dex_column_missing(self):
+        frame = pd.DataFrame({"log_energy_delta": [0.0, 2.0, math.log(10)]})
+        out = dex_series(frame, "log_energy_delta_dex", "log_energy_delta")
+        self.assertAlmostEqual(out.iloc[0], 0.0)
+        self.assertAlmostEqual(out.iloc[1], 2.0 / math.log(10))
+        self.assertAlmostEqual(out.iloc[2], 1.0)
+
+    def test_prefers_precomputed_dex_over_converting_nats(self):
+        frame = pd.DataFrame({
+            "log_energy_delta": [999.0],
+            "log_energy_delta_dex": [0.75],
+        })
+        out = dex_series(frame, "log_energy_delta_dex", "log_energy_delta")
+        self.assertAlmostEqual(out.iloc[0], 0.75)
+
+    def test_falls_back_per_row_when_dex_column_has_gaps(self):
+        frame = pd.DataFrame({
+            "log_energy_delta": [2.0, 4.0],
+            "log_energy_delta_dex": [0.75, None],
+        })
+        out = dex_series(frame, "log_energy_delta_dex", "log_energy_delta")
+        self.assertAlmostEqual(out.iloc[0], 0.75)
+        self.assertAlmostEqual(out.iloc[1], 4.0 / math.log(10))
+
+
+class EnergyDeltaPlotPayloadDexTests(unittest.TestCase):
+    def _row(self, led: float) -> dict:
+        return {
+            "damage_signature_distance": 0.2,
+            "log_energy_delta": led,
+            "energy_density_ratio": 1.0,
+            "target_device_label": "DUT-A",
+            "target_event_type": "SEB",
+            "target_filename": "target.csv",
+            "candidate_device_label": "DUT-A",
+            "candidate_source": "avalanche",
+            "candidate_rank": 1,
+            "candidate_status": "measured_damage_candidate",
+        }
+
+    def test_y_axis_uses_dex_not_nats(self):
+        comparisons = pd.DataFrame([self._row(2.0)])
+        payload = energy_delta_plot_payload(comparisons)
+        trace = next(t for t in payload["traces"]
+                     if t["type"] == "scatter3d" and t.get("y") and t["y"][0] is not None)
+        self.assertAlmostEqual(trace["y"][0], 2.0 / math.log(10))
 
 
 if __name__ == "__main__":

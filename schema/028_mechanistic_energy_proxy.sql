@@ -14,8 +14,34 @@
 --
 -- See docs/mechanistic_energy_proxy_rollout_plan_2026-06-26.md.
 
-DROP VIEW IF EXISTS stress_proxy_candidate_energy_v2 CASCADE;
-DROP VIEW IF EXISTS stress_energy_equivalence_features CASCADE;
+-- Both v2 relations started as plain VIEWs and are now MATERIALIZED (see
+-- perf notes below), so the live object can be either kind.  A hard-coded
+-- DROP VIEW raises wrong_object_type when the object is materialized (IF
+-- EXISTS only covers absence, not the wrong kind) and would abort every
+-- reapply, so look the kind up in pg_class and drop what is actually there.
+DO $$
+DECLARE
+    obj_name text;
+    obj_kind "char";
+BEGIN
+    FOREACH obj_name IN ARRAY ARRAY[
+        'stress_proxy_candidate_energy_v2',
+        'stress_energy_equivalence_features'
+    ] LOOP
+        SELECT c.relkind INTO obj_kind
+        FROM pg_class c
+        WHERE c.oid = to_regclass(obj_name);
+        IF obj_kind = 'v' THEN
+            EXECUTE format('DROP VIEW %I CASCADE', obj_name);
+        ELSIF obj_kind = 'm' THEN
+            EXECUTE format('DROP MATERIALIZED VIEW %I CASCADE', obj_name);
+        ELSIF obj_kind IS NOT NULL THEN
+            RAISE EXCEPTION
+                '% is relkind %, not a view/materialized view; refusing to drop',
+                obj_name, obj_kind;
+        END IF;
+    END LOOP;
+END $$;
 
 CREATE TABLE IF NOT EXISTS stress_energy_equivalence_settings (
     setting_name                          text PRIMARY KEY,
@@ -228,7 +254,14 @@ ON CONFLICT (target_stress_record_key, candidate_stress_record_key) DO UPDATE SE
     notes = EXCLUDED.notes;
 
 
-CREATE VIEW stress_energy_equivalence_features AS
+-- Materialized (not a plain view): stress_proxy_candidate_energy_v2 below
+-- joins this view to itself twice (once for target, once for candidate)
+-- across all 1M+ rows of stress_proxy_candidate_ranked_view.  As a plain
+-- view that meant recomputing the CROSS JOIN + dose-summary aggregation
+-- from stress_test_context_view on every dashboard query; Superset timed
+-- out at 60s (EXPLAIN cost ~8.3M for the rank-1 filter alone).  Materializing
+-- this 3k-row layer collapses each join to an indexed lookup.
+CREATE MATERIALIZED VIEW stress_energy_equivalence_features AS
 WITH base AS (
     SELECT
         s.*,
@@ -568,6 +601,9 @@ SELECT
     l.setting_name
 FROM localized l;
 
+CREATE UNIQUE INDEX idx_stress_energy_equivalence_features_key
+    ON stress_energy_equivalence_features(stress_record_key);
+
 
 -- ── Phase 3: v2 candidate screening (parallel to v1; v1 left unchanged) ──────
 --
@@ -603,7 +639,13 @@ RETURNS text AS $$
 $$ LANGUAGE sql IMMUTABLE;
 
 
-CREATE VIEW stress_proxy_candidate_energy_v2 AS
+-- Materialized for the same reason as stress_energy_equivalence_features
+-- above: this view ranks over the full uncapped 1M+ row v1 pool per target
+-- before capping to rank <= 10, and every dashboard chart queried the raw
+-- view directly (Superset dataset = view, no query-time LIMIT pushdown).
+-- The materialized result is bounded to <= 10 rows per target (~1300
+-- targets), so chart queries hit an indexed few-thousand-row table instead.
+CREATE MATERIALIZED VIEW stress_proxy_candidate_energy_v2 AS
 WITH paired AS (
     SELECT
         v1.target_stress_record_key,
@@ -616,12 +658,22 @@ WITH paired AS (
         v1.match_scope,
         v1.candidate_rank   AS candidate_rank_v1,
         v1.candidate_status AS candidate_status_v1,
+        v1.proxy_claim_status AS proxy_claim_status_v1,
+        v1.proxy_claim_basis AS proxy_claim_basis_v1,
+        v1.proxy_claim_blockers AS proxy_claim_blockers_v1,
+        v1.proxy_claim_summary AS proxy_claim_summary_v1,
+        v1.decision_safe_rank AS decision_safe_rank_v1,
+        v1.signature_claim_quality AS signature_claim_quality_v1,
+        v1.target_energy_comparability_class,
+        v1.candidate_energy_comparability_class,
         v1.waveform_distance AS waveform_distance_v1,
         v1.combined_screening_distance AS combined_screening_distance_v1,
         v1.best_damage_distance,
         v1.damage_evidence_tier,
         v1.measured_comparability_status,
+        v1.measured_sign_mismatch_axis_count,
         v1.prediction_comparability_status,
+        v1.prediction_sign_mismatch_axis_count,
         v1.log_energy_delta,
         tf.mechanistic_regime AS target_mechanistic_regime,
         cf.mechanistic_regime AS candidate_mechanistic_regime,
@@ -631,6 +683,23 @@ WITH paired AS (
         tf.effective_stress_time_s AS target_effective_stress_time_s,
         tf.feature_blockers AS target_feature_blockers,
         cf.terminal_energy_density_bulk_j_cm3 AS candidate_bulk_energy_density_j_cm3,
+        tl.label AS truth_label,
+        tl.label_basis AS truth_label_basis,
+        tl.reviewer AS truth_reviewer,
+        tl.review_date AS truth_review_date,
+        tl.notes AS truth_label_notes,
+        CASE
+            WHEN tl.label = 'equivalent'
+             AND tl.label_basis = 'measured_post_iv'
+                THEN 'validated_by_curated_measured_post_iv'
+            WHEN tl.label = 'equivalent'
+                THEN 'curated_equivalent_non_measured'
+            WHEN tl.label = 'not_equivalent'
+                THEN 'curated_not_equivalent'
+            WHEN tl.label = 'uncertain'
+                THEN 'curated_uncertain'
+            ELSE 'no_curated_truth'
+        END AS truth_validation_status,
         cf.effective_stress_time_s AS candidate_effective_stress_time_s,
         cf.pulse_count_in_sequence AS candidate_pulse_count_in_sequence,
         cf.feature_blockers AS candidate_feature_blockers,
@@ -669,6 +738,9 @@ WITH paired AS (
         ON tf.stress_record_key = v1.target_stress_record_key
     LEFT JOIN stress_energy_equivalence_features cf
         ON cf.stress_record_key = v1.candidate_stress_record_key
+    LEFT JOIN proxy_truth_labels tl
+        ON tl.target_stress_record_key = v1.target_stress_record_key
+       AND tl.candidate_stress_record_key = v1.candidate_stress_record_key
     LEFT JOIN LATERAL (
         SELECT rc.match_class, rc.status_ceiling, rc.preference, rc.rationale
         FROM stress_regime_compatibility rc
@@ -821,6 +893,100 @@ finalized AS (
         ], NULL)::text[] AS energy_v2_notes
     FROM statused s
 ),
+claimed AS (
+    SELECT
+        f.*,
+        (
+            COALESCE(f.proxy_claim_blockers_v1, ARRAY[]::text[])
+            || COALESCE(f.energy_v2_blockers, ARRAY[]::text[])
+            || ARRAY_REMOVE(ARRAY[
+                CASE WHEN f.truth_label = 'not_equivalent'
+                     THEN 'curated_not_equivalent' END,
+                CASE WHEN f.truth_label = 'equivalent'
+                       AND COALESCE(f.truth_label_basis, '') <> 'measured_post_iv'
+                     THEN 'curated_equivalent_non_measured_not_validation' END,
+                CASE WHEN f.truth_label = 'uncertain'
+                     THEN 'curated_truth_uncertain' END,
+                CASE WHEN f.truth_label IS NULL
+                     THEN 'no_curated_truth_label' END,
+                CASE WHEN COALESCE(f.measured_sign_mismatch_axis_count, 0) > 0
+                     THEN 'measured_damage_sign_mismatch' END,
+                CASE WHEN COALESCE(f.prediction_sign_mismatch_axis_count, 0) > 0
+                     THEN 'predicted_damage_sign_mismatch' END
+            ], NULL)::text[]
+        ) AS proxy_claim_blockers,
+        CASE
+            WHEN f.truth_label = 'equivalent'
+             AND f.truth_label_basis = 'measured_post_iv'
+                THEN 'validated'
+            WHEN f.truth_label = 'not_equivalent'
+              OR f.mechanistic_energy_candidate_status = 'mechanistic_regime_mismatch'
+                THEN 'blocked'
+            WHEN f.truth_label = 'equivalent'
+                THEN 'curation_candidate'
+            WHEN f.proxy_claim_status_v1 = 'validation_candidate'
+             AND f.match_scope = 'same_device'
+             AND f.mechanistic_energy_candidate_status NOT IN (
+                    'mechanistic_cross_device_screening_only',
+                    'mechanistic_missing_energy_context',
+                    'mechanistic_regime_mismatch'
+                 )
+             AND f.critical_severity_overlap_class <> 'far_miss'
+             AND COALESCE(f.measured_sign_mismatch_axis_count, 0) = 0
+                THEN 'validation_candidate'
+            WHEN f.truth_label = 'uncertain'
+              OR f.proxy_claim_status_v1 IN ('validation_candidate', 'curation_candidate')
+              OR (f.match_scope = 'same_device'
+                  AND f.damage_evidence_class = 'measured_damage')
+                THEN 'curation_candidate'
+            ELSE 'screening_only'
+        END AS proxy_claim_status,
+        CASE
+            WHEN f.truth_label = 'equivalent'
+             AND f.truth_label_basis = 'measured_post_iv'
+                THEN 'curated_truth_measured_post_iv'
+            WHEN f.truth_label = 'equivalent'
+                THEN 'curated_truth_non_measured'
+            WHEN f.truth_label = 'not_equivalent'
+                THEN 'curated_truth_rejection'
+            WHEN f.mechanistic_energy_candidate_status = 'mechanistic_regime_mismatch'
+                THEN 'mechanistic_regime_mismatch'
+            WHEN f.proxy_claim_status_v1 = 'validation_candidate'
+             AND f.match_scope = 'same_device'
+             AND f.critical_severity_overlap_class <> 'far_miss'
+                THEN 'same_device_measured_post_iv_plus_energy_screen'
+            WHEN f.truth_label = 'uncertain'
+                THEN 'curated_uncertain_needs_review'
+            WHEN f.proxy_claim_status_v1 IN ('validation_candidate', 'curation_candidate')
+              OR (f.match_scope = 'same_device'
+                  AND f.damage_evidence_class = 'measured_damage')
+                THEN 'same_device_needs_truth_curation'
+            WHEN f.match_scope = 'cross_device' THEN 'cross_device_screening'
+            WHEN f.damage_evidence_class = 'waveform_only' THEN 'waveform_only'
+            ELSE 'screening_evidence_only'
+        END AS proxy_claim_basis,
+        CASE
+            WHEN f.truth_label = 'equivalent'
+             AND f.truth_label_basis = 'measured_post_iv'
+                THEN 'Curated measured post-IV truth label validates this proxy pair.'
+            WHEN f.truth_label = 'not_equivalent'
+              OR f.mechanistic_energy_candidate_status = 'mechanistic_regime_mismatch'
+                THEN 'Required evidence rejects or blocks this proxy pair.'
+            WHEN f.truth_label = 'equivalent'
+                THEN 'Curated equivalent label is not measured post-IV; keep as curation evidence.'
+            WHEN f.proxy_claim_status_v1 = 'validation_candidate'
+             AND f.match_scope = 'same_device'
+             AND f.critical_severity_overlap_class <> 'far_miss'
+                THEN 'Same-device measured evidence and mechanistic screening support validation review.'
+            WHEN f.truth_label = 'uncertain'
+              OR f.proxy_claim_status_v1 IN ('validation_candidate', 'curation_candidate')
+              OR (f.match_scope = 'same_device'
+                  AND f.damage_evidence_class = 'measured_damage')
+                THEN 'Promising row for human truth-label curation; not validated yet.'
+            ELSE 'Mechanistic-energy row is useful for visual screening only.'
+        END AS proxy_claim_summary
+    FROM finalized f
+),
 ranked2 AS (
     -- Rank over the FULL same-/cross-device pool (uncapped v1 input) so the
     -- mechanistic prior can surface a candidate v1 buried below rank 10, then
@@ -851,7 +1017,7 @@ ranked2 AS (
                 f.candidate_rank_v1 ASC NULLS LAST,
                 f.candidate_stress_record_key
         ) AS mechanistic_energy_candidate_rank
-    FROM finalized f
+    FROM claimed f
 )
 SELECT
     target_stress_record_key,
@@ -864,6 +1030,14 @@ SELECT
     match_scope,
     candidate_rank_v1,
     candidate_status_v1,
+    proxy_claim_status_v1,
+    proxy_claim_basis_v1,
+    proxy_claim_blockers_v1,
+    proxy_claim_summary_v1,
+    decision_safe_rank_v1,
+    signature_claim_quality_v1,
+    target_energy_comparability_class,
+    candidate_energy_comparability_class,
     waveform_distance_v1,
     combined_screening_distance_v1,
     target_mechanistic_regime,
@@ -878,6 +1052,18 @@ SELECT
     power_rate_overlap_class,
     cumulative_exposure_overlap_class,
     damage_evidence_class,
+    measured_sign_mismatch_axis_count,
+    prediction_sign_mismatch_axis_count,
+    truth_label,
+    truth_label_basis,
+    truth_reviewer,
+    truth_review_date,
+    truth_label_notes,
+    truth_validation_status,
+    proxy_claim_status,
+    proxy_claim_basis,
+    proxy_claim_blockers,
+    proxy_claim_summary,
     -- Severity bands + axis-matched point ratios for the Phase-5 interval chart.
     -- Target vs candidate stay in separate columns (separation invariant #1):
     -- target_* are stored depletion ratios, candidate_* are bulk terminal ratios.
@@ -895,3 +1081,22 @@ SELECT
     energy_v2_notes
 FROM ranked2
 WHERE mechanistic_energy_candidate_rank <= 10;
+
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_target_rank
+    ON stress_proxy_candidate_energy_v2(target_stress_record_key, mechanistic_energy_candidate_rank);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_rank
+    ON stress_proxy_candidate_energy_v2(mechanistic_energy_candidate_rank);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_device
+    ON stress_proxy_candidate_energy_v2(device_type);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_regime
+    ON stress_proxy_candidate_energy_v2(target_mechanistic_regime);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_status
+    ON stress_proxy_candidate_energy_v2(mechanistic_energy_candidate_status);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_claim_status
+    ON stress_proxy_candidate_energy_v2(proxy_claim_status);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_match_scope
+    ON stress_proxy_candidate_energy_v2(match_scope);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_overlap
+    ON stress_proxy_candidate_energy_v2(critical_severity_overlap_class);
+CREATE INDEX idx_stress_proxy_candidate_energy_v2_source
+    ON stress_proxy_candidate_energy_v2(candidate_source);

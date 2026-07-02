@@ -91,6 +91,16 @@ CANDIDATE_COLORS = {
     "LET 50-80": "#993404",
     "LET 80+": "#662506",
     "LET n/a": "#969696",
+    "validated": "#2ca02c",
+    "validation_candidate": "#1f77b4",
+    "curation_candidate": "#ff7f0e",
+    "screening_only": "#8c959f",
+    "blocked": "#d62728",
+    "no_curated_truth": "#8c959f",
+    "validated_by_curated_measured_post_iv": "#2ca02c",
+    "curated_equivalent_non_measured": "#17becf",
+    "curated_not_equivalent": "#d62728",
+    "curated_uncertain": "#ff7f0e",
 }
 
 FIGURE1B_LANDSCAPE_DESCRIPTION = (
@@ -332,6 +342,20 @@ MARKDOWN_PANELS = [
     {
         "tab": TAB_CANDIDATE,
         "code": (
+            "### Proxy claim status\n\n"
+            "`proxy_claim_status` is the conservative interpretation layer. "
+            "Use `validation_candidate` and `curation_candidate` as a queue for "
+            "manual truth labeling; do not read distance, waveform similarity, "
+            "or energy overlap as validation by itself. A row is `validated` "
+            "only in v2 after a curated `proxy_truth_labels` entry marks the pair "
+            "`equivalent` with `label_basis = measured_post_iv`."
+        ),
+        "width": 12,
+        "height": 5,
+    },
+    {
+        "tab": TAB_CANDIDATE,
+        "code": (
             "### Read distance *with* evidence coverage\n\n"
             "`damage_signature_distance` is a **screening distance**, not a "
             "proxy-equivalence score. It is only comparable **within the same "
@@ -390,8 +414,9 @@ ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION = (
     "missing-damage-context). Only the cross-device and waveform-only "
     "screening cloud is excluded; see the all-status diagnostic on Method "
     "Diagnostics. Reference thresholds: damage signature mismatch cut-off = 2.50 "
-    "(y); energy out-of-range cut-off |log(proxy/target energy)| = 4.0 "
-    "(x) — points past it are energy failures."
+    "(y); energy out-of-range cut-off |log10(proxy/target energy)| ~= 1.74 dex "
+    "(x; the underlying scoring threshold is 4.0 nats) — points past it are "
+    "energy failures."
 )
 WAVEFORM_DAMAGE_DESCRIPTION = (
     "Only candidates with measured or predicted post-IV damage evidence "
@@ -405,7 +430,7 @@ ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION = (
     "screening, which is capped at screening confidence by design. "
     "Diagnostic only; use the filtered version on the Candidate Triage tab "
     "for decisions. Reference thresholds: damage signature mismatch = 2.50; "
-    "energy out-of-range |log| = 4.0."
+    "energy out-of-range |log10| ~= 1.74 dex (scoring threshold 4.0 nats)."
 )
 EVIDENCE_CLASS_DISTANCE_DESCRIPTION = (
     "Damage-signature distance separated by evidence tier so distances are "
@@ -415,6 +440,24 @@ EVIDENCE_CLASS_DISTANCE_DESCRIPTION = (
     "design and gate unavailable). A small tier-4 distance rests on one axis "
     "and is not equivalent to a small tier-2 distance. No proxy row reaches "
     "tier 1 (full signature) today because gate overlap is absent everywhere."
+)
+CLAIM_STATUS_DESCRIPTION = (
+    "Fail-closed proxy interpretation for rank-1 candidates. "
+    "validation_candidate means same-device measured post-IV support is strong "
+    "enough for review, curation_candidate means a human truth label is still "
+    "needed, screening_only means visual discovery only, and blocked means a "
+    "required evidence axis rejected the row."
+)
+DECISION_SAFE_TABLE_DESCRIPTION = (
+    "Rows eligible for human proxy-truth curation, ordered by "
+    "decision_safe_rank rather than raw visual rank. These are not validated "
+    "claims until a curated measured post-IV truth label exists."
+)
+V2_CLAIM_STATUS_DESCRIPTION = (
+    "v2 claim status adds mechanistic-energy blockers and curated truth labels "
+    "on top of the v1 damage-signature screen. Only proxy_truth_labels rows "
+    "with label='equivalent' and label_basis='measured_post_iv' become "
+    "validated."
 )
 
 def apply_proxy_schema() -> None:
@@ -834,6 +877,10 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             "NATIVE_FILTER-proxy-status", "Candidate Status", "candidate_status"
         ),
         candidate_filter(
+            "NATIVE_FILTER-proxy-claim-status", "Proxy Claim Status",
+            "proxy_claim_status"
+        ),
+        candidate_filter(
             "NATIVE_FILTER-proxy-confidence", "Replacement Confidence",
             "replacement_confidence"
         ),
@@ -852,6 +899,10 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
         candidate_v2_filter(
             "NATIVE_FILTER-proxy-v2-status", "v2 Candidate Status",
             "mechanistic_energy_candidate_status"
+        ),
+        candidate_v2_filter(
+            "NATIVE_FILTER-proxy-v2-claim-status", "v2 Proxy Claim Status",
+            "proxy_claim_status"
         ),
         candidate_v2_filter(
             "NATIVE_FILTER-proxy-v2-scope", "v2 Match Scope", "match_scope"
@@ -931,8 +982,14 @@ def build_chart_defs(dataset_ids):
         "mechanism_match_class",
         "candidate_status",
         "replacement_confidence",
+        "proxy_claim_status",
+        "proxy_claim_basis",
         "top_target_events",
         "candidate_device_type_count",
+        "validation_candidate_top_events",
+        "curation_candidate_top_events",
+        "screening_only_top_events",
+        "blocked_top_events",
         "collapse_only_signature_top_events",
         "collapse_bias_signature_top_events",
         "full_signature_top_events",
@@ -951,26 +1008,69 @@ def build_chart_defs(dataset_ids):
     ]
     candidate_cols = [
         "target_stress_record_key",
+        "candidate_stress_record_key",
+        "candidate_rank",
+        "decision_safe_rank",
         "device_type",
         "target_event_type",
         "target_match_tier",
         "target_energy_j",
+        "target_energy_comparability_class",
         "target_energy_censored_reason",
         "candidate_source",
         "candidate_device_label",
         "candidate_stress_condition_label",
+        "candidate_energy_j",
+        "candidate_energy_comparability_class",
         "candidate_status",
         "replacement_confidence",
+        "proxy_claim_status",
+        "proxy_claim_basis",
         "match_scope",
+        "damage_evidence_tier",
         "damage_signature_evidence_class",
+        "signature_claim_quality",
         "damage_signature_coverage_score",
         "damage_signature_missing_axes",
         "damage_signature_distance",
         "coverage_adjusted_damage_signature_distance",
+        "measured_comparability_status",
+        "measured_match_scope",
+        "measured_sign_mismatch_axis_count",
+        "prediction_comparability_status",
+        "prediction_sign_mismatch_axis_count",
         "waveform_distance",
         "best_damage_distance",
         "combined_screening_distance",
         "candidate_blockers",
+        "proxy_claim_blockers",
+        "proxy_claim_summary",
+    ]
+    decision_safe_cols = [
+        "target_stress_record_key",
+        "candidate_stress_record_key",
+        "decision_safe_rank",
+        "candidate_rank",
+        "device_type",
+        "target_event_type",
+        "target_match_tier",
+        "candidate_source",
+        "candidate_device_label",
+        "candidate_stress_condition_label",
+        "match_scope",
+        "candidate_status",
+        "proxy_claim_status",
+        "proxy_claim_basis",
+        "damage_evidence_tier",
+        "signature_claim_quality",
+        "measured_comparability_status",
+        "measured_match_scope",
+        "measured_sign_mismatch_axis_count",
+        "target_energy_comparability_class",
+        "candidate_energy_comparability_class",
+        "combined_screening_distance",
+        "proxy_claim_blockers",
+        "proxy_claim_summary",
     ]
     evidence_cols = [
         "candidate_rank",
@@ -1003,6 +1103,7 @@ def build_chart_defs(dataset_ids):
         "candidate_application_likeness",
         "target_energy_window_basis",
         "target_energy_floor_j",
+        "target_energy_comparability_class",
         "target_stress_energy_density_j_cm3",
         "target_energy_density_basis",
         "target_energy_localization_class",
@@ -1027,6 +1128,7 @@ def build_chart_defs(dataset_ids):
         "target_energy_level",
         "candidate_energy_window_basis",
         "candidate_energy_censored_reason",
+        "candidate_energy_comparability_class",
         "candidate_energy_is_comparable",
         "candidate_energy_level",
         "candidate_pulse_count_in_sequence",
@@ -1058,6 +1160,7 @@ def build_chart_defs(dataset_ids):
         "damage_signature_coverage_score",
         "damage_signature_evidence_class",
         "damage_signature_evidence_tier",
+        "signature_claim_quality",
         "damage_signature_distance",
         "coverage_adjusted_damage_signature_distance",
         "measured_comparable_axes",
@@ -1073,6 +1176,13 @@ def build_chart_defs(dataset_ids):
         "prediction_sign_mismatch_axes",
         "prediction_fingerprint_confidence",
         "prediction_validation_gate_pass_all",
+        "candidate_status",
+        "proxy_claim_status",
+        "proxy_claim_basis",
+        "decision_safe_rank",
+        "candidate_blockers",
+        "proxy_claim_blockers",
+        "proxy_claim_summary",
     ]
     context_cols = [
         "source",
@@ -1231,6 +1341,7 @@ def build_chart_defs(dataset_ids):
     # in separate columns (separation invariant #1).
     v2_cols = [
         "target_stress_record_key",
+        "candidate_stress_record_key",
         "device_type",
         "target_event_type",
         "target_ion_species",
@@ -1240,8 +1351,20 @@ def build_chart_defs(dataset_ids):
         "candidate_mechanistic_regime",
         "regime_match_class",
         "candidate_rank_v1",
+        "candidate_status_v1",
+        "decision_safe_rank_v1",
         "mechanistic_energy_candidate_rank",
         "mechanistic_energy_candidate_status",
+        "proxy_claim_status",
+        "proxy_claim_basis",
+        "truth_validation_status",
+        "truth_label",
+        "truth_label_basis",
+        "proxy_claim_status_v1",
+        "proxy_claim_basis_v1",
+        "signature_claim_quality_v1",
+        "target_energy_comparability_class",
+        "candidate_energy_comparability_class",
         "critical_severity_overlap_class",
         "terminal_energy_overlap_class",
         "cumulative_exposure_overlap_class",
@@ -1250,7 +1373,11 @@ def build_chart_defs(dataset_ids):
         "target_severity_point_ratio",
         "candidate_severity_point_ratio",
         "damage_evidence_class",
+        "measured_sign_mismatch_axis_count",
+        "prediction_sign_mismatch_axis_count",
         "energy_v2_blockers",
+        "proxy_claim_blockers",
+        "proxy_claim_summary",
         "energy_v2_notes",
     ]
     v2_rank1_filter = sql_filter("mechanistic_energy_candidate_rank = 1")
@@ -1361,6 +1488,23 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
+            "Proxy Readiness - Claim Status by Scope",
+            dataset_ids["candidates"],
+            "echarts_timeseries_bar",
+            bar_params(
+                "proxy_claim_status",
+                "Proxy claim status",
+                "rank-1 target events",
+                groupby=["match_scope", "candidate_source"],
+                filters=[top_rank_filter],
+                description=CLAIM_STATUS_DESCRIPTION,
+            ),
+            12,
+            34,
+            TAB_CANDIDATE,
+            "candidate",
+        ),
+        (
             "Proxy Readiness - Best Proxy Candidates",
             dataset_ids["candidates"],
             "table",
@@ -1374,6 +1518,25 @@ def build_chart_defs(dataset_ids):
                 filters=[top_rank_filter],
             ),
             12,
+            52,
+            TAB_CANDIDATE,
+            "candidate",
+        ),
+        (
+            "Proxy Readiness - Decision-Safe Curation Queue",
+            dataset_ids["candidates"],
+            "table",
+            table_params(
+                decision_safe_cols,
+                row_limit=1000,
+                order_by=[
+                    ["target_stress_record_key", True],
+                    ["decision_safe_rank", True],
+                ],
+                filters=[sql_filter("decision_safe_rank IS NOT NULL")],
+                description=DECISION_SAFE_TABLE_DESCRIPTION,
+            ),
+            12,
             48,
             TAB_CANDIDATE,
             "candidate",
@@ -1383,9 +1546,9 @@ def build_chart_defs(dataset_ids):
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
-                "log_energy_delta",
+                "log_energy_delta_dex",
                 "damage_signature_distance",
-                "|log(selected proxy energy / target irradiation energy)|",
+                "|log10(selected proxy energy / target irradiation energy)|",
                 "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
@@ -1453,9 +1616,9 @@ def build_chart_defs(dataset_ids):
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
-                "log_energy_delta",
+                "log_energy_delta_dex",
                 "damage_signature_distance",
-                "|log(selected proxy energy / target irradiation energy)|",
+                "|log10(selected proxy energy / target irradiation energy)|",
                 "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
@@ -1516,7 +1679,7 @@ def build_chart_defs(dataset_ids):
                 description=DEPLETION_STORED_ENERGY_DESCRIPTION,
             ),
             12,
-            46,
+            90,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -1537,8 +1700,8 @@ def build_chart_defs(dataset_ids):
                 y_axis_bounds=[0.0, None],
                 description=DEPLETION_RATIO_DESCRIPTION,
             ),
-            12,
-            46,
+            6,
+            58,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -1559,8 +1722,8 @@ def build_chart_defs(dataset_ids):
                 y_axis_bounds=[0.0, None],
                 description=DEPLETION_RATIO_DESCRIPTION,
             ),
-            12,
-            46,
+            6,
+            58,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -1929,6 +2092,23 @@ def build_chart_defs(dataset_ids):
             "candidate_v2",
         ),
         (
+            "Proxy Readiness - v2 Proxy Claim Status by Scope",
+            dataset_ids["candidates_v2"],
+            "echarts_timeseries_bar",
+            bar_params(
+                "proxy_claim_status",
+                "v2 proxy claim status",
+                "rank-1 target events",
+                groupby=["match_scope", "truth_validation_status"],
+                filters=[v2_rank1_filter],
+                description=V2_CLAIM_STATUS_DESCRIPTION,
+            ),
+            12,
+            34,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
+        (
             "Proxy Readiness - v2 Rank-1 Mechanistic Candidate",
             dataset_ids["candidates_v2"],
             "table",
@@ -1943,7 +2123,29 @@ def build_chart_defs(dataset_ids):
                 description=V2_MECHANISTIC_TABLE_DESCRIPTION,
             ),
             12,
-            48,
+            52,
+            TAB_MECHANISTIC,
+            "candidate_v2",
+        ),
+        (
+            "Proxy Readiness - v2 Claim Review Queue",
+            dataset_ids["candidates_v2"],
+            "table",
+            table_params(
+                v2_cols,
+                row_limit=1000,
+                order_by=[
+                    ["target_stress_record_key", True],
+                    ["mechanistic_energy_candidate_rank", True],
+                ],
+                filters=[sql_filter(
+                    "proxy_claim_status IN ('validated', 'validation_candidate', "
+                    "'curation_candidate', 'blocked')"
+                )],
+                description=V2_CLAIM_STATUS_DESCRIPTION,
+            ),
+            12,
+            52,
             TAB_MECHANISTIC,
             "candidate_v2",
         ),

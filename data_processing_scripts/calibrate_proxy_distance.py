@@ -107,6 +107,52 @@ EVIDENCE_CLASS_MISSING_AXIS_PENALTY = {
     "no_signature_overlap": 1.00,
 }
 
+VALIDATION_CANDIDATE_STATUSES = {
+    "measured_damage_candidate",
+}
+
+CURATION_CANDIDATE_STATUSES = {
+    "device_run_measured_candidate",
+    "weak_measured_candidate",
+    "waveform_only_candidate",
+    "analog_questionable",
+}
+
+BLOCKED_CANDIDATE_STATUSES = {
+    "energy_out_of_range",
+    "missing_damage_signature_overlap",
+    "damage_signature_mismatch",
+}
+
+
+def _as_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value if v is not None and str(v) != ""]
+    return [str(value)]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for value in values:
+        if value and value not in seen:
+            out.append(value)
+            seen.add(value)
+    return out
+
 
 def damage_signature_evidence(
     row: dict[str, Any],
@@ -190,6 +236,136 @@ def damage_signature_evidence(
         "damage_signature_evidence_class": evidence_class,
         "damage_signature_evidence_tier": EVIDENCE_CLASS_TIER[evidence_class],
         "coverage_adjusted_damage_signature_distance": adjusted,
+    }
+
+
+def signature_claim_quality(row: dict[str, Any]) -> str:
+    """Decision-facing quality class for the waveform signature axes.
+
+    This is intentionally coarser than ``damage_signature_evidence_class``. It
+    answers whether the available axes are rich enough to support a claim, and
+    treats the avalanche normalized-Vds exclusion as an explicit axis-excluded
+    state instead of ordinary missingness.
+    """
+    evidence_class = row.get("damage_signature_evidence_class")
+    candidate_source = (row.get("candidate_source") or "").lower()
+    has_collapse = bool(row.get("has_collapse_overlap"))
+    has_norm = bool(row.get("has_normalized_vds_overlap"))
+
+    if evidence_class == "full_signature":
+        return "full"
+    if evidence_class in {"collapse_bias_signature", "collapse_gate_signature"}:
+        return "two_axis"
+    if candidate_source == "avalanche" and has_collapse and not has_norm:
+        return "axis_excluded"
+    if evidence_class in {
+        "collapse_only_signature",
+        "gate_only_signature",
+        "bias_only_signature",
+    }:
+        return "one_axis"
+    return "no_overlap"
+
+
+def proxy_claim(row: dict[str, Any]) -> dict[str, Any]:
+    """Fail-closed candidate interpretation for proxy discovery rows.
+
+    The SQL candidate views mirror this helper. It does not replace the ranking
+    distances; it gives dashboards a decision-safe layer so proximity cannot be
+    misread as validation.
+    """
+    candidate_status = row.get("candidate_status")
+    match_scope = row.get("match_scope")
+    damage_evidence_tier = row.get("damage_evidence_tier")
+    measured_status = row.get("measured_comparability_status")
+    measured_scope = row.get("measured_match_scope")
+    measured_sign_mismatches = _as_int(row.get("measured_sign_mismatch_axis_count"))
+    prediction_sign_mismatches = _as_int(
+        row.get("prediction_sign_mismatch_axis_count")
+    )
+    axes_used = _as_int(row.get("damage_signature_axes_used"))
+    signature_quality = row.get("signature_claim_quality") or signature_claim_quality(row)
+    target_match_tier = row.get("target_match_tier")
+    mechanism_ceiling = row.get("mechanism_status_ceiling")
+
+    blockers = _as_list(row.get("candidate_blockers"))
+    if match_scope == "cross_device":
+        blockers.append("cross_device_screening_only")
+    if damage_evidence_tier == "waveform_only":
+        blockers.append("no_post_iv_damage_anchor")
+    if measured_sign_mismatches > 0:
+        blockers.append("measured_damage_sign_mismatch")
+    if prediction_sign_mismatches > 0:
+        blockers.append("predicted_damage_sign_mismatch")
+    if axes_used < 2:
+        blockers.append("insufficient_signature_axes_for_validation")
+    if signature_quality == "axis_excluded":
+        blockers.append("signature_axis_excluded")
+    if target_match_tier == "energy_censored_damage_signature_only":
+        blockers.append("target_energy_lower_bound_or_signature_only")
+    if mechanism_ceiling == "analog_questionable":
+        blockers.append("mechanism_analog_questionable")
+    blockers = _dedupe(blockers)
+
+    if (
+        candidate_status in BLOCKED_CANDIDATE_STATUSES
+        or "candidate_energy_below_censored_floor" in blockers
+    ):
+        status = "blocked"
+        basis = "blocked_by_required_evidence"
+    elif (
+        match_scope == "same_device"
+        and candidate_status in VALIDATION_CANDIDATE_STATUSES
+        and damage_evidence_tier == "measured_damage"
+        and measured_scope == "exact_condition"
+        and measured_status in {"strong", "usable"}
+        and measured_sign_mismatches == 0
+        and axes_used >= 2
+    ):
+        status = "validation_candidate"
+        basis = "same_device_measured_post_iv"
+    elif (
+        match_scope == "same_device"
+        and (
+            damage_evidence_tier == "measured_damage"
+            or candidate_status in CURATION_CANDIDATE_STATUSES
+        )
+        and measured_sign_mismatches == 0
+    ):
+        status = "curation_candidate"
+        basis = "same_device_needs_truth_curation"
+    else:
+        status = "screening_only"
+        if match_scope == "cross_device":
+            basis = "cross_device_screening"
+        elif damage_evidence_tier == "waveform_only":
+            basis = "waveform_only"
+        elif signature_quality in {"one_axis", "axis_excluded", "no_overlap"}:
+            basis = "limited_signature_axes"
+        else:
+            basis = "screening_evidence_only"
+
+    summary = {
+        "validation_candidate": (
+            "Same-device measured post-IV evidence is strong enough for validation review."
+        ),
+        "curation_candidate": (
+            "Same-device evidence exists, but human truth-label curation is still required."
+        ),
+        "screening_only": (
+            "Useful for visual discovery only; blockers prevent validation language."
+        ),
+        "blocked": (
+            "Required evidence is missing or contradictory; do not use as a proxy claim."
+        ),
+    }[status]
+
+    return {
+        "signature_claim_quality": signature_quality,
+        "proxy_claim_status": status,
+        "proxy_claim_basis": basis,
+        "proxy_claim_blockers": blockers,
+        "proxy_claim_summary": summary,
     }
 
 

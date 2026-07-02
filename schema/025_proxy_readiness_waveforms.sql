@@ -2440,6 +2440,19 @@ pairs AS (
         t.electrical_terminal_energy_j AS target_energy_j,
         t.target_energy_floor_j,
         t.electrical_terminal_energy_basis AS target_energy_basis,
+        CASE
+            WHEN t.target_match_tier = 'energy_comparable'
+             AND t.electrical_terminal_energy_basis = 'integrated_event_vds_id'
+                THEN 'direct_integrated'
+            WHEN t.target_energy_floor_j IS NOT NULL THEN 'censored_floor'
+            WHEN t.electrical_terminal_energy_basis LIKE '%proxy%' THEN 'proxy_estimate'
+            WHEN t.electrical_terminal_energy_basis IN (
+                'non_comparable_integrated_event',
+                'proxy_event_rectangular_excluded',
+                'missing'
+            ) THEN 'not_comparable'
+            ELSE 'not_comparable'
+        END AS target_energy_comparability_class,
         t.stress_energy_density_j_cm3 AS target_stress_energy_density_j_cm3,
         t.energy_density_basis AS target_energy_density_basis,
         t.energy_density_active_volume_cm3 AS target_energy_density_active_volume_cm3,
@@ -2509,6 +2522,17 @@ pairs AS (
         c.application_likeness AS candidate_application_likeness,
         c.electrical_terminal_energy_j AS candidate_energy_j,
         c.electrical_terminal_energy_basis AS candidate_energy_basis,
+        CASE
+            WHEN c.electrical_terminal_energy_basis IN (
+                'integrated_event_vds_id',
+                'integrated_file_vds_id'
+            ) THEN 'direct_integrated'
+            WHEN c.electrical_terminal_energy_basis = 'commanded_or_stored'
+                THEN 'commanded_or_stored'
+            WHEN c.electrical_terminal_energy_basis LIKE '%proxy%' THEN 'proxy_estimate'
+            WHEN c.electrical_terminal_energy_basis = 'missing' THEN 'not_comparable'
+            ELSE 'not_comparable'
+        END AS candidate_energy_comparability_class,
         c.stress_energy_density_j_cm3 AS candidate_stress_energy_density_j_cm3,
         c.energy_density_basis AS candidate_energy_density_basis,
         c.energy_density_active_volume_cm3 AS candidate_energy_density_active_volume_cm3,
@@ -2605,6 +2629,14 @@ pairs AS (
             WHEN t.target_match_tier = 'energy_comparable'
               THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
         END AS log_energy_delta,
+        -- Display-only dex (log10) conversion of log_energy_delta above.
+        -- Scoring/threshold logic must keep using the natural-log column;
+        -- this exists solely so plots/exports can label the axis correctly.
+        CASE
+            WHEN t.target_match_tier = 'energy_comparable'
+              THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
+                   / LN(10::double precision)
+        END AS log_energy_delta_dex,
         CASE
             WHEN c.vds_collapse_fraction IS NOT NULL
              AND t.vds_collapse_fraction IS NOT NULL
@@ -2770,6 +2802,19 @@ coverage AS (
             WHEN d.has_normalized_vds_overlap THEN 6
             ELSE 9
         END AS damage_signature_evidence_tier,
+        CASE
+            WHEN d.has_collapse_overlap
+             AND d.has_gate_overlap
+             AND d.has_normalized_vds_overlap THEN 'full'
+            WHEN d.has_collapse_overlap
+             AND (d.has_normalized_vds_overlap OR d.has_gate_overlap) THEN 'two_axis'
+            WHEN d.candidate_source = 'avalanche'
+             AND d.has_collapse_overlap
+             AND NOT d.has_normalized_vds_overlap THEN 'axis_excluded'
+            WHEN d.has_collapse_overlap OR d.has_gate_overlap OR d.has_normalized_vds_overlap
+                THEN 'one_axis'
+            ELSE 'no_overlap'
+        END AS signature_claim_quality,
         -- EXPERIMENTAL / DIAGNOSTIC ONLY.  Penalty constants are uncalibrated
         -- and are deliberately NOT wired into candidate_rank: a before/after
         -- audit showed evidence-tier ordering flips ~78% of rank-1 picks
@@ -3088,6 +3133,160 @@ ranked AS (
                 c.candidate_stress_record_key
         ) AS candidate_rank
     FROM classified c
+),
+claim_base AS (
+    SELECT
+        r.*,
+        (
+            COALESCE(r.candidate_blockers, ARRAY[]::text[])
+            || ARRAY_REMOVE(ARRAY[
+                CASE WHEN r.match_scope = 'cross_device'
+                     THEN 'cross_device_screening_only' END,
+                CASE WHEN r.damage_evidence_tier = 'waveform_only'
+                     THEN 'no_post_iv_damage_anchor' END,
+                CASE WHEN COALESCE(r.measured_sign_mismatch_axis_count, 0) > 0
+                     THEN 'measured_damage_sign_mismatch' END,
+                CASE WHEN COALESCE(r.prediction_sign_mismatch_axis_count, 0) > 0
+                     THEN 'predicted_damage_sign_mismatch' END,
+                CASE WHEN COALESCE(r.damage_signature_axes_used, 0) < 2
+                     THEN 'insufficient_signature_axes_for_validation' END,
+                CASE WHEN r.signature_claim_quality = 'axis_excluded'
+                     THEN 'signature_axis_excluded' END,
+                CASE WHEN r.target_match_tier = 'energy_censored_damage_signature_only'
+                     THEN 'target_energy_lower_bound_or_signature_only' END,
+                CASE WHEN r.mechanism_status_ceiling = 'analog_questionable'
+                     THEN 'mechanism_analog_questionable' END
+            ], NULL)::text[]
+        ) AS proxy_claim_blockers
+    FROM ranked r
+),
+claim_scored AS (
+    SELECT
+        cb.*,
+        CASE
+            WHEN cb.candidate_status IN (
+                'energy_out_of_range',
+                'missing_damage_signature_overlap',
+                'damage_signature_mismatch'
+            )
+              OR 'candidate_energy_below_censored_floor' = ANY(cb.proxy_claim_blockers)
+                THEN 'blocked'
+            WHEN cb.match_scope = 'same_device'
+             AND cb.candidate_status = 'measured_damage_candidate'
+             AND cb.damage_evidence_tier = 'measured_damage'
+             AND cb.measured_match_scope = 'exact_condition'
+             AND cb.measured_comparability_status IN ('strong', 'usable')
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+             AND COALESCE(cb.damage_signature_axes_used, 0) >= 2
+                THEN 'validation_candidate'
+            WHEN cb.match_scope = 'same_device'
+             AND (
+                    cb.damage_evidence_tier = 'measured_damage'
+                 OR cb.candidate_status IN (
+                        'device_run_measured_candidate',
+                        'weak_measured_candidate',
+                        'waveform_only_candidate',
+                        'analog_questionable'
+                    )
+                 )
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+                THEN 'curation_candidate'
+            ELSE 'screening_only'
+        END AS proxy_claim_status,
+        CASE
+            WHEN cb.candidate_status IN (
+                'energy_out_of_range',
+                'missing_damage_signature_overlap',
+                'damage_signature_mismatch'
+            )
+              OR 'candidate_energy_below_censored_floor' = ANY(cb.proxy_claim_blockers)
+                THEN 'blocked_by_required_evidence'
+            WHEN cb.match_scope = 'same_device'
+             AND cb.candidate_status = 'measured_damage_candidate'
+             AND cb.damage_evidence_tier = 'measured_damage'
+             AND cb.measured_match_scope = 'exact_condition'
+             AND cb.measured_comparability_status IN ('strong', 'usable')
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+             AND COALESCE(cb.damage_signature_axes_used, 0) >= 2
+                THEN 'same_device_measured_post_iv'
+            WHEN cb.match_scope = 'same_device'
+             AND (
+                    cb.damage_evidence_tier = 'measured_damage'
+                 OR cb.candidate_status IN (
+                        'device_run_measured_candidate',
+                        'weak_measured_candidate',
+                        'waveform_only_candidate',
+                        'analog_questionable'
+                    )
+                 )
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+                THEN 'same_device_needs_truth_curation'
+            WHEN cb.match_scope = 'cross_device' THEN 'cross_device_screening'
+            WHEN cb.damage_evidence_tier = 'waveform_only' THEN 'waveform_only'
+            WHEN cb.signature_claim_quality IN ('one_axis', 'axis_excluded', 'no_overlap')
+                THEN 'limited_signature_axes'
+            ELSE 'screening_evidence_only'
+        END AS proxy_claim_basis,
+        CASE
+            WHEN cb.candidate_status IN (
+                'energy_out_of_range',
+                'missing_damage_signature_overlap',
+                'damage_signature_mismatch'
+            )
+              OR 'candidate_energy_below_censored_floor' = ANY(cb.proxy_claim_blockers)
+                THEN 'Required evidence is missing or contradictory; do not use as a proxy claim.'
+            WHEN cb.match_scope = 'same_device'
+             AND cb.candidate_status = 'measured_damage_candidate'
+             AND cb.damage_evidence_tier = 'measured_damage'
+             AND cb.measured_match_scope = 'exact_condition'
+             AND cb.measured_comparability_status IN ('strong', 'usable')
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+             AND COALESCE(cb.damage_signature_axes_used, 0) >= 2
+                THEN 'Same-device measured post-IV evidence is strong enough for validation review.'
+            WHEN cb.match_scope = 'same_device'
+             AND (
+                    cb.damage_evidence_tier = 'measured_damage'
+                 OR cb.candidate_status IN (
+                        'device_run_measured_candidate',
+                        'weak_measured_candidate',
+                        'waveform_only_candidate',
+                        'analog_questionable'
+                    )
+                 )
+             AND COALESCE(cb.measured_sign_mismatch_axis_count, 0) = 0
+                THEN 'Same-device evidence exists, but human truth-label curation is still required.'
+            ELSE 'Useful for visual discovery only; blockers prevent validation language.'
+        END AS proxy_claim_summary
+    FROM claim_base cb
+),
+decision_ranked AS (
+    SELECT
+        cs.target_stress_record_key,
+        cs.candidate_stress_record_key,
+        ROW_NUMBER() OVER (
+            PARTITION BY cs.target_stress_record_key
+            ORDER BY
+                CASE cs.proxy_claim_status
+                    WHEN 'validation_candidate' THEN 1
+                    WHEN 'curation_candidate' THEN 2
+                    ELSE 3
+                END,
+                cs.candidate_status_priority,
+                cs.combined_screening_distance ASC NULLS LAST,
+                cs.waveform_distance ASC NULLS LAST,
+                cs.candidate_rank
+        ) AS decision_safe_rank
+    FROM claim_scored cs
+    WHERE cs.proxy_claim_status IN ('validation_candidate', 'curation_candidate')
+),
+claim_ranked AS (
+    SELECT
+        cs.*,
+        dr.decision_safe_rank
+    FROM claim_scored cs
+    LEFT JOIN decision_ranked dr
+        ON dr.target_stress_record_key = cs.target_stress_record_key
+       AND dr.candidate_stress_record_key = cs.candidate_stress_record_key
 )
 SELECT
     target_stress_record_key,
@@ -3136,6 +3335,7 @@ SELECT
     target_energy_j,
     target_energy_floor_j,
     target_energy_basis,
+    target_energy_comparability_class,
     target_stress_energy_density_j_cm3,
     target_energy_density_basis,
     target_energy_density_active_volume_cm3,
@@ -3207,6 +3407,7 @@ SELECT
     candidate_application_likeness,
     candidate_energy_j,
     candidate_energy_basis,
+    candidate_energy_comparability_class,
     candidate_stress_energy_density_j_cm3,
     candidate_energy_density_basis,
     candidate_energy_density_active_volume_cm3,
@@ -3244,6 +3445,7 @@ SELECT
     repetition_context_available,
     energy_density_ratio,
     log_energy_delta,
+    log_energy_delta_dex,
     collapse_delta,
     gate_delta,
     normalized_vds_delta,
@@ -3263,6 +3465,7 @@ SELECT
     damage_signature_coverage_score,
     damage_signature_evidence_class,
     damage_signature_evidence_tier,
+    signature_claim_quality,
     coverage_adjusted_damage_signature_distance,
     waveform_distance,
     measured_comparability_status,
@@ -3295,13 +3498,22 @@ SELECT
     candidate_status,
     candidate_status_priority,
     replacement_confidence,
-    candidate_blockers
-FROM ranked;
+    candidate_blockers,
+    proxy_claim_status,
+    proxy_claim_basis,
+    proxy_claim_blockers,
+    proxy_claim_summary,
+    decision_safe_rank
+FROM claim_ranked;
 
 CREATE INDEX idx_stress_proxy_candidate_ranked_target_rank
     ON stress_proxy_candidate_ranked_view(target_stress_record_key, candidate_rank);
 CREATE INDEX idx_stress_proxy_candidate_ranked_device
     ON stress_proxy_candidate_ranked_view(device_type);
+CREATE INDEX idx_stress_proxy_candidate_ranked_claim_status
+    ON stress_proxy_candidate_ranked_view(proxy_claim_status);
+CREATE INDEX idx_stress_proxy_candidate_ranked_decision_rank
+    ON stress_proxy_candidate_ranked_view(target_stress_record_key, decision_safe_rank);
 
 -- Public top-10 view (unchanged contract for v1 consumers: dashboards,
 -- calibrate_proxy_distance.py, plot_damage_signature_delta_3d.py).
@@ -3323,6 +3535,10 @@ CREATE INDEX idx_stress_proxy_candidate_candidate_device
     ON stress_proxy_candidate_view(candidate_device_type);
 CREATE INDEX idx_stress_proxy_candidate_confidence
     ON stress_proxy_candidate_view(replacement_confidence);
+CREATE INDEX idx_stress_proxy_candidate_claim_status
+    ON stress_proxy_candidate_view(proxy_claim_status);
+CREATE INDEX idx_stress_proxy_candidate_decision_rank
+    ON stress_proxy_candidate_view(target_stress_record_key, decision_safe_rank);
 
 CREATE MATERIALIZED VIEW stress_proxy_candidate_summary_view AS
 WITH top_candidates AS (
@@ -3339,6 +3555,8 @@ SELECT
     mechanism_match_class,
     candidate_status,
     replacement_confidence,
+    proxy_claim_status,
+    proxy_claim_basis,
     COUNT(*) AS top_target_events,
     COUNT(DISTINCT candidate_device_type) AS candidate_device_type_count,
     COUNT(DISTINCT device_type) AS device_type_count,
@@ -3348,6 +3566,14 @@ SELECT
         AS predicted_damage_top_events,
     COUNT(*) FILTER (WHERE damage_evidence_tier = 'waveform_only')
         AS waveform_only_top_events,
+    COUNT(*) FILTER (WHERE proxy_claim_status = 'validation_candidate')
+        AS validation_candidate_top_events,
+    COUNT(*) FILTER (WHERE proxy_claim_status = 'curation_candidate')
+        AS curation_candidate_top_events,
+    COUNT(*) FILTER (WHERE proxy_claim_status = 'screening_only')
+        AS screening_only_top_events,
+    COUNT(*) FILTER (WHERE proxy_claim_status = 'blocked')
+        AS blocked_top_events,
     MIN(combined_screening_distance) AS best_combined_screening_distance,
     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY combined_screening_distance)
         AS median_combined_screening_distance,
@@ -3374,7 +3600,7 @@ SELECT
 FROM top_candidates
 GROUP BY target_match_tier, match_scope, candidate_source, target_event_type,
          target_path_type, mechanism_match_class, candidate_status,
-         replacement_confidence;
+         replacement_confidence, proxy_claim_status, proxy_claim_basis;
 
 CREATE INDEX idx_stress_proxy_candidate_summary_status
     ON stress_proxy_candidate_summary_view(candidate_status);

@@ -6,8 +6,9 @@ create_interactive_damage_signature_viewer.py reads this CSV.  The viewer treats
 it as optional, so this is a separate live-DB step: run it after applying
 schema/028 with the Phase-5 band columns, then rebuild the viewer offline.
 
-Array columns (energy_v2_blockers / energy_v2_notes) are flattened to a
-``"; "``-joined string so the CSV round-trips cleanly into the Plotly hover.
+Array columns (energy_v2_blockers / energy_v2_notes / proxy claim blockers)
+are flattened to a ``"; "``-joined string so the CSV round-trips cleanly into
+the Plotly hover.
 
 Usage:
     python3 data_processing_scripts/export_proxy_candidate_energy_v2_csv.py
@@ -42,8 +43,26 @@ COLUMNS = [
     "candidate_mechanistic_regime",
     "regime_match_class",
     "candidate_rank_v1",
+    "candidate_status_v1",
+    "proxy_claim_status_v1",
+    "proxy_claim_basis_v1",
+    "proxy_claim_blockers_v1",
+    "proxy_claim_summary_v1",
+    "decision_safe_rank_v1",
+    "signature_claim_quality_v1",
+    "target_energy_comparability_class",
+    "candidate_energy_comparability_class",
     "mechanistic_energy_candidate_rank",
     "mechanistic_energy_candidate_status",
+    "proxy_claim_status",
+    "proxy_claim_basis",
+    "proxy_claim_blockers",
+    "proxy_claim_summary",
+    "truth_validation_status",
+    "truth_label",
+    "truth_label_basis",
+    "truth_reviewer",
+    "truth_review_date",
     "critical_severity_overlap_class",
     "terminal_energy_overlap_class",
     "power_rate_overlap_class",
@@ -55,10 +74,18 @@ COLUMNS = [
     "candidate_severity_low",
     "candidate_severity_high",
     "candidate_severity_point_ratio",
+    "damage_evidence_class",
+    "measured_sign_mismatch_axis_count",
+    "prediction_sign_mismatch_axis_count",
     "energy_v2_blockers",
     "energy_v2_notes",
 ]
-ARRAY_COLUMNS = ("energy_v2_blockers", "energy_v2_notes")
+ARRAY_COLUMNS = (
+    "energy_v2_blockers",
+    "energy_v2_notes",
+    "proxy_claim_blockers",
+    "proxy_claim_blockers_v1",
+)
 
 
 def _flatten_array(value: object) -> str:
