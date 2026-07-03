@@ -65,6 +65,25 @@ def _has_blocker(blockers: Any) -> bool:
     return len(blockers) > 0
 
 
+# Labels seeded by script from damage_equivalence_match_view strong/usable rows
+# are QUARANTINED from the headline truth-hit rates: both rankers already sort
+# measured-damage matches first, so scoring auto-seeded labels there would be
+# self-confirming (~100% top-1 by construction).  They remain useful for the
+# miss decomposition and not_equivalent violations and are reported in their
+# own group.  Contract: the auto-seeder writes label_basis =
+# 'measured_post_iv_auto'; the reviewer sentinel is defense-in-depth in case a
+# seeder ever writes the human basis by mistake.
+AUTO_SEEDED_LABEL_BASES = {"measured_post_iv_auto"}
+AUTO_SEED_REVIEWER_SENTINEL = "auto_seed"
+
+
+def is_auto_seeded_label(row: dict[str, Any]) -> bool:
+    """True when a truth-label row was seeded by script rather than curated."""
+    if row.get("label_basis") in AUTO_SEEDED_LABEL_BASES:
+        return True
+    return (row.get("reviewer") or "").strip().lower() == AUTO_SEED_REVIEWER_SENTINEL
+
+
 def compute_truth_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Score curated truth labels against v2's ranking.
 
@@ -130,18 +149,31 @@ def compute_truth_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def compute_truth_metrics_by_basis(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Truth metrics for the whole set and per ``label_basis`` group.
+    """Truth metrics for the curated set, per ``label_basis``, and quarantined.
 
     A hit on a ``measured_post_iv`` label is empirical-anchor evidence; a
     ``pilot`` hit is weak.  Reporting them separately keeps the strength of the
-    evidence visible instead of averaging it away.  The ``all`` key always
-    exists; per-basis keys appear only for bases actually present.
+    evidence visible instead of averaging it away.
+
+    Auto-seeded labels (``is_auto_seeded_label``) are QUARANTINED: the ``all``
+    headline group and the per-basis groups cover human-curated rows only, and
+    auto rows land in a single ``auto_seeded`` group.  Rationale: v1 and v2
+    already rank measured-damage matches first, so an auto-seeded label derived
+    from those same matches sits at rank-1 by construction — scoring it in the
+    headline would convert fail-closed into fake-open.  A label set that is
+    ONLY auto-seeded therefore still fails closed.  The ``all`` key always
+    exists; per-basis keys appear only for bases actually present;
+    ``auto_seeded`` appears only when auto rows exist.
     """
-    out = {"all": compute_truth_metrics(rows)}
-    for basis in sorted({r.get("label_basis") for r in rows if r.get("label_basis")}):
+    curated = [r for r in rows if not is_auto_seeded_label(r)]
+    auto = [r for r in rows if is_auto_seeded_label(r)]
+    out = {"all": compute_truth_metrics(curated)}
+    for basis in sorted({r.get("label_basis") for r in curated if r.get("label_basis")}):
         out[basis] = compute_truth_metrics(
-            [r for r in rows if r.get("label_basis") == basis]
+            [r for r in curated if r.get("label_basis") == basis]
         )
+    if auto:
+        out["auto_seeded"] = compute_truth_metrics(auto)
     return out
 
 
@@ -236,6 +268,16 @@ def render_report(sections: dict[str, list[dict[str, Any]]],
         f"- uncertain labels (unscored): {truth_metrics['uncertain_labels']}",
         "",
     ]
+    auto_metrics = truth_by_basis.get("auto_seeded")
+    if auto_metrics:
+        out += [
+            f"- auto-seeded labels (quarantined): {auto_metrics['labels_total']} — "
+            "excluded from the headline rates above because both rankers already "
+            "sort measured-damage matches first, so scoring script-seeded copies "
+            "of those matches would be self-confirming. Their value is the miss "
+            "decomposition and not_equivalent violations; see the by-basis table.",
+            "",
+        ]
 
     basis_keys = [k for k in truth_by_basis if k != "all"]
     if basis_keys:
@@ -432,17 +474,31 @@ def load_v2_regression_checks(conn) -> list[dict[str, Any]]:
         """)
         selci = dict(cur.fetchone())
 
-        # 2. SEB targets should still show interpretable v1->v2 rank-1 source
-        #    shifts (the intended SEB signal, not a regression).
+        # 2. Proton-SEB endpoint assertion (replaces the old
+        #    seb_source_shifts_present check 2026-07-02).  The old check
+        #    asserted v1->v2 rank-1 source SHIFTS exist, which is only true
+        #    while v1 and v2 carry different mechanism priors; once v1's path
+        #    penalty derives from the unified stress_regime_compatibility
+        #    table, the shifts legitimately vanish and a shift-based check
+        #    fails by design.  The stable invariant is the ENDPOINT: a
+        #    low-collapse proton-SEB target must never get an avalanche rank-1
+        #    while a same-device SC candidate exists in the pool (the seeded
+        #    prior makes SC first-order and avalanche a mismatch there).
+        #    proton_high_field_seb is excluded: avalanche is a legitimate
+        #    secondary analog for it.
         cur.execute("""
-            SELECT COUNT(*) AS seb_source_shifts
-            FROM stress_proxy_candidate_view v1
-            JOIN stress_proxy_candidate_energy_v2 v2
-              ON v2.target_stress_record_key = v1.target_stress_record_key
-             AND v2.mechanistic_energy_candidate_rank = 1
-            WHERE v1.candidate_rank = 1
-              AND UPPER(COALESCE(v2.target_event_type, '')) = 'SEB'
-              AND v1.candidate_source IS DISTINCT FROM v2.candidate_source
+            SELECT COUNT(*) AS avalanche_rank1_with_same_device_sc
+            FROM stress_proxy_candidate_energy_v2 v2
+            WHERE v2.mechanistic_energy_candidate_rank = 1
+              AND v2.target_mechanistic_regime = 'proton_low_collapse_seb'
+              AND v2.candidate_source = 'avalanche'
+              AND EXISTS (
+                  SELECT 1
+                  FROM stress_proxy_candidate_ranked_view alt
+                  WHERE alt.target_stress_record_key = v2.target_stress_record_key
+                    AND alt.candidate_source = 'sc'
+                    AND alt.match_scope = 'same_device'
+              )
         """)
         seb = dict(cur.fetchone())
 
@@ -466,8 +522,8 @@ def load_v2_regression_checks(conn) -> list[dict[str, Any]]:
             **selci,
         },
         {
-            "name": "seb_source_shifts_present",
-            "passed": (seb["seb_source_shifts"] or 0) > 0,
+            "name": "proton_seb_sc_preferred_when_available",
+            "passed": (seb["avalanche_rank1_with_same_device_sc"] or 0) == 0,
             **seb,
         },
         {
@@ -506,6 +562,7 @@ def load_truth_label_rows(conn) -> list[dict[str, Any]]:
             t.candidate_stress_record_key,
             t.label,
             t.label_basis,
+            t.reviewer,
             v2.mechanistic_energy_candidate_rank AS v2_rank,
             v2.energy_v2_blockers AS blockers,
             (r.target_stress_record_key IS NOT NULL) AS in_candidate_pool
@@ -521,8 +578,8 @@ def load_truth_label_rows(conn) -> list[dict[str, Any]]:
 
 # Per-target rank-1 pick by each method.  combined_pick = v1's published pick
 # (energy-BLENDED combined distance); dssig_pick = v1's pick ranked by
-# damage_signature_distance ALONE (energy-FREE, the independent comparator);
-# v2_pick = the energy proxy's pick.
+# signature_axis_distance ALONE (energy-free and prior-free, the independent
+# comparator); v2_pick = the energy proxy's pick.
 _CONCORDANCE_PICKS_CTE = """
     WITH ranked AS (
         SELECT
@@ -532,7 +589,7 @@ _CONCORDANCE_PICKS_CTE = """
             r.damage_signature_evidence_class AS evidence,
             ROW_NUMBER() OVER (
                 PARTITION BY r.target_stress_record_key
-                ORDER BY r.damage_signature_distance ASC NULLS LAST
+                ORDER BY r.signature_axis_distance ASC NULLS LAST
             ) AS dssig_rank,
             v2.mechanistic_energy_candidate_rank AS v2_rank,
             v2.match_scope AS scope
@@ -606,18 +663,25 @@ def render_concordance(conc: dict[str, Any]) -> list[str]:
         "## Cross-method concordance (v1 damage-signature vs v2 energy)",
         "",
         "Rank-1 agreement between the energy proxy and v1, measured two ways. The "
-        "gap is the energy ablation: v1's *combined* score already contains an "
-        "energy term, so agreement with it is partly circular; agreement with v1's "
-        "*damage-signature-only* ranking is the independent corroboration.",
+        "gap is the ablation: v1's *combined* score already contains energy and "
+        "regime-prior terms, so agreement with it is partly circular; agreement "
+        "with v1's *signature-axis-only* ranking is the prior-free, energy-free "
+        "comparator.",
         "",
         f"- targets compared: {targets}",
         f"- v2 == v1 **combined** rank-1 (energy-blended, circular): "
         f"{blended} ({fmt_rate(rate(blended, targets))})",
-        f"- v2 == v1 **damage-signature-only** rank-1 (energy-free, independent): "
+        f"- v2 == v1 **signature-axis-only** rank-1 (energy-free, prior-free): "
         f"{independent} ({fmt_rate(rate(independent, targets))})",
         "",
         "If the independent rate is far below the blended rate, the apparent "
         "agreement was driven by shared energy, not cross-method corroboration.",
+        "",
+        "Caveat: after Phase C, the blended rate is expected to move because "
+        "v1 and v2 now consume the same regime-prior table. Re-baseline that "
+        "structural jump instead of reading it as improved corroboration. The "
+        "signature-axis-only rate is the durable prior-free comparator, but "
+        "agreement is still a consistency check, not validation.",
         "",
         "### Independent agreement by match scope",
         "",
@@ -626,7 +690,7 @@ def render_concordance(conc: dict[str, Any]) -> list[str]:
             conc.get("by_scope") or [],
         ),
         "",
-        "### Disagreement curation queue (energy vs independent damage-signature)",
+        "### Disagreement curation queue (energy vs prior-free signature axes)",
         "",
         "Targets where the two methods disagree at rank-1, by the v2 pick's "
         "evidence class. Rows with measured/strong evidence are the priority "

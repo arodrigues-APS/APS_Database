@@ -3,6 +3,7 @@ import unittest
 from data_processing_scripts.calibrate_mechanistic_energy_proxy import (
     compute_truth_metrics,
     compute_truth_metrics_by_basis,
+    is_auto_seeded_label,
     render_concordance,
     render_regression_checks,
     render_report,
@@ -187,7 +188,7 @@ class RenderConcordanceTests(unittest.TestCase):
         # 416/1300 = 32.0%, 174/1300 = 13.4%
         self.assertIn("32.0%", out)
         self.assertIn("13.4%", out)
-        self.assertIn("energy ablation", out)
+        self.assertIn("gap is the ablation", out)
 
     def test_includes_scope_and_curation_tables(self):
         out = "\n".join(render_concordance(self._conc()))
@@ -200,6 +201,78 @@ class RenderConcordanceTests(unittest.TestCase):
         out = "\n".join(render_concordance({}))
         self.assertIn("Cross-method concordance", out)
         self.assertIn("n/a", out)
+
+    def test_prior_rebaseline_caveats_present(self):
+        # Fix 2 (2026-07-02): once v1 adopts the unified regime prior the
+        # blended/independent rates jump structurally; the report must say so
+        # and must not oversell "independent" as prior-free.
+        out = "\n".join(render_concordance({}))
+        self.assertIn("same regime-prior table", out)
+        self.assertIn("durable prior-free comparator", out)
+
+
+class AutoSeedQuarantineTests(unittest.TestCase):
+    """Fix 1 (2026-07-02): script-seeded measured-damage labels must never
+    feed the headline truth-hit rates — both rankers already sort
+    measured-damage matches first, so scoring them would be self-confirming."""
+
+    def test_auto_basis_excluded_from_headline(self):
+        rows = [
+            {"label": "equivalent", "v2_rank": 1,
+             "label_basis": "measured_post_iv_auto"},
+            {"label": "equivalent", "v2_rank": 5, "label_basis": "pilot"},
+        ]
+        by_basis = compute_truth_metrics_by_basis(rows)
+        self.assertEqual(set(by_basis), {"all", "pilot", "auto_seeded"})
+        # Headline covers only the curated pilot row (a top-1 miss), not the
+        # auto row's by-construction top-1 hit.
+        self.assertEqual(by_basis["all"]["equivalent_labels"], 1)
+        self.assertAlmostEqual(by_basis["all"]["top1_rate"], 0.0)
+        self.assertAlmostEqual(by_basis["auto_seeded"]["top1_rate"], 1.0)
+
+    def test_reviewer_sentinel_quarantines_human_basis(self):
+        # Defense-in-depth: a seeder that wrongly writes the human basis is
+        # still quarantined via the reviewer sentinel.
+        rows = [
+            {"label": "equivalent", "v2_rank": 1,
+             "label_basis": "measured_post_iv", "reviewer": "auto_seed"},
+        ]
+        by_basis = compute_truth_metrics_by_basis(rows)
+        self.assertTrue(by_basis["all"]["fail_closed"])
+        self.assertIn("auto_seeded", by_basis)
+        self.assertEqual(by_basis["auto_seeded"]["equivalent_labels"], 1)
+
+    def test_only_auto_labels_still_fail_closed(self):
+        rows = [
+            {"label": "equivalent", "v2_rank": 1,
+             "label_basis": "measured_post_iv_auto"},
+            {"label": "equivalent", "v2_rank": 2,
+             "label_basis": "measured_post_iv_auto"},
+        ]
+        by_basis = compute_truth_metrics_by_basis(rows)
+        self.assertTrue(by_basis["all"]["fail_closed"])
+        self.assertEqual(by_basis["auto_seeded"]["equivalent_labels"], 2)
+
+    def test_is_auto_seeded_label_contract(self):
+        self.assertTrue(is_auto_seeded_label(
+            {"label_basis": "measured_post_iv_auto"}))
+        self.assertTrue(is_auto_seeded_label(
+            {"label_basis": "measured_post_iv", "reviewer": "Auto_Seed"}))
+        self.assertFalse(is_auto_seeded_label(
+            {"label_basis": "measured_post_iv", "reviewer": "aps"}))
+        self.assertFalse(is_auto_seeded_label({"label_basis": "pilot"}))
+
+    def test_render_report_notes_quarantine(self):
+        rows = [
+            {"label": "equivalent", "v2_rank": 1,
+             "label_basis": "measured_post_iv_auto"},
+        ]
+        by_basis = compute_truth_metrics_by_basis(rows)
+        out = render_report({}, by_basis, [], "2026-07-02")
+        self.assertIn("auto-seeded labels (quarantined): 1", out)
+        self.assertIn("self-confirming", out)
+        # With only auto labels the headline still fails closed.
+        self.assertIn("failing closed", out)
 
 
 if __name__ == "__main__":

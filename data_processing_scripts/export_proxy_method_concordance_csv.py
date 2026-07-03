@@ -2,19 +2,19 @@
 """Export v1 (damage-signature) vs v2 (energy) proxy concordance to CSV.
 
 Feeds the interactive viewer's 3D "method concordance" tab. Each row is one
-(target, candidate) pair in v2's top-10, enriched with v1's *energy-free*
-``damage_signature_distance`` from the uncapped ranked view, so the viewer can
-place each method's rank-1 pick in a shared distance space and draw the distance
-between them.
+(target, candidate) pair in v2's top-10, enriched with v1's energy-free
+and prior-free ``signature_axis_distance`` from the uncapped ranked view, so the
+viewer can place each method's rank-1 pick in a shared distance space and draw
+the distance between them.
 
 Why the uncapped ranked view for the v1 join: v2 re-ranks the full pool, so a
 v2 rank-1 pair can sit outside v1's top-10 wrapper; the ranked view (the same
-pool v2 reads) carries ``damage_signature_distance`` for every pair.
+pool v2 reads) carries ``signature_axis_distance`` for every pair.
 
-``damage_signature_distance`` is the post-IV damage fingerprint distance
-(collapse/gate/Vds axes + path) and excludes energy — that is what makes it an
-*independent* comparator to v2's energy ranking. ``combined_screening_distance``
-is kept too, but it blends in an energy term, so it is the contaminated control.
+``signature_axis_distance`` is the post-IV damage fingerprint distance using
+only measured axes (collapse/gate/Vds), excluding both energy and path priors.
+``damage_signature_distance`` and ``combined_screening_distance`` are kept as
+contaminated controls because they include path and energy terms respectively.
 
 Usage:
     python3 data_processing_scripts/export_proxy_method_concordance_csv.py
@@ -68,14 +68,17 @@ QUERY = """
         v2.proxy_claim_summary_v1,
         v2.decision_safe_rank_v1,
         v2.signature_claim_quality_v1,
-        v2.critical_severity_overlap_class,
+        v2.candidate_failure_fraction_overlap_class,
+        v2.critical_severity_overlap_class_kosier_context,
         v2.target_severity_point_ratio,
-        v2.candidate_severity_point_ratio,
+        v2.candidate_failure_fraction_point,
+        v2.candidate_severity_point_ratio_kosier_context,
         v2.energy_v2_blockers,
         v2.energy_v2_notes,
         -- v1 side, from the uncapped pool v2 reads from:
-        r.damage_signature_distance,              -- energy-FREE (independent axis)
-        r.combined_screening_distance,            -- energy-blended (contaminated control)
+        r.signature_axis_distance,                -- energy-free + prior-free comparator
+        r.damage_signature_distance,              -- path-prior contaminated control
+        r.combined_screening_distance,            -- energy-blended contaminated control
         r.log_energy_delta,                       -- terminal-energy mismatch (natural log / nats; NOT log10)
         r.log_energy_delta_dex,                   -- same mismatch, converted to log10/dex for display
         r.damage_signature_evidence_class,        -- v1 confidence (measured anchor?)

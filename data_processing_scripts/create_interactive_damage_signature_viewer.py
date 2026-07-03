@@ -341,12 +341,13 @@ def cartesian_legend_row_layout(title: str) -> dict[str, Any]:
     margin cannot hold both, so give them an explicit vertical order inside a
     taller margin: title first, legend below, plot area last."""
     layout = common_cartesian_layout(title)
-    layout["margin"] = {**layout["margin"], "t": 172}
+    layout["margin"] = {**layout["margin"], "t": 210}
     layout["title"] = {**layout["title"], "y": 1.0, "yanchor": "top",
                        "pad": {"t": 10}}
     layout["showlegend"] = True
     layout["legend"] = {"orientation": "h", "x": 0.5, "xanchor": "center",
-                        "y": 1.0, "yanchor": "top",
+                        "y": 0.955, "yanchor": "top",
+                        "font": {"size": 11},
                         "bgcolor": "rgba(255,255,255,0.86)",
                         "itemsizing": "constant"}
     return layout
@@ -653,8 +654,8 @@ def delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
         "Target terminal energy: %{customdata[17]} (%{customdata[18]})<br>"
         "Proxy terminal energy: %{customdata[19]} (%{customdata[20]})<br>"
         "Energy comparability: %{customdata[37]} / %{customdata[38]}<br>"
-        "Energy-density ratio: %{customdata[21]}<br>"
-        "Log energy delta (dex): %{customdata[22]}<br>"
+        "Proxy terminal-density / irradiation deposited-density: %{customdata[21]}<br>"
+        "Terminal-energy mismatch (dex): %{customdata[22]}<br>"
         "Damage-signature distance: %{customdata[23]}<br>"
         "<br><b>evidence coverage</b><br>"
         "Evidence class: %{customdata[26]}<br>"
@@ -1142,10 +1143,11 @@ def energy_context_plot_payload(records: pd.DataFrame) -> dict[str, Any]:
 def energy_delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
     """Proxy energy context: damage-signature vs energy mismatch in 3D.
 
-    x = damage-signature distance, y = log energy delta (dex/log10), z = log10
-    of the proxy/target active-volume energy-density ratio. Rows whose energy-density
-    ratio is missing or non-positive are placed on an explicit not-comparable
-    plane instead of being imputed as zero.
+    x = damage-signature distance, y = terminal-energy mismatch (dex/log10),
+    z = log10 of the electrical-proxy terminal-energy density divided by the
+    irradiation deposited-energy density. Rows whose energy-density ratio is
+    missing or non-positive are placed on an explicit not-comparable plane
+    instead of being imputed as zero.
     """
     data = comparisons.copy()
     for column in ("damage_signature_distance", "log_energy_delta", "energy_density_ratio"):
@@ -1211,8 +1213,8 @@ def energy_delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
         "Target terminal energy: %{customdata[11]} (%{customdata[12]})<br>"
         "Proxy terminal energy: %{customdata[13]} (%{customdata[14]})<br>"
         "<br>Damage-signature distance: %{x:.4g}<br>"
-        "Log energy delta (dex): %{y:.4g}<br>"
-        "Energy-density ratio: %{customdata[15]}<br>"
+        "Terminal-energy mismatch (dex): %{y:.4g}<br>"
+        "Proxy terminal-density / irradiation deposited-density: %{customdata[15]}<br>"
         "<br><b>evidence coverage</b><br>"
         "Evidence class: %{customdata[18]}<br>"
         "Available axes: %{customdata[19]}<br>"
@@ -1336,13 +1338,19 @@ def energy_delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
             "zerolinecolor": "#8c959f",
         },
         "yaxis": {
-            "title": {"text": "Log energy delta (dex)<br>|log10(proxy / target energy)|"},
+            "title": {
+                "text": "Terminal-energy mismatch (dex)<br>"
+                "|log10(proxy terminal / target terminal energy)|"
+            },
             "range": [y_lower, y_upper],
             "gridcolor": "#d8dee4",
             "zerolinecolor": "#8c959f",
         },
         "zaxis": {
-            "title": {"text": "Proxy / target energy-density ratio<br>(log10 display)"},
+            "title": {
+                "text": "Proxy terminal-density / irradiation deposited-density<br>"
+                "(log10 display)"
+            },
             "range": [z_na, z_top],
             "tickvals": [z_na, *z_tickvals],
             "ticktext": ["not comparable", *z_ticktext],
@@ -1363,8 +1371,9 @@ def energy_delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
             "Each marker is one ranked irradiation-to-proxy comparison. Low x "
             "and low y means the proxy is close in both damage signature and "
             "terminal energy; high x is a damage-signature mismatch and high y "
-            "is an energy mismatch. z is the active-volume energy-density "
-            "ratio on a log10 display; irradiation is ion-track localized "
+            "is a terminal-energy mismatch. z compares electrical-proxy "
+            "terminal-energy density against irradiation deposited-energy "
+            "density on a log10 display; irradiation is ion-track localized "
             "while SC/avalanche are bulk approximations, so extreme z is a "
             "localization mismatch to review manually. "
             f"{n_not_comparable:,} rows lack a positive energy-density ratio "
@@ -1691,9 +1700,9 @@ V2_NEEDED_BAND_COLUMNS = [
     "target_severity_low",
     "target_severity_high",
     "target_severity_point_ratio",
-    "candidate_severity_low",
-    "candidate_severity_high",
-    "candidate_severity_point_ratio",
+    "candidate_failure_fraction_low",
+    "candidate_failure_fraction_high",
+    "candidate_failure_fraction_point",
 ]
 
 
@@ -1731,14 +1740,14 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     """Per-target severity-interval overlap for v2's rank-1 candidate.
 
     For each target, draw the target stored-field severity band and the rank-1
-    candidate's terminal-critical severity band as horizontal intervals (error
-    bars around the nominal point ratio) on a shared log severity-ratio axis,
-    colored by the critical-severity overlap class.  Target and candidate stay
+    candidate's own-threshold failure-fraction band as horizontal intervals (error
+    bars around the nominal point) on a shared log threshold-ratio axis,
+    colored by the candidate failure-fraction overlap class.  Target and candidate stay
     semantically separate (separation invariant #1): this is a *screening
     descriptor*, never an equivalence claim, so every hover carries the v2
     status and blockers next to the numbers (Phase-5 acceptance).
     """
-    base_title = "v2 severity-interval overlap (rank-1 candidate per target)"
+    base_title = "v2 target severity vs candidate failure fraction (rank-1 candidate per target)"
     empty_note = (
         "No v2 rank-1 candidate rows with severity bands are available. Export "
         "stress_proxy_candidate_energy_v2 with "
@@ -1775,9 +1784,9 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     )
     candidate_hover = (
         "<b>Candidate %{customdata[0]}</b><br>"
-        "Terminal-critical severity ratio: %{x:.3g}<br>"
+        "Candidate failure fraction: %{x:.3g}<br>"
         "Band: [%{customdata[1]}, %{customdata[2]}]<br>"
-        "Severity overlap: %{customdata[3]}<br>"
+        "Failure-fraction overlap: %{customdata[3]}<br>"
         "v1 rank %{customdata[4]} → v2 rank %{customdata[5]}<br>"
         "Status: %{customdata[6]}<br>"
         "Proxy claim: %{customdata[11]} (%{customdata[12]})<br>"
@@ -1788,7 +1797,7 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "Claim blockers: %{customdata[16]}<br>"
         "Claim summary: %{customdata[17]}<br>"
         "Notes: %{customdata[10]}"
-        "<extra>Candidate (bulk terminal ratio)</extra>"
+        "<extra>Candidate (own-threshold fraction)</extra>"
     )
 
     traces: list[dict[str, Any]] = []
@@ -1826,18 +1835,18 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             "visible": True,
         })
 
-        c_x = [float(r["candidate_severity_point_ratio"]) for r in recs]
-        c_plus = [float(r["candidate_severity_high"]) - x for r, x in zip(recs, c_x)]
-        c_minus = [x - float(r["candidate_severity_low"]) for r, x in zip(recs, c_x)]
+        c_x = [float(r["candidate_failure_fraction_point"]) for r in recs]
+        c_plus = [float(r["candidate_failure_fraction_high"]) - x for r, x in zip(recs, c_x)]
+        c_minus = [x - float(r["candidate_failure_fraction_low"]) for r, x in zip(recs, c_x)]
         marker_colors = [
             CRITICAL_OVERLAP_COLORS.get(
-                _v2_clean(r.get("critical_severity_overlap_class")), "#999999")
+                _v2_clean(r.get("candidate_failure_fraction_overlap_class")), "#999999")
             for r in recs
         ]
         traces.append({
             "type": "scatter",
             "mode": "markers",
-            "name": "Candidate severity band",
+            "name": "Candidate failure-fraction band",
             "legendgroup": "candidate",
             "showlegend": dev == devices[0],
             "x": c_x,
@@ -1851,9 +1860,9 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
                        "line": {"color": "#24292f", "width": 0.5}},
             "customdata": [[
                 _v2_clean(r.get("candidate_source")),
-                display_value(r["candidate_severity_low"]),
-                display_value(r["candidate_severity_high"]),
-                _v2_clean(r.get("critical_severity_overlap_class")),
+                display_value(r["candidate_failure_fraction_low"]),
+                display_value(r["candidate_failure_fraction_high"]),
+                _v2_clean(r.get("candidate_failure_fraction_overlap_class")),
                 _v2_clean(r.get("candidate_rank_v1")),
                 _v2_clean(r.get("mechanistic_energy_candidate_rank")),
                 _v2_clean(r.get("mechanistic_energy_candidate_status")),
@@ -1883,7 +1892,7 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     if devices and devices[0] is not None:
         layout["title"]["text"] = titles[devices[0]]
     layout.update({
-        "xaxis": {"title": {"text": "Severity ratio to threshold (log; 1.0 = threshold)"},
+        "xaxis": {"title": {"text": "Ratio to threshold (log; 1.0 = threshold)"},
                   "type": "log", "gridcolor": "#d8dee4", "zerolinecolor": "#8c959f"},
         "yaxis": {"title": {"text": "Target"}, "automargin": True,
                   "gridcolor": "#eef1f4"},
@@ -1894,8 +1903,8 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     note = (
         "Each row is one target's rank-1 v2 candidate. The blue band is the "
         "target stored-field severity interval (depletion ratio to its SEB/SELC "
-        "threshold); the diamond band is the candidate's bulk terminal-critical "
-        "ratio, colored by the critical-severity overlap class (green strong → "
+        "threshold); the diamond band is the candidate's own electrical "
+        "failure-threshold fraction, colored by the candidate failure-fraction overlap class (green strong → "
         "red far-miss). These are different physical quantities on a shared "
         "screening axis — overlap is a retrieval hint, not an equivalence claim. "
         "Every candidate hover shows the v2 status and blockers next to the "
@@ -1929,9 +1938,9 @@ SEVERITY_CLASS_LABELS = {
 # cumulative-exposure uses a different present/missing vocabulary and is
 # summarized separately.
 V2_OVERLAP_SUMMARY_AXES = [
-    ("critical_severity_overlap_class", "Critical severity"),
+    ("candidate_failure_fraction_overlap_class", "Own-threshold severity"),
     ("terminal_energy_overlap_class", "Terminal energy"),
-    ("power_rate_overlap_class", "Power / rate"),
+    ("timescale_overlap_class", "Timescale"),
 ]
 
 
@@ -1952,17 +1961,17 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
 
     Each point is one target's rank-1 candidate. X is the target stored-field
     severity ratio (depletion energy / its own SEB·SELC critical); Y is the
-    candidate bulk terminal-critical ratio (terminal areal energy / Kosier
-    U_crit). Both axes are energy normalized to *their own* failure threshold, so
+    candidate own-threshold failure fraction (terminal energy divided by its
+    measured electrical destruction-boundary energy). Both axes are normalized to their own relevant threshold, so
     proximity to the y=x diagonal is a SCREENING equivalence (comparable
     multiples of each threshold) — never a claim the raw joules are equal
     (separation invariant #1). The ±0.5 / ±1.5 dex guides are the strong /
     partial overlap-class boundaries; the x=1 / y=1 crosshairs mark each side's
     critical threshold.
     """
-    base_title = "v2 severity-ratio equivalence (rank-1; log-log parity)"
+    base_title = "v2 target severity vs candidate failure fraction (rank-1; log-log parity)"
     empty_note = (
-        "No v2 rank-1 rows with positive target and candidate severity ratios. "
+        "No v2 rank-1 rows with positive target and candidate failure fractions. "
         "Export stress_proxy_candidate_energy_v2 with "
         "export_proxy_candidate_energy_v2_csv.py after applying schema/028."
     )
@@ -1976,29 +1985,33 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     df = rows.copy()
     if "mechanistic_energy_candidate_rank" in df.columns:
         df = df[df["mechanistic_energy_candidate_rank"] == 1]
-    need = ["target_severity_point_ratio", "candidate_severity_point_ratio"]
+    need = ["target_severity_point_ratio", "candidate_failure_fraction_point"]
     if any(c not in df.columns for c in need):
         return empty()
     df = df.dropna(subset=need)
     df = df[(df["target_severity_point_ratio"] > 0)
-            & (df["candidate_severity_point_ratio"] > 0)]
+            & (df["candidate_failure_fraction_point"] > 0)]
     if df.empty:
         return empty()
 
     has_device = "device_type" in df.columns
     devices = sorted(df["device_type"].dropna().unique()) if has_device else [None]
-    range_all = _parity_log_range(
-        float(min(df["target_severity_point_ratio"].min(),
-                  df["candidate_severity_point_ratio"].min())),
-        float(max(df["target_severity_point_ratio"].max(),
-                  df["candidate_severity_point_ratio"].max())),
+    x_range_all = _parity_log_range(
+        float(df["target_severity_point_ratio"].min()),
+        float(df["target_severity_point_ratio"].max()),
     )
-    lo_log, hi_log = range_all
+    y_range_all = _parity_log_range(
+        float(df["candidate_failure_fraction_point"].min()),
+        float(df["candidate_failure_fraction_point"].max()),
+    )
+    range_all = {"x": x_range_all, "y": y_range_all}
+    shape_lo_log = min(x_range_all[0], y_range_all[0])
+    shape_hi_log = max(x_range_all[1], y_range_all[1])
 
     hover = (
         "<b>%{customdata[0]}</b><br>"
         "Target severity ratio: %{x:.3g}<br>"
-        "Candidate severity ratio: %{y:.3g}<br>"
+        "Candidate failure fraction: %{y:.3g}<br>"
         "Overlap: %{customdata[1]}<br>"
         "Candidate %{customdata[2]} · status %{customdata[3]}<br>"
         "Proxy claim: %{customdata[5]} · truth %{customdata[6]}<br>"
@@ -2010,7 +2023,7 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     traces: list[dict[str, Any]] = []
     trace_device: list[Any] = []
     titles: dict[str, str] = {}
-    ranges: dict[str, list[float]] = {}
+    ranges: dict[str, dict[str, list[float]]] = {}
     for dev in devices:
         sub = df if dev is None else df[df["device_type"] == dev]
         recs = sub.to_dict("records")
@@ -2018,15 +2031,19 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             # Per-device axis window: the global range spans every device's
             # extremes (~11 decades live), which crushed a single device's
             # points into one corner of an empty canvas.
-            ranges[dev] = _parity_log_range(
-                float(min(sub["target_severity_point_ratio"].min(),
-                          sub["candidate_severity_point_ratio"].min())),
-                float(max(sub["target_severity_point_ratio"].max(),
-                          sub["candidate_severity_point_ratio"].max())),
-            )
+            ranges[dev] = {
+                "x": _parity_log_range(
+                    float(sub["target_severity_point_ratio"].min()),
+                    float(sub["target_severity_point_ratio"].max()),
+                ),
+                "y": _parity_log_range(
+                    float(sub["candidate_failure_fraction_point"].min()),
+                    float(sub["candidate_failure_fraction_point"].max()),
+                ),
+            }
         colors = [
             CRITICAL_OVERLAP_COLORS.get(
-                _v2_clean(r.get("critical_severity_overlap_class")), "#999999")
+                _v2_clean(r.get("candidate_failure_fraction_overlap_class")), "#999999")
             for r in recs
         ]
         traces.append({
@@ -2034,13 +2051,13 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             "name": _v2_clean(dev) or "pairs",
             "showlegend": False,
             "x": [float(r["target_severity_point_ratio"]) for r in recs],
-            "y": [float(r["candidate_severity_point_ratio"]) for r in recs],
+            "y": [float(r["candidate_failure_fraction_point"]) for r in recs],
             "marker": {"color": colors, "size": 7, "opacity": 0.82,
                        "line": {"color": "#24292f", "width": 0.4}},
             "customdata": [[
                 (_v2_clean(r.get("target_event_type")) + " · "
                  + _v2_key_tail(_v2_clean(r.get("target_stress_record_key")))),
-                _v2_clean(r.get("critical_severity_overlap_class")),
+                _v2_clean(r.get("candidate_failure_fraction_overlap_class")),
                 _v2_clean(r.get("candidate_source")),
                 _v2_clean(r.get("mechanistic_energy_candidate_status")),
                 _v2_clean(r.get("energy_v2_blockers")) or "(none)",
@@ -2072,32 +2089,33 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     # line log10(y)=log10(x) and the ±dex bands are parallel offsets.
     def diag(offset: float, dash: str, color: str, width: float) -> dict[str, Any]:
         return {"type": "line", "xref": "x", "yref": "y",
-                "x0": lo_log, "y0": lo_log + offset,
-                "x1": hi_log, "y1": hi_log + offset,
+                "x0": shape_lo_log, "y0": shape_lo_log + offset,
+                "x1": shape_hi_log, "y1": shape_hi_log + offset,
                 "line": {"color": color, "dash": dash, "width": width}}
     shapes = [
         diag(0.0, "solid", "#24292f", 1.4),
         diag(0.5, "dash", "#1a9850", 1.0), diag(-0.5, "dash", "#1a9850", 1.0),
         diag(1.5, "dot", "#fdae61", 1.0), diag(-1.5, "dot", "#fdae61", 1.0),
-        {"type": "line", "xref": "x", "yref": "y", "x0": 0.0, "y0": lo_log,
-         "x1": 0.0, "y1": hi_log, "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
-        {"type": "line", "xref": "x", "yref": "y", "x0": lo_log, "y0": 0.0,
-         "x1": hi_log, "y1": 0.0, "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
+        {"type": "line", "xref": "x", "yref": "y", "x0": 0.0, "y0": y_range_all[0],
+         "x1": 0.0, "y1": y_range_all[1], "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
+        {"type": "line", "xref": "x", "yref": "y", "x0": x_range_all[0], "y0": 0.0,
+         "x1": x_range_all[1], "y1": 0.0, "line": {"color": "#8c959f", "dash": "dot", "width": 1}},
     ]
 
     layout = cartesian_legend_row_layout(base_title)
     layout.update({
         "xaxis": {"title": {"text": "Target severity ratio "
                             "(stored depletion ÷ its SEB·SELC critical; log)"},
-                  "type": "log", "range": [lo_log, hi_log], "gridcolor": "#d8dee4"},
-        "yaxis": {"title": {"text": "Candidate severity ratio "
+                  "type": "log", "range": x_range_all, "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Candidate failure fraction "
                             "(bulk terminal ÷ Kosier U_crit; log)"},
-                  "type": "log", "range": [lo_log, hi_log], "gridcolor": "#d8dee4"},
+                  "type": "log", "range": y_range_all, "gridcolor": "#d8dee4"},
         "shapes": shapes,
     })
     note = (
         "Each point is one target's rank-1 candidate, all devices together "
-        "(pick a device above to zoom its own range). Points ON the black "
+        "(pick a device above to focus each axis on that device's own X/Y "
+        "range). Points ON the black "
         "diagonal are severity-equivalent; green dashed = ±0.5 dex strong-overlap "
         "band, orange dotted = ±1.5 dex partial band. Gray crosshairs at ratio=1 "
         "mark each side's critical threshold. Most rank-1 candidates sit far "
@@ -2183,7 +2201,7 @@ def v2_overlap_summary_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     note = (
         f"Rank-1 candidates (n={total}) by overlap class on each comparable "
         "energy axis. Headline equivalence read: terminal-energy overlap is "
-        "mostly strong while critical-severity overlap is mostly far-miss — "
+        "mostly strong while candidate failure-fraction overlap is mostly far-miss — "
         "candidates release comparable raw energy but sit at very different "
         "multiples of the irradiation failure threshold. Green=strong "
         "(equivalent) → red=far-miss; gray=missing interval." + cum_note
@@ -2208,16 +2226,16 @@ CONCORDANCE_LABELS = {
 
 
 def _concordance_coords(rec: dict[str, Any]) -> tuple[float, float, float] | None:
-    """(damage-sig distance, severity dist [dex], terminal dist [dex]) or None.
+    """(signature-axis distance, failure-fraction dist [dex], terminal dist [dex]) or None.
 
-    X is v1's energy-free damage_signature_distance; Y is the v2 severity-ratio
-    log-distance (both sides ÷ own threshold); Z is |log10 terminal-energy
+    X is v1's prior-free signature_axis_distance; Y is the v2 target-severity
+    vs candidate-failure-fraction log-distance; Z is |log10 terminal-energy
     delta|. A point at the origin is an identical proxy on all three.
     """
     try:
-        x = float(rec.get("damage_signature_distance"))
+        x = float(rec.get("signature_axis_distance", rec.get("damage_signature_distance")))
         tsr = float(rec.get("target_severity_point_ratio"))
-        csr = float(rec.get("candidate_severity_point_ratio"))
+        csr = float(rec.get("candidate_failure_fraction_point"))
         led = float(rec.get("log_energy_delta_dex"))
     except (TypeError, ValueError):
         return None
@@ -2235,7 +2253,7 @@ def _concordance_customdata(rec: dict[str, Any], category: str) -> list[str]:
         _v2_clean(rec.get("v1_rank")),
         _v2_clean(rec.get("v2_rank")),
         _v2_clean(rec.get("mechanistic_energy_candidate_status")),
-        _v2_clean(rec.get("critical_severity_overlap_class")),
+        _v2_clean(rec.get("candidate_failure_fraction_overlap_class")),
         _v2_clean(rec.get("energy_v2_blockers")) or "(none)",
         _v2_clean(rec.get("proxy_claim_status")) or "screening_only",
         _v2_clean(rec.get("proxy_claim_basis")) or "not recorded",
@@ -2253,8 +2271,8 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     """3D distance space comparing the two proxy methods' rank-1 picks.
 
     Per target, the v1 (damage-signature) pick and v2 (energy) pick are placed
-    in a shared distance space — X = v1 energy-free damage_signature_distance,
-    Y = v2 severity-ratio distance (dex), Z = terminal-energy distance (dex) —
+    in a shared distance space — X = v1 prior-free signature-axis distance,
+    Y = v2 failure-fraction distance (dex), Z = terminal-energy distance (dex) —
     and joined by a line whose length is literally how far apart the two methods'
     chosen proxies are. Consensus picks coincide (zero-length); disagreements
     pull toward different axes. Colored by agreement; v1 picks demoted out of
@@ -2267,8 +2285,8 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     )
     scene = {
         "dragmode": "orbit",
-        "xaxis": {"title": {"text": "v1 damage-signature distance (energy-free)"}},
-        "yaxis": {"title": {"text": "v2 severity distance (dex)"}},
+        "xaxis": {"title": {"text": "v1 signature-axis distance (prior-free)"}},
+        "yaxis": {"title": {"text": "v2 failure-fraction distance (dex)"}},
         "zaxis": {"title": {"text": "terminal-energy distance (dex)"}},
     }
 
@@ -2280,12 +2298,12 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         return empty()
     df = rows.copy()
     required = ["target_stress_record_key", "v1_rank", "v2_rank",
-                "damage_signature_distance", "target_severity_point_ratio",
-                "candidate_severity_point_ratio", "log_energy_delta"]
+                "signature_axis_distance", "target_severity_point_ratio",
+                "candidate_failure_fraction_point", "log_energy_delta"]
     if any(c not in df.columns for c in required):
         return empty()
-    for col in ("v1_rank", "v2_rank", "damage_signature_distance",
-                "target_severity_point_ratio", "candidate_severity_point_ratio",
+    for col in ("v1_rank", "v2_rank", "signature_axis_distance",
+                "target_severity_point_ratio", "candidate_failure_fraction_point",
                 "log_energy_delta"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["log_energy_delta_dex"] = dex_series(
@@ -2348,7 +2366,7 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "<b>%{customdata[0]}</b><br>"
         "%{customdata[1]} · cand %{customdata[2]}<br>"
         "v1 rank %{customdata[3]} → v2 rank %{customdata[4]}<br>"
-        "damage-sig %{x:.3g} · severity %{y:.2f} dex · terminal %{z:.2f} dex<br>"
+        "damage-sig %{x:.3g} · failure fraction %{y:.2f} dex · terminal %{z:.2f} dex<br>"
         "v2 %{customdata[5]} · overlap %{customdata[6]}<br>"
         "proxy claim: %{customdata[8]} (%{customdata[9]}) · truth %{customdata[10]}<br>"
         "v1 claim: %{customdata[11]} · signature %{customdata[12]}<br>"
@@ -2708,6 +2726,72 @@ __PLOTLY_SCRIPT__
     return payload.note || "";
   }
 
+  function effectiveDevice(f) {
+    let eff = currentDevice;
+    if (eff === DEVICE_ALL) {
+      eff = f.allShowsOnly || null;
+    }
+    return eff;
+  }
+
+  function selectedAxisRange(f, eff) {
+    return (eff && f.ranges && f.ranges[eff]) || f.rangeAll || null;
+  }
+
+  function axisRanges(range) {
+    if (!range) {
+      return null;
+    }
+    if (Array.isArray(range)) {
+      return { x: range.slice(), y: range.slice() };
+    }
+    return {
+      x: range.x ? range.x.slice() : null,
+      y: range.y ? range.y.slice() : null
+    };
+  }
+
+  function applyAxisRanges(update, range) {
+    const pair = axisRanges(range);
+    if (!pair) {
+      return;
+    }
+    if (pair.x) {
+      update["xaxis.range"] = pair.x;
+    }
+    if (pair.y) {
+      update["yaxis.range"] = pair.y;
+    }
+  }
+
+  function layoutWithCurrentRange(payload) {
+    const layout = JSON.parse(JSON.stringify(payload.layout || {}));
+    const f = payload.filter || {};
+    const pair = axisRanges(selectedAxisRange(f, effectiveDevice(f)));
+    if (pair && pair.x) {
+      layout.xaxis = layout.xaxis || {};
+      layout.xaxis.range = pair.x;
+    }
+    if (pair && pair.y) {
+      layout.yaxis = layout.yaxis || {};
+      layout.yaxis.range = pair.y;
+    }
+    return layout;
+  }
+
+  function installFocusedReset(node, view) {
+    if (node._apsFocusedResetInstalled) {
+      return;
+    }
+    node._apsFocusedResetInstalled = true;
+    node.on("plotly_relayout", function (eventData) {
+      if (eventData &&
+          (eventData["xaxis.autorange"] || eventData["yaxis.autorange"])) {
+        window.setTimeout(function () { applyFilter(view); }, 0);
+      }
+    });
+  }
+
   function applyFilter(view) {
     const node = document.getElementById(view + "-plot");
     const payload = payloads[view];
@@ -2719,10 +2803,7 @@ __PLOTLY_SCRIPT__
     if (td.length === 0) {
       return;
     }
-    let eff = currentDevice;
-    if (eff === DEVICE_ALL) {
-      eff = f.allShowsOnly || null;
-    }
+    const eff = effectiveDevice(f);
     const visible = td.map(function (d) {
       return !eff || d === null || d === eff;
     });
@@ -2743,11 +2824,7 @@ __PLOTLY_SCRIPT__
     // Per-device axis windows (the parity tab): without them one device's
     // points sit in a corner of the global range.
     if (f.ranges || f.rangeAll) {
-      const range = (eff && f.ranges && f.ranges[eff]) || f.rangeAll || null;
-      if (range) {
-        update["xaxis.range"] = range.slice();
-        update["yaxis.range"] = range.slice();
-      }
+      applyAxisRanges(update, selectedAxisRange(f, eff));
     }
     if (Object.keys(update).length > 0) {
       Plotly.relayout(node, update);
@@ -2778,7 +2855,8 @@ __PLOTLY_SCRIPT__
         '<div class="error" style="border-color:#9a6700;background:#fff8c5;' +
         'color:#7a5c00">No comparable rows for this view yet.</div>';
     } else {
-      Plotly.newPlot(node, payload.traces, payload.layout, config);
+      Plotly.newPlot(node, payload.traces, layoutWithCurrentRange(payload), config);
+      installFocusedReset(node, view);
       applyFilter(view);
     }
     rendered[view] = true;

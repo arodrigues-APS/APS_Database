@@ -137,16 +137,16 @@ def _v2_row(device: str, rank: int, overlap: str, key: str) -> dict:
         "candidate_mechanistic_regime": "avalanche_hard_collapse",
         "regime_match_class": "first_order_analog",
         "mechanistic_energy_candidate_status": "mechanistic_measured_candidate",
-        "critical_severity_overlap_class": overlap,
+        "candidate_failure_fraction_overlap_class": overlap,
         "localization_mismatch_log10": 3.2,
         "target_severity_low": 0.5,
         "target_severity_high": 2.0,
         "target_severity_point_ratio": 1.0,
-        "candidate_severity_low": 0.4,
-        "candidate_severity_high": 1.6,
-        "candidate_severity_point_ratio": 0.8,
+        "candidate_failure_fraction_low": 0.4,
+        "candidate_failure_fraction_high": 1.6,
+        "candidate_failure_fraction_point": 0.8,
         "energy_v2_blockers": "regime_mismatch; cross_device_screening_only",
-        "energy_v2_notes": "critical_severity_is_screening_descriptor_only",
+        "energy_v2_notes": "candidate_failure_fraction_is_screening_descriptor_only",
         "proxy_claim_status": "curation_candidate",
         "proxy_claim_basis": "same_device_needs_truth_curation",
         "proxy_claim_blockers": "no_curated_truth_label",
@@ -238,9 +238,9 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
         ]
         # DUT-B's candidate sits decades above DUT-A's so the two devices get
         # distinct per-device axis windows.
-        rows[3]["candidate_severity_point_ratio"] = 250.0
+        rows[3]["candidate_failure_fraction_point"] = 250.0
         bad = _v2_row("DUT-B", 1, "strong_overlap", "k-b2")
-        bad["candidate_severity_point_ratio"] = 0.0  # non-positive -> excluded
+        bad["candidate_failure_fraction_point"] = 0.0  # non-positive -> excluded
         rows.append(bad)
         return pd.DataFrame(rows)
 
@@ -264,21 +264,32 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
     def test_per_device_axis_ranges_and_global_default(self):
         payload = v2_severity_parity_plot_payload(self._frame())
         f = payload["filter"]
-        # DUT-A ratios span 0.8..1.0 -> decade window [-1, 0];
-        # DUT-B spans 1.0..250 -> [0, 3]; global covers both.
-        self.assertEqual(f["ranges"]["DUT-A"], [-1.0, 0.0])
-        self.assertEqual(f["ranges"]["DUT-B"], [0.0, 3.0])
-        self.assertEqual(f["rangeAll"], [-1.0, 3.0])
-        # The default (all-devices) layout uses the global range on both axes.
-        self.assertEqual(payload["layout"]["xaxis"]["range"], [-1.0, 3.0])
+        # X and Y now get independent windows so a large candidate severity
+        # does not force the target-severity axis out to empty decades.
+        self.assertEqual(f["ranges"]["DUT-A"], {
+            "x": [0.0, 1.0],
+            "y": [-1.0, 0.0],
+        })
+        self.assertEqual(f["ranges"]["DUT-B"], {
+            "x": [0.0, 1.0],
+            "y": [2.0, 3.0],
+        })
+        self.assertEqual(f["rangeAll"], {
+            "x": [0.0, 1.0],
+            "y": [-1.0, 3.0],
+        })
+        self.assertEqual(payload["layout"]["xaxis"]["range"], [0.0, 1.0])
         self.assertEqual(payload["layout"]["yaxis"]["range"], [-1.0, 3.0])
 
     def test_single_point_device_range_widens_to_one_decade(self):
         rows = [_v2_row("DUT-A", 1, "strong_overlap", "k")]
         rows[0]["target_severity_point_ratio"] = 1.0
-        rows[0]["candidate_severity_point_ratio"] = 1.0
+        rows[0]["candidate_failure_fraction_point"] = 1.0
         payload = v2_severity_parity_plot_payload(pd.DataFrame(rows))
-        self.assertEqual(payload["filter"]["ranges"]["DUT-A"], [0.0, 1.0])
+        self.assertEqual(payload["filter"]["ranges"]["DUT-A"], {
+            "x": [0.0, 1.0],
+            "y": [0.0, 1.0],
+        })
 
     def test_log_axes_and_guide_shapes(self):
         payload = v2_severity_parity_plot_payload(self._frame())
@@ -311,9 +322,9 @@ class V2SeverityParityPayloadTests(unittest.TestCase):
 def _v2_summary_row(crit: str, term: str, power: str) -> dict:
     return {
         "mechanistic_energy_candidate_rank": 1,
-        "critical_severity_overlap_class": crit,
+        "candidate_failure_fraction_overlap_class": crit,
         "terminal_energy_overlap_class": term,
-        "power_rate_overlap_class": power,
+        "timescale_overlap_class": power,
         "cumulative_exposure_overlap_class": "cumulative_present",
     }
 
@@ -337,10 +348,10 @@ class V2OverlapSummaryPayloadTests(unittest.TestCase):
         # every trace spans the 3 comparable axes.
         for t in payload["traces"]:
             self.assertEqual(t["type"], "bar")
-            self.assertEqual(len(t["x"]), 3)  # critical, terminal, power
-        # strong: critical=1, terminal=2, power=0
+            self.assertEqual(len(t["x"]), 3)  # failure fraction, terminal, timescale
+        # strong: failure_fraction=1, terminal=2, timescale=0
         self.assertEqual(by_class["strong overlap (equivalent)"]["x"], [1, 2, 0])
-        # far_miss: critical=2, terminal=0, power=1
+        # far_miss: failure_fraction=2, terminal=0, timescale=1
         self.assertEqual(by_class["far miss"]["x"], [2, 0, 1])
 
     def test_note_summarizes_cumulative_axis(self):
@@ -361,11 +372,11 @@ def _conc_row(target, candidate, v1_rank, v2_rank, csr, ds, led,
         "v1_rank": v1_rank,
         "v2_rank": v2_rank,
         "mechanistic_energy_candidate_status": "mechanistic_measured_candidate",
-        "critical_severity_overlap_class": "strong_overlap",
+        "candidate_failure_fraction_overlap_class": "strong_overlap",
         "target_severity_point_ratio": tsr,
-        "candidate_severity_point_ratio": csr,
+        "candidate_failure_fraction_point": csr,
         "log_energy_delta": led,
-        "damage_signature_distance": ds,
+        "signature_axis_distance": ds,
         "energy_v2_blockers": "",
         "proxy_claim_status": "curation_candidate",
         "proxy_claim_basis": "same_device_needs_truth_curation",
@@ -516,12 +527,13 @@ class LegendRowLayoutTests(unittest.TestCase):
             v2_overlap_summary_plot_payload(self._v2_frame()),
         ):
             layout = payload["layout"]
-            self.assertGreaterEqual(layout["margin"]["t"], 170)
+            self.assertGreaterEqual(layout["margin"]["t"], 205)
             self.assertEqual(layout["title"]["yanchor"], "top")
             self.assertEqual(layout["title"]["y"], 1.0)
             if "legend" in layout:
                 self.assertEqual(layout["legend"]["yanchor"], "top")
-                self.assertLessEqual(layout["legend"]["y"], layout["title"]["y"])
+                self.assertLess(layout["legend"]["y"], layout["title"]["y"])
+                self.assertLessEqual(layout["legend"]["y"], 0.96)
 
 
 class TemplateDeviceFilterHonestyTests(unittest.TestCase):
@@ -536,6 +548,9 @@ class TemplateDeviceFilterHonestyTests(unittest.TestCase):
     def test_template_applies_per_device_axis_ranges(self):
         self.assertIn("xaxis.range", HTML_TEMPLATE)
         self.assertIn("rangeAll", HTML_TEMPLATE)
+        self.assertIn("axisRanges", HTML_TEMPLATE)
+        self.assertIn("layoutWithCurrentRange", HTML_TEMPLATE)
+        self.assertIn("plotly_relayout", HTML_TEMPLATE)
 
 
 class DexSeriesTests(unittest.TestCase):

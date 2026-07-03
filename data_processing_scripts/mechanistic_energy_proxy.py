@@ -366,7 +366,7 @@ def classify_mechanistic_regime(
     return "unknown_electrical_proxy"
 
 
-# ── Regime compatibility (Phase 2 — priors only, consumed by no ranker yet) ──
+# ── Regime compatibility (shared v1/v2 prior layer) ──
 #
 # Which candidate regime is a credible analog for which target regime, keyed on
 # *measured* regime (not the event-type label).  This is a reviewable prior,
@@ -381,12 +381,20 @@ def classify_mechanistic_regime(
 #     ceiling.
 #
 # Lower ``preference`` ranks first.  ``status_ceiling`` caps any downstream v2
-# status.  The pure function below mirrors the SQL seed in schema/028.
+# status.  The pure function below mirrors the SQL seed, which lives in
+# schema/025 since 2026-07-02 (shared v1/v2 prior layer; 028 only consumes it).
 
 from collections import namedtuple
 
+# path_penalty is the v1-distance-scale penalty consumed by the Phase-C
+# mask-aware ranker (sourced from this table instead of the deprecated
+# event-type-keyed stress_mechanism_compatibility). Mapping mirrors the v1
+# constants: first_order 0.15, secondary 0.25, gate/cumulative analogs 0.50,
+# questionable/mismatch 0.75.
 RegimeMatch = namedtuple(
-    "RegimeMatch", ["match_class", "status_ceiling", "preference", "rationale"]
+    "RegimeMatch",
+    ["match_class", "status_ceiling", "preference", "rationale", "path_penalty"],
+    defaults=(0.75,),
 )
 
 # match_class vocabulary: first_order_analog < secondary_analog <
@@ -395,44 +403,56 @@ _REGIME_COMPATIBILITY = {
     "heavy_ion_hard_collapse_seb": {
         "avalanche_hard_collapse": RegimeMatch(
             "first_order_analog", None, 1,
-            "Hard-collapse heavy-ion SEB matches inductive avalanche field-collapse burnout."),
+            "Hard-collapse heavy-ion SEB matches inductive avalanche field-collapse burnout.",
+            0.15),
         "sc_high_power_short_pulse": RegimeMatch(
             "secondary_analog", None, 2,
-            "Short-circuit high-power pulse shares thermal runaway with a less direct topology."),
+            "Short-circuit high-power pulse shares thermal runaway with a less direct topology.",
+            0.25),
         "repetitive_avalanche_cumulative": RegimeMatch(
             "secondary_analog", None, 2,
-            "Repetitive avalanche reaches similar collapse but is a multi-pulse stimulus."),
+            "Repetitive avalanche reaches similar collapse but is a multi-pulse stimulus.",
+            0.25),
         "sc_low_collapse": RegimeMatch(
             "mechanism_mismatch", "analog_questionable", 4,
-            "Low-collapse SC does not match a hard-collapse heavy-ion SEB."),
+            "Low-collapse SC does not match a hard-collapse heavy-ion SEB.",
+            0.75),
         "any": RegimeMatch(
             "analog_questionable", "analog_questionable", 3,
-            "No collapse-matched electrical analog seeded for this heavy-ion SEB."),
+            "No collapse-matched electrical analog seeded for this heavy-ion SEB.",
+            0.75),
     },
     "proton_low_collapse_seb": {
         "sc_low_collapse": RegimeMatch(
             "first_order_analog", None, 1,
-            "Low-collapse proton SEB matches short-circuit low-collapse stress (proton diagnostic)."),
+            "Low-collapse proton SEB matches short-circuit low-collapse stress (proton diagnostic).",
+            0.15),
         "sc_high_power_short_pulse": RegimeMatch(
             "secondary_analog", None, 2,
-            "Short-circuit candidate; collapse is higher than the near-zero proton SEB target."),
+            "Short-circuit candidate; collapse is higher than the near-zero proton SEB target.",
+            0.25),
         "avalanche_hard_collapse": RegimeMatch(
             "mechanism_mismatch", "analog_questionable", 4,
-            "Avalanche hard collapse does not match near-zero proton SEB collapse."),
+            "Avalanche hard collapse does not match near-zero proton SEB collapse.",
+            0.75),
         "any": RegimeMatch(
             "analog_questionable", "analog_questionable", 3,
-            "Weak analog for low-collapse proton SEB."),
+            "Weak analog for low-collapse proton SEB.",
+            0.75),
     },
     "proton_high_field_seb": {
         "avalanche_hard_collapse": RegimeMatch(
             "secondary_analog", None, 2,
-            "High-field proton SEB with collapse; avalanche is a partial field-collapse analog."),
+            "High-field proton SEB with collapse; avalanche is a partial field-collapse analog.",
+            0.25),
         "sc_high_power_short_pulse": RegimeMatch(
             "secondary_analog", None, 2,
-            "Short-circuit high-power pulse is a partial analog for high-field proton SEB."),
+            "Short-circuit high-power pulse is a partial analog for high-field proton SEB.",
+            0.25),
         "any": RegimeMatch(
             "analog_questionable", "analog_questionable", 3,
-            "Inspect high-field proton SEB manually."),
+            "Inspect high-field proton SEB manually.",
+            0.75),
     },
     "selci_gate_coupled": {
         # SELC-I is gate-oxide leakage.  Short-circuit stresses the gate; avalanche
@@ -442,43 +462,54 @@ _REGIME_COMPATIBILITY = {
         # are avalanche), not physics.  See the 2026-06-26 handoff.
         "repetitive_sc_cumulative": RegimeMatch(
             "cumulative_analog", "analog_questionable", 1,
-            "Repetitive SC gate stress is the gate-coupled, cumulative analog for SELC-I leakage."),
+            "Repetitive SC gate stress is the gate-coupled, cumulative analog for SELC-I leakage.",
+            0.50),
         "sc_high_power_short_pulse": RegimeMatch(
             "gate_coupled_analog", "analog_questionable", 1,
-            "Short-circuit stresses the gate oxide implicated in SELC-I leakage."),
+            "Short-circuit stresses the gate oxide implicated in SELC-I leakage.",
+            0.50),
         "sc_low_collapse": RegimeMatch(
             "gate_coupled_analog", "analog_questionable", 1,
-            "Short-circuit stresses the gate oxide implicated in SELC-I leakage."),
+            "Short-circuit stresses the gate oxide implicated in SELC-I leakage.",
+            0.50),
         "repetitive_avalanche_cumulative": RegimeMatch(
             "mechanism_mismatch", "analog_questionable", 4,
-            "Repetitive avalanche is a drain-source stress with no gate-oxide coupling for SELC-I."),
+            "Repetitive avalanche is a drain-source stress with no gate-oxide coupling for SELC-I.",
+            0.75),
         "avalanche_hard_collapse": RegimeMatch(
             "mechanism_mismatch", "analog_questionable", 4,
-            "Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I."),
+            "Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I.",
+            0.75),
         "avalanche_noncatastrophic": RegimeMatch(
             "mechanism_mismatch", "analog_questionable", 4,
-            "Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I."),
+            "Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I.",
+            0.75),
         "any": RegimeMatch(
             "analog_questionable", "analog_questionable", 3,
-            "SELC-I needs gate-coupled (short-circuit) evidence before any strong status."),
+            "SELC-I needs gate-coupled (short-circuit) evidence before any strong status.",
+            0.75),
     },
     "selcii_drain_source_cumulative": {
         "repetitive_sc_cumulative": RegimeMatch(
             "cumulative_analog", "analog_questionable", 2,
-            "Cumulative drain-source leakage weakly tracked by repetitive electrical overstress."),
+            "Cumulative drain-source leakage weakly tracked by repetitive electrical overstress.",
+            0.50),
         "repetitive_avalanche_cumulative": RegimeMatch(
             "cumulative_analog", "analog_questionable", 2,
-            "Cumulative drain-source leakage weakly tracked by repetitive avalanche overstress."),
+            "Cumulative drain-source leakage weakly tracked by repetitive avalanche overstress.",
+            0.50),
         "any": RegimeMatch(
             "analog_questionable", "analog_questionable", 3,
-            "SELC-II is cumulative defect leakage without a strong single-pulse analog."),
+            "SELC-II is cumulative defect leakage without a strong single-pulse analog.",
+            0.75),
     },
 }
 
 # Targets with no credible electrical analog fall through to this.
 _REGIME_DEFAULT = RegimeMatch(
     "analog_questionable", "analog_questionable", 3,
-    "No seeded regime-compatibility rule; requires manual analog review.")
+    "No seeded regime-compatibility rule; requires manual analog review.",
+    0.75)
 
 
 def regime_match_class(target_regime, candidate_regime):
@@ -621,3 +652,190 @@ def _is_repetitive(candidate_pulse_count):
         return candidate_pulse_count is not None and int(candidate_pulse_count) > 1
     except (TypeError, ValueError):
         return False
+
+
+# ── R1 prep — candidate-side electrical destruction boundary ────────────────
+#
+# The planned R1 change replaces the candidate "critical severity" ratio
+# (bulk terminal areal energy / Kosier U_SEB|U_SELC — a radiation TRIGGER
+# threshold, structurally a far-miss for bulk pulses) with the candidate's
+# fraction of its OWN electrical failure threshold: pulse energy over the
+# device's measured destruction-boundary energy, Wu-2024 thermal-runaway
+# model as the fallback FORM where no measured boundary exists.  These pure
+# functions are the spec the boundary SQL view must mirror; they encode the
+# review's degenerate-case rules (bracket inversion, minimum cell counts,
+# right-censored destructive energy, energy-basis consistency, repetitive
+# exclusion) so the SQL cannot silently discard the richest cells.
+
+# Wu et al. 2024 (Electronics 13(3):996) behavior model, pinned from the
+# in-repo PDF (docs/relevant_papers/Linking stress types/electronics-13-00996.pdf).
+# One thermal-runaway criterion spans short-circuit withstand and avalanche
+# failure: junction temperature T = P_loss * Z_th(t) + T_case; the failure
+# switch latches once T exceeds T_CRIT sustained for a short fitted delay
+# t_FD.  T_CRIT characterizes source-metal (Al) melting as the failure
+# precursor; the RC thermal-ladder values and t_FD are DEVICE-FITTED
+# (their Table A1, C2M0080120D) and must not be copied across devices —
+# measured boundaries stay authoritative, the model supplies the criterion
+# form.  Temperatures in kelvin.
+WU_2024_TCRIT_AL_MELT_K = 933.5           # Al melting point, their T_CRIT anchor
+WU_2024_SIC_INTRINSIC_LIMIT_K = 1543.0    # 4H-SiC n_i = 1e16 cm^-3 at 1270 degC
+# Literature junction-T estimates at avalanche failure they survey: 510-948 degC.
+WU_2024_AVALANCHE_FAILURE_TJ_BAND_K = (783.0, 1221.0)
+
+# Minimum survived / destructive records before a boundary cell may gate or
+# rank anything (screening assumptions, not fitted constants).
+BOUNDARY_MIN_SURVIVED_COUNT = 3
+BOUNDARY_MIN_DESTRUCTIVE_COUNT = 3
+
+# Boundary cells are built from single-pulse regimes only.  A per-pulse energy
+# bracket is meaningless for repetitive sequences (damage accrues over the
+# sequence), so repetitive candidates fall to missing_interval until the
+# cumulative dose/pulse-count axis exists.
+REPETITIVE_CANDIDATE_REGIMES = {
+    "repetitive_avalanche_cumulative",
+    "repetitive_sc_cumulative",
+}
+
+_ENERGY_BASIS_FAMILIES = (
+    ("commanded_or_stored", "commanded_or_stored"),
+    ("proxy", "proxy"),
+    ("integrated", "integrated"),
+)
+
+
+def energy_basis_family(basis):
+    """Coarse family of a stress_energy/terminal-energy basis tag.
+
+    A boundary bracket mixing integrated Joules with commanded 1/2*L*I^2
+    Joules inherits a hidden multiplicative bias, so the numerator and the
+    boundary cell must agree at the family level before a failure fraction
+    may gate anything (review fix 5).
+    """
+    text = (basis or "").strip().lower()
+    if not text:
+        return "missing"
+    for token, family in _ENERGY_BASIS_FAMILIES:
+        if token in text:
+            return family
+    return "other"
+
+
+def destruction_boundary_interval(
+    max_survived_energy_j,
+    min_destructive_energy_j,
+    survived_count,
+    destructive_count,
+    min_survived_count=BOUNDARY_MIN_SURVIVED_COUNT,
+    min_destructive_count=BOUNDARY_MIN_DESTRUCTIVE_COUNT,
+):
+    """Bracket the electrical destruction boundary for one boundary cell.
+
+    Returns a dict with ``low_j``/``high_j`` (the bracket, always ascending),
+    ``inverted`` (unit-to-unit spread put the max survived energy above the
+    min destructive energy — the bracket is emitted, flagged, NOT discarded),
+    ``usable`` (allowed to gate/rank; False leaves it a visible
+    missing_interval downstream), and visible ``blockers``/``notes``.
+
+    Censoring direction: destructive-pulse energy is truncated at failure, so
+    ``min_destructive_energy_j`` is a lower bound of a lower bound — it can
+    only widen the bracket downward (conservative); noted, never blocked.
+    """
+    low_bound = finite_float(max_survived_energy_j)
+    if low_bound is not None and low_bound <= 0.0:
+        low_bound = None
+    high_bound = finite_float(min_destructive_energy_j)
+    if high_bound is not None and high_bound <= 0.0:
+        high_bound = None
+
+    blockers = []
+    notes = []
+    inverted = False
+    low_j = high_j = None
+
+    if low_bound is None and high_bound is None:
+        blockers.append("destruction_boundary_missing")
+    elif low_bound is None:
+        blockers.append("destruction_boundary_one_sided_destructive_only")
+    elif high_bound is None:
+        blockers.append("destruction_boundary_one_sided_survived_only")
+    else:
+        low_j, high_j = min(low_bound, high_bound), max(low_bound, high_bound)
+        if low_bound > high_bound:
+            inverted = True
+            notes.append("destruction_boundary_brackets_inverted_unit_spread")
+
+    if high_bound is not None:
+        notes.append("destructive_energy_right_censored_lower_bound")
+
+    def _count(value):
+        try:
+            return int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    if low_bound is not None and _count(survived_count) < min_survived_count:
+        blockers.append("destruction_boundary_insufficient_survived_count")
+    if high_bound is not None and _count(destructive_count) < min_destructive_count:
+        blockers.append("destruction_boundary_insufficient_destructive_count")
+
+    return {
+        "low_j": low_j,
+        "high_j": high_j,
+        "inverted": inverted,
+        "usable": low_j is not None and high_j is not None and not blockers,
+        "blockers": blockers,
+        "notes": notes,
+    }
+
+
+def candidate_failure_fraction(
+    candidate_energy_j,
+    boundary,
+    candidate_energy_basis=None,
+    boundary_energy_basis=None,
+    candidate_regime=None,
+):
+    """Candidate severity as a fraction of its OWN destruction boundary.
+
+    ``fraction_point`` divides the pulse energy by the geometric mean of the
+    boundary bracket; ``fraction_low``/``fraction_high`` divide by the bracket
+    ends (dividing by the HIGH end gives the LOW fraction).  Fractions are
+    populated for display whenever a bracket exists, but ``usable`` is False —
+    and downstream gating must treat the axis as missing_interval — when the
+    boundary itself is unusable, the energy-basis families disagree, or the
+    candidate is a repetitive sequence.
+    """
+    blockers = list(boundary.get("blockers") or [])
+    notes = list(boundary.get("notes") or [])
+
+    energy = finite_float(candidate_energy_j)
+    if energy is not None and energy <= 0.0:
+        energy = None
+    if energy is None:
+        blockers.append("candidate_energy_missing")
+
+    if candidate_regime in REPETITIVE_CANDIDATE_REGIMES:
+        blockers.append("boundary_repetitive_regime_excluded")
+
+    if candidate_energy_basis is not None or boundary_energy_basis is not None:
+        candidate_family = energy_basis_family(candidate_energy_basis)
+        boundary_family = energy_basis_family(boundary_energy_basis)
+        if candidate_family != boundary_family:
+            blockers.append("boundary_energy_basis_family_mismatch")
+
+    low_j = boundary.get("low_j")
+    high_j = boundary.get("high_j")
+    fraction_low = fraction_point = fraction_high = None
+    if energy is not None and low_j and high_j:
+        fraction_low = energy / high_j
+        fraction_high = energy / low_j
+        fraction_point = energy / math.sqrt(low_j * high_j)
+
+    return {
+        "fraction_low": fraction_low,
+        "fraction_point": fraction_point,
+        "fraction_high": fraction_high,
+        "usable": fraction_point is not None and not blockers,
+        "blockers": blockers,
+        "notes": notes,
+    }

@@ -159,6 +159,165 @@ DO UPDATE SET
     rationale = EXCLUDED.rationale;
 
 
+-- ── Mechanistic energy-proxy settings + regime priors (shared v1/v2 layer) ──
+--
+-- Moved here from schema/028_mechanistic_energy_proxy.sql (2026-07-02) so ONE
+-- mechanism-prior layer can serve both rankers: stress_test_context_view below
+-- computes the measured `mechanistic_regime` label from these settings, and
+-- the v1 ranking reads `path_penalty` from
+-- stress_regime_compatibility instead of the coarser event-type-keyed
+-- stress_mechanism_compatibility above.  stress_mechanism_compatibility is
+-- DEPRECATED: it remains the v1 scoring source for one release (so the flip
+-- is a separately auditable change) and will then be dropped.
+--
+-- schema/028 still owns the v2 feature/candidate views; it no longer defines
+-- these two tables.  The Python source-of-truth is
+-- data_processing_scripts/mechanistic_energy_proxy.py
+-- (EnergyEquivalenceSettings, _REGIME_COMPATIBILITY).
+
+CREATE TABLE IF NOT EXISTS stress_energy_equivalence_settings (
+    setting_name                          text PRIMARY KEY,
+    description                           text,
+    default_track_core_radius_um          double precision NOT NULL,
+    track_core_radius_low_um              double precision NOT NULL,
+    track_core_radius_high_um             double precision NOT NULL,
+    collapse_hard_threshold               double precision NOT NULL,
+    terminal_energy_log_sigma_integrated  double precision NOT NULL,
+    terminal_energy_log_sigma_commanded   double precision NOT NULL,
+    terminal_energy_log_sigma_censored    double precision NOT NULL,
+    active_area_log_sigma_measured        double precision NOT NULL,
+    active_area_log_sigma_estimated       double precision NOT NULL,
+    doping_log_sigma_measured             double precision NOT NULL,
+    doping_log_sigma_estimated            double precision NOT NULL,
+    geometry_confidence_measured_min      double precision NOT NULL,
+    same_regime_required_for_primary      boolean NOT NULL DEFAULT FALSE
+);
+
+-- First-pass screening assumptions (NOT fitted constants — the measured truth
+-- set is far too small to fit).  Mirrors EnergyEquivalenceSettings defaults.
+INSERT INTO stress_energy_equivalence_settings (
+    setting_name, description,
+    default_track_core_radius_um, track_core_radius_low_um, track_core_radius_high_um,
+    collapse_hard_threshold,
+    terminal_energy_log_sigma_integrated, terminal_energy_log_sigma_commanded,
+    terminal_energy_log_sigma_censored,
+    active_area_log_sigma_measured, active_area_log_sigma_estimated,
+    doping_log_sigma_measured, doping_log_sigma_estimated,
+    geometry_confidence_measured_min, same_regime_required_for_primary
+)
+VALUES (
+    'default',
+    'Phase 1 mechanistic energy-proxy screening assumptions; see rollout plan open questions.',
+    0.1, 0.05, 0.5,
+    0.5,
+    0.20, 0.41, 0.69,
+    0.20, 0.69,
+    0.20, 0.47,
+    0.5, FALSE
+)
+ON CONFLICT (setting_name) DO UPDATE SET
+    description = EXCLUDED.description,
+    default_track_core_radius_um = EXCLUDED.default_track_core_radius_um,
+    track_core_radius_low_um = EXCLUDED.track_core_radius_low_um,
+    track_core_radius_high_um = EXCLUDED.track_core_radius_high_um,
+    collapse_hard_threshold = EXCLUDED.collapse_hard_threshold,
+    terminal_energy_log_sigma_integrated = EXCLUDED.terminal_energy_log_sigma_integrated,
+    terminal_energy_log_sigma_commanded = EXCLUDED.terminal_energy_log_sigma_commanded,
+    terminal_energy_log_sigma_censored = EXCLUDED.terminal_energy_log_sigma_censored,
+    active_area_log_sigma_measured = EXCLUDED.active_area_log_sigma_measured,
+    active_area_log_sigma_estimated = EXCLUDED.active_area_log_sigma_estimated,
+    doping_log_sigma_measured = EXCLUDED.doping_log_sigma_measured,
+    doping_log_sigma_estimated = EXCLUDED.doping_log_sigma_estimated,
+    geometry_confidence_measured_min = EXCLUDED.geometry_confidence_measured_min,
+    same_regime_required_for_primary = EXCLUDED.same_regime_required_for_primary;
+
+-- Regime-compatibility priors, keyed on *measured* regime (not the event-type
+-- label).  A candidate_regime of 'any' is the per-target fallback.  Lower
+-- preference ranks first.
+--
+-- path_penalty is the v1-distance-scale penalty (mirrors the units of
+-- stress_mechanism_compatibility.path_penalty: first-order 0.15, secondary
+-- 0.25, gate/cumulative analogs 0.50, questionable/mismatch 0.75).  It is
+-- seeded here so the Phase-C v1 flip is a source swap, not a new tuning pass.
+-- Consumers should COALESCE(path_penalty, 0.75).
+CREATE TABLE IF NOT EXISTS stress_regime_compatibility (
+    target_regime     text NOT NULL,
+    candidate_regime  text NOT NULL,
+    match_class       text NOT NULL,
+    status_ceiling    text,
+    preference        integer NOT NULL,
+    rationale         text,
+    path_penalty      double precision,
+    PRIMARY KEY (target_regime, candidate_regime)
+);
+
+-- Live databases created before 2026-07-02 lack the path_penalty column.
+ALTER TABLE stress_regime_compatibility
+    ADD COLUMN IF NOT EXISTS path_penalty double precision;
+
+INSERT INTO stress_regime_compatibility
+    (target_regime, candidate_regime, match_class, status_ceiling, preference, rationale,
+     path_penalty)
+VALUES
+    ('heavy_ion_hard_collapse_seb', 'avalanche_hard_collapse', 'first_order_analog', NULL, 1,
+     'Hard-collapse heavy-ion SEB matches inductive avalanche field-collapse burnout.', 0.15),
+    ('heavy_ion_hard_collapse_seb', 'sc_high_power_short_pulse', 'secondary_analog', NULL, 2,
+     'Short-circuit high-power pulse shares thermal runaway with a less direct topology.', 0.25),
+    ('heavy_ion_hard_collapse_seb', 'repetitive_avalanche_cumulative', 'secondary_analog', NULL, 2,
+     'Repetitive avalanche reaches similar collapse but is a multi-pulse stimulus.', 0.25),
+    ('heavy_ion_hard_collapse_seb', 'sc_low_collapse', 'mechanism_mismatch', 'analog_questionable', 4,
+     'Low-collapse SC does not match a hard-collapse heavy-ion SEB.', 0.75),
+    ('heavy_ion_hard_collapse_seb', 'any', 'analog_questionable', 'analog_questionable', 3,
+     'No collapse-matched electrical analog seeded for this heavy-ion SEB.', 0.75),
+
+    ('proton_low_collapse_seb', 'sc_low_collapse', 'first_order_analog', NULL, 1,
+     'Low-collapse proton SEB matches short-circuit low-collapse stress (proton diagnostic).', 0.15),
+    ('proton_low_collapse_seb', 'sc_high_power_short_pulse', 'secondary_analog', NULL, 2,
+     'Short-circuit candidate; collapse is higher than the near-zero proton SEB target.', 0.25),
+    ('proton_low_collapse_seb', 'avalanche_hard_collapse', 'mechanism_mismatch', 'analog_questionable', 4,
+     'Avalanche hard collapse does not match near-zero proton SEB collapse.', 0.75),
+    ('proton_low_collapse_seb', 'any', 'analog_questionable', 'analog_questionable', 3,
+     'Weak analog for low-collapse proton SEB.', 0.75),
+
+    ('proton_high_field_seb', 'avalanche_hard_collapse', 'secondary_analog', NULL, 2,
+     'High-field proton SEB with collapse; avalanche is a partial field-collapse analog.', 0.25),
+    ('proton_high_field_seb', 'sc_high_power_short_pulse', 'secondary_analog', NULL, 2,
+     'Short-circuit high-power pulse is a partial analog for high-field proton SEB.', 0.25),
+    ('proton_high_field_seb', 'any', 'analog_questionable', 'analog_questionable', 3,
+     'Inspect high-field proton SEB manually.', 0.75),
+
+    -- SELC-I is gate-oxide leakage: short-circuit stresses the gate, avalanche
+    -- (drain-source UIS) does not, so avalanche is a mechanism mismatch here
+    -- regardless of repetition.  Mirrors _REGIME_COMPATIBILITY in the Python module.
+    ('selci_gate_coupled', 'repetitive_sc_cumulative', 'cumulative_analog', 'analog_questionable', 1,
+     'Repetitive SC gate stress is the gate-coupled, cumulative analog for SELC-I leakage.', 0.50),
+    ('selci_gate_coupled', 'sc_high_power_short_pulse', 'gate_coupled_analog', 'analog_questionable', 1,
+     'Short-circuit stresses the gate oxide implicated in SELC-I leakage.', 0.50),
+    ('selci_gate_coupled', 'sc_low_collapse', 'gate_coupled_analog', 'analog_questionable', 1,
+     'Short-circuit stresses the gate oxide implicated in SELC-I leakage.', 0.50),
+    ('selci_gate_coupled', 'repetitive_avalanche_cumulative', 'mechanism_mismatch', 'analog_questionable', 4,
+     'Repetitive avalanche is a drain-source stress with no gate-oxide coupling for SELC-I.', 0.75),
+    ('selci_gate_coupled', 'avalanche_hard_collapse', 'mechanism_mismatch', 'analog_questionable', 4,
+     'Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I.', 0.75),
+    ('selci_gate_coupled', 'avalanche_noncatastrophic', 'mechanism_mismatch', 'analog_questionable', 4,
+     'Avalanche (drain-source UIS) does not stress the gate oxide implicated in SELC-I.', 0.75),
+    ('selci_gate_coupled', 'any', 'analog_questionable', 'analog_questionable', 3,
+     'SELC-I needs gate-coupled (short-circuit) evidence before any strong status.', 0.75),
+
+    ('selcii_drain_source_cumulative', 'repetitive_sc_cumulative', 'cumulative_analog', 'analog_questionable', 2,
+     'Cumulative drain-source leakage weakly tracked by repetitive electrical overstress.', 0.50),
+    ('selcii_drain_source_cumulative', 'repetitive_avalanche_cumulative', 'cumulative_analog', 'analog_questionable', 2,
+     'Cumulative drain-source leakage weakly tracked by repetitive avalanche overstress.', 0.50),
+    ('selcii_drain_source_cumulative', 'any', 'analog_questionable', 'analog_questionable', 3,
+     'SELC-II is cumulative defect leakage without a strong single-pulse analog.', 0.75)
+ON CONFLICT (target_regime, candidate_regime) DO UPDATE SET
+    match_class = EXCLUDED.match_class,
+    status_ceiling = EXCLUDED.status_ceiling,
+    preference = EXCLUDED.preference,
+    rationale = EXCLUDED.rationale,
+    path_penalty = EXCLUDED.path_penalty;
+
+
 CREATE TABLE IF NOT EXISTS stress_pulse_history (
     metadata_id integer PRIMARY KEY REFERENCES baselines_metadata(id) ON DELETE CASCADE,
     pulse_index integer,
@@ -2205,6 +2364,43 @@ SELECT
         WHEN s.application_likeness_score >= 1.50 THEN 'partial_context_overlap'
         ELSE 'low_context_overlap'
     END AS application_likeness,
+    -- Measured mechanistic-regime label (single source of truth for BOTH
+    -- rankers; moved here from schema/028's feature view 2026-07-02 so v1 and
+    -- v2 cannot drift apart — 028 now passes this column through).  Keyed on
+    -- MEASURED collapse / beam species / repetition, not the event-type label
+    -- alone.  Mirrors classify_mechanistic_regime() in
+    -- data_processing_scripts/mechanistic_energy_proxy.py; keep the two in sync.
+    CASE
+        WHEN s.source = 'irradiation' THEN
+            CASE
+                WHEN UPPER(COALESCE(s.event_type, '')) = 'SEB' THEN
+                    CASE
+                        WHEN mri.is_proton AND mri.collapse_high THEN 'proton_high_field_seb'
+                        WHEN mri.is_proton THEN 'proton_low_collapse_seb'
+                        WHEN mri.collapse_high THEN 'heavy_ion_hard_collapse_seb'
+                        ELSE 'unknown_single_event'
+                    END
+                WHEN UPPER(COALESCE(s.event_type, '')) = 'SELCI' THEN 'selci_gate_coupled'
+                WHEN UPPER(COALESCE(s.event_type, '')) = 'SELCII' THEN 'selcii_drain_source_cumulative'
+                WHEN UPPER(COALESCE(s.event_type, '')) = 'MIXED' THEN 'mixed_single_event'
+                WHEN mri.is_proton THEN 'tid_dd_cumulative'
+                ELSE 'unknown_single_event'
+            END
+        WHEN s.source = 'avalanche' THEN
+            CASE
+                WHEN mri.cumulative THEN 'repetitive_avalanche_cumulative'
+                WHEN mri.collapse_high OR COALESCE(s.is_catastrophic, FALSE)
+                    THEN 'avalanche_hard_collapse'
+                ELSE 'avalanche_noncatastrophic'
+            END
+        WHEN s.source = 'sc' THEN
+            CASE
+                WHEN mri.cumulative THEN 'repetitive_sc_cumulative'
+                WHEN mri.collapse_high THEN 'sc_high_power_short_pulse'
+                ELSE 'sc_low_collapse'
+            END
+        ELSE 'unknown_electrical_proxy'
+    END AS mechanistic_regime,
     ARRAY_REMOVE(ARRAY[
         CASE WHEN s.device_type IS NULL THEN 'missing_device_type' END,
         CASE WHEN s.rated_voltage_v IS NULL THEN 'missing_device_voltage_rating' END,
@@ -2254,7 +2450,23 @@ SELECT
     s.quality_flags
 FROM scored s
 LEFT JOIN stress_pulse_history sph
-  ON sph.metadata_id = s.metadata_id;
+  ON sph.metadata_id = s.metadata_id
+-- Regime inputs for the mechanistic_regime CASE above.  Always exactly one
+-- row (scalar subquery + COALESCE guard), so the CROSS JOIN cannot drop rows
+-- even if the settings seed is missing.
+CROSS JOIN LATERAL (
+    SELECT
+        (LOWER(TRIM(COALESCE(s.ion_species, ''))) IN
+            ('p', 'proton', 'protons', 'h', 'h+', 'h1', '1h')
+         OR LOWER(COALESCE(s.ion_species, '')) LIKE '%proton%') AS is_proton,
+        (s.vds_collapse_fraction IS NOT NULL
+         AND s.vds_collapse_fraction >= COALESCE((
+                SELECT cfg.collapse_hard_threshold
+                FROM stress_energy_equivalence_settings cfg
+                WHERE cfg.setting_name = 'default'), 0.5)) AS collapse_high,
+        (sph.pulse_count_in_sequence IS NOT NULL
+         AND sph.pulse_count_in_sequence > 1) AS cumulative
+) mri;
 
 CREATE INDEX idx_stress_test_context_source
     ON stress_test_context_view(source);
@@ -2652,33 +2864,15 @@ pairs AS (
              AND t.stress_duration_s IS NOT NULL AND t.stress_duration_s > 0.0
             THEN ABS(LN(c.stress_duration_s) - LN(t.stress_duration_s))
         END AS duration_log_delta,
-        CASE
-            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.mechanism_match_class
-            WHEN t.path_type IS NOT NULL
-             AND c.path_type IS NOT NULL
-             AND t.path_type = c.path_type THEN 'same_path_type'
-            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 'path_unknown'
-            ELSE 'mechanism_unknown'
-        END AS mechanism_match_class,
-        CASE
-            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.status_ceiling
-        END AS mechanism_status_ceiling,
-        CASE
-            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.rationale
-            WHEN t.path_type IS NOT NULL
-             AND c.path_type IS NOT NULL
-             AND t.path_type = c.path_type THEN 'Candidate and target share the same extracted conduction path.'
-            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN 'Candidate or target path type is missing.'
-            ELSE 'No seeded mechanism compatibility rule matched this pair.'
-        END AS mechanism_rationale,
-        CASE
-            WHEN mech.mechanism_match_class IS NOT NULL THEN mech.path_penalty
-            WHEN t.path_type IS NOT NULL
-             AND c.path_type IS NOT NULL
-             AND t.path_type = c.path_type THEN settings.same_path_penalty
-            WHEN t.path_type IS NULL OR c.path_type IS NULL THEN settings.path_unknown_penalty
-            ELSE settings.path_mismatch_penalty
-        END AS path_penalty
+        COALESCE(mech.match_class, 'analog_questionable')
+            AS mechanism_match_class,
+        mech.status_ceiling AS mechanism_status_ceiling,
+        COALESCE(mech.preference, 3) AS mechanism_preference,
+        COALESCE(
+            mech.rationale,
+            'No seeded regime-compatibility rule matched this pair.'
+        ) AS mechanism_rationale,
+        COALESCE(mech.path_penalty, 0.75) AS path_penalty
     FROM candidate_links l
     JOIN targets t
       ON t.stress_record_key = l.target_stress_record_key
@@ -2687,14 +2881,17 @@ pairs AS (
     JOIN stress_proxy_distance_settings settings
       ON settings.setting_name = l.distance_setting_name
     LEFT JOIN LATERAL (
-        SELECT mc.*
-        FROM stress_mechanism_compatibility mc
-        WHERE UPPER(mc.target_event_type) = UPPER(COALESCE(t.event_type, ''))
-          AND (mc.candidate_source = c.source OR mc.candidate_source = 'any')
-          AND COALESCE(c.vds_collapse_fraction, 0.0) >= mc.min_candidate_collapse
+        SELECT rc.match_class, rc.status_ceiling, rc.preference,
+               rc.rationale, rc.path_penalty
+        FROM stress_regime_compatibility rc
+        WHERE rc.target_regime = t.mechanistic_regime
+          AND (
+                rc.candidate_regime = c.mechanistic_regime
+             OR rc.candidate_regime = 'any'
+          )
         ORDER BY
-            CASE WHEN mc.candidate_source = c.source THEN 0 ELSE 1 END,
-            mc.min_candidate_collapse DESC
+            CASE WHEN rc.candidate_regime = c.mechanistic_regime THEN 0 ELSE 1 END,
+            rc.preference ASC
         LIMIT 1
     ) mech ON TRUE
 ),
@@ -2733,6 +2930,10 @@ distances AS (
           + CASE WHEN scored.normalized_vds_delta IS NOT NULL THEN 0.35 ELSE 0.0 END
           + CASE WHEN scored.gate_delta IS NOT NULL THEN 0.20 ELSE 0.0 END
         ) AS damage_signature_coverage_score,
+        CASE
+            WHEN scored.damage_signature_axes_used > 0 THEN
+                SQRT(scored.damage_signature_axis_distance_sq)
+        END AS signature_axis_distance,
         CASE
             WHEN scored.damage_signature_axes_used > 0 THEN
                 SQRT(scored.damage_signature_axis_distance_sq
@@ -3074,65 +3275,67 @@ classified AS (
 ),
 ranked AS (
     SELECT
-        c.*,
-        CASE c.candidate_status
-            WHEN 'measured_damage_candidate' THEN 1
-            WHEN 'predicted_damage_candidate' THEN 2
-            WHEN 'device_run_measured_candidate' THEN 3
-            WHEN 'weak_measured_candidate' THEN 4
-            WHEN 'analog_questionable' THEN 5
-            WHEN 'waveform_only_candidate' THEN 5
-            WHEN 'cross_device_screening_only' THEN 6
-            WHEN 'inspect_manually' THEN 6
-            WHEN 'missing_damage_context' THEN 5
-            WHEN 'missing_damage_signature_overlap' THEN 6
-            WHEN 'damage_signature_mismatch' THEN 6
-            ELSE 7
-        END AS candidate_status_priority,
-        CASE
-            WHEN c.candidate_status = 'measured_damage_candidate'
-             AND c.combined_screening_distance <= c.high_confidence_combined_max THEN 'high_screening_confidence'
-            WHEN c.candidate_status = 'measured_damage_candidate'
-                THEN 'medium_screening_confidence'
-            WHEN c.candidate_status = 'predicted_damage_candidate'
-                THEN 'model_supported_screening_confidence'
-            WHEN c.candidate_status = 'device_run_measured_candidate'
-                THEN 'low_device_run_damage_screening_confidence'
-            WHEN c.candidate_status = 'weak_measured_candidate'
-                THEN 'low_measured_damage_screening_confidence'
-            WHEN c.candidate_status = 'analog_questionable'
-                THEN 'analog_questionable_screening_confidence'
-            WHEN c.candidate_status = 'waveform_only_candidate'
-                THEN 'low_waveform_only_confidence'
-            WHEN c.candidate_status = 'cross_device_screening_only'
-                THEN 'cross_device_screening_confidence'
-            ELSE 'blocked_or_manual_review'
-        END AS replacement_confidence,
+        r.*,
         ROW_NUMBER() OVER (
-            PARTITION BY c.target_stress_record_key
+            PARTITION BY r.target_stress_record_key
             ORDER BY
-                CASE c.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
-                CASE c.candidate_status
-                    WHEN 'measured_damage_candidate' THEN 1
-                    WHEN 'predicted_damage_candidate' THEN 2
-                    WHEN 'device_run_measured_candidate' THEN 3
-                    WHEN 'weak_measured_candidate' THEN 4
-                    WHEN 'analog_questionable' THEN 5
-                    WHEN 'waveform_only_candidate' THEN 5
-                    WHEN 'cross_device_screening_only' THEN 6
-                    WHEN 'inspect_manually' THEN 6
-                    WHEN 'missing_damage_context' THEN 5
-                    WHEN 'missing_damage_signature_overlap' THEN 6
-                    WHEN 'damage_signature_mismatch' THEN 6
-                    ELSE 7
-                END,
-                c.candidate_rank_penalty ASC,
-                c.combined_screening_distance ASC NULLS LAST,
-                c.waveform_distance ASC NULLS LAST,
-                c.candidate_source,
-                c.candidate_stress_record_key
+                CASE r.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
+                r.candidate_status_priority,
+                r.candidate_rank_penalty ASC,
+                r.mechanism_preference ASC,
+                r.damage_signature_mask_rank ASC,
+                r.candidate_source,
+                r.candidate_stress_record_key
         ) AS candidate_rank
-    FROM classified c
+    FROM (
+        SELECT
+            c.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY c.target_stress_record_key,
+                             c.damage_signature_axis_mask
+                ORDER BY
+                    c.signature_axis_distance ASC NULLS LAST,
+                    c.best_damage_distance ASC NULLS LAST,
+                    c.waveform_distance ASC NULLS LAST,
+                    c.candidate_rank_penalty ASC,
+                    c.candidate_source,
+                    c.candidate_stress_record_key
+            ) AS damage_signature_mask_rank,
+            CASE c.candidate_status
+                WHEN 'measured_damage_candidate' THEN 1
+                WHEN 'predicted_damage_candidate' THEN 2
+                WHEN 'device_run_measured_candidate' THEN 3
+                WHEN 'weak_measured_candidate' THEN 4
+                WHEN 'analog_questionable' THEN 5
+                WHEN 'waveform_only_candidate' THEN 5
+                WHEN 'cross_device_screening_only' THEN 6
+                WHEN 'inspect_manually' THEN 6
+                WHEN 'missing_damage_context' THEN 5
+                WHEN 'missing_damage_signature_overlap' THEN 6
+                WHEN 'damage_signature_mismatch' THEN 6
+                ELSE 7
+            END AS candidate_status_priority,
+            CASE
+                WHEN c.candidate_status = 'measured_damage_candidate'
+                 AND c.combined_screening_distance <= c.high_confidence_combined_max THEN 'high_screening_confidence'
+                WHEN c.candidate_status = 'measured_damage_candidate'
+                    THEN 'medium_screening_confidence'
+                WHEN c.candidate_status = 'predicted_damage_candidate'
+                    THEN 'model_supported_screening_confidence'
+                WHEN c.candidate_status = 'device_run_measured_candidate'
+                    THEN 'low_device_run_damage_screening_confidence'
+                WHEN c.candidate_status = 'weak_measured_candidate'
+                    THEN 'low_measured_damage_screening_confidence'
+                WHEN c.candidate_status = 'analog_questionable'
+                    THEN 'analog_questionable_screening_confidence'
+                WHEN c.candidate_status = 'waveform_only_candidate'
+                    THEN 'low_waveform_only_confidence'
+                WHEN c.candidate_status = 'cross_device_screening_only'
+                    THEN 'cross_device_screening_confidence'
+                ELSE 'blocked_or_manual_review'
+            END AS replacement_confidence
+        FROM classified c
+    ) r
 ),
 claim_base AS (
     SELECT
@@ -3272,8 +3475,9 @@ decision_ranked AS (
                     ELSE 3
                 END,
                 cs.candidate_status_priority,
-                cs.combined_screening_distance ASC NULLS LAST,
-                cs.waveform_distance ASC NULLS LAST,
+                cs.candidate_rank_penalty ASC,
+                cs.mechanism_preference ASC,
+                cs.damage_signature_mask_rank ASC,
                 cs.candidate_rank
         ) AS decision_safe_rank
     FROM claim_scored cs
@@ -3452,9 +3656,11 @@ SELECT
     duration_log_delta,
     mechanism_match_class,
     mechanism_status_ceiling,
+    mechanism_preference,
     mechanism_rationale,
     path_penalty,
     damage_signature_axes_used,
+    signature_axis_distance,
     damage_signature_distance,
     has_collapse_overlap,
     has_gate_overlap,
@@ -3465,6 +3671,7 @@ SELECT
     damage_signature_coverage_score,
     damage_signature_evidence_class,
     damage_signature_evidence_tier,
+    damage_signature_mask_rank,
     signature_claim_quality,
     coverage_adjusted_damage_signature_distance,
     waveform_distance,

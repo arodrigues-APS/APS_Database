@@ -239,30 +239,29 @@ V2_MECHANISTIC_TABLE_DESCRIPTION = (
     "Read every overlap class and ratio together with "
     "mechanistic_energy_candidate_status and energy_v2_blockers: a numeric "
     "overlap is a retrieval hint, never an equivalence claim. Target severity "
-    "(stored depletion ratio) and candidate severity (bulk terminal ratio) are "
+    "(stored depletion ratio) and candidate failure fraction (own electrical threshold) are "
     "different physical quantities kept in separate columns. Localization "
     "mismatch is a context note, never a blocker."
 )
 
 V2_PARITY_SCATTER_DESCRIPTION = (
     "Energy-equivalence parity: each rank-1 candidate's target severity ratio "
-    "(X = stored depletion energy / its own SEB·SELC critical) vs candidate "
-    "severity ratio (Y = bulk terminal areal energy / Kosier U_crit, log scale). "
-    "Both axes are energy normalized to their OWN failure threshold, so points "
-    "near Y=X are a screening equivalence — comparable multiples of each "
-    "threshold — never a claim the raw joules are equal. Points high above the "
-    "line are candidates that over-deposit relative to the irradiation "
-    "susceptibility. Colored by critical_severity_overlap_class. (For the full "
-    "log-log parity with the diagonal and ±dex bands, see the interactive "
-    "viewer's 'v2 energy equivalence' tab — Superset cannot log the X axis.)"
+    "(X = stored depletion energy / SEB or SELC critical) vs candidate failure "
+    "fraction (Y = terminal energy / measured electrical destruction boundary, "
+    "log scale). Points near Y=X are a screening hint — comparable multiples of "
+    "different thresholds — never a claim the raw joules are equal. Points high "
+    "above the line are candidates that over-stress relative to the irradiation "
+    "susceptibility. Colored by candidate_failure_fraction_overlap_class. (For "
+    "the full log-log parity with diagonal and dex bands, see the interactive "
+    "viewer's v2 energy-equivalence tab — Superset cannot log the X axis.)"
 )
 
 V2_OVERLAP_BAR_DESCRIPTION = (
     "Where we got: rank-1 candidate counts per overlap class, split by match "
     "scope (same-device vs cross-device). The headline equivalence read is the "
     "contrast between axes — terminal-energy overlap is mostly strong while "
-    "critical-severity overlap is mostly far-miss: candidates release comparable "
-    "raw energy but sit at very different multiples of the failure threshold. "
+    "candidate failure-fraction overlap shows whether candidates sit at comparable "
+    "multiples of their own electrical destruction thresholds. "
     "Strong overlap concentrated in same-device is the trustworthy signal."
 )
 
@@ -393,7 +392,7 @@ MARKDOWN_PANELS = [
         "code": (
             "[Open the interactive damage-signature and energy viewer]"
             "(https://rawdata.aps.ee.ethz.ch/data/www/tools/"
-            "phenotype-3d/index.html)"
+            "damage-signature-3d/index.html)"
         ),
         "width": 12,
         "height": 3,
@@ -414,9 +413,9 @@ ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION = (
     "missing-damage-context). Only the cross-device and waveform-only "
     "screening cloud is excluded; see the all-status diagnostic on Method "
     "Diagnostics. Reference thresholds: damage signature mismatch cut-off = 2.50 "
-    "(y); energy out-of-range cut-off |log10(proxy/target energy)| ~= 1.74 dex "
+    "(y); terminal-energy out-of-range cut-off |log10(proxy terminal / target terminal energy)| ~= 1.74 dex "
     "(x; the underlying scoring threshold is 4.0 nats) — points past it are "
-    "energy failures."
+    "terminal-energy failures."
 )
 WAVEFORM_DAMAGE_DESCRIPTION = (
     "Only candidates with measured or predicted post-IV damage evidence "
@@ -430,7 +429,7 @@ ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION = (
     "screening, which is capped at screening confidence by design. "
     "Diagnostic only; use the filtered version on the Candidate Triage tab "
     "for decisions. Reference thresholds: damage signature mismatch = 2.50; "
-    "energy out-of-range |log10| ~= 1.74 dex (scoring threshold 4.0 nats)."
+    "terminal-energy out-of-range |log10(proxy terminal / target terminal energy)| ~= 1.74 dex (scoring threshold 4.0 nats)."
 )
 EVIDENCE_CLASS_DISTANCE_DESCRIPTION = (
     "Damage-signature distance separated by evidence tier so distances are "
@@ -909,7 +908,7 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
         ),
         candidate_v2_filter(
             "NATIVE_FILTER-proxy-v2-overlap", "v2 Severity Overlap",
-            "critical_severity_overlap_class"
+            "candidate_failure_fraction_overlap_class"
         ),
         candidate_v2_filter(
             "NATIVE_FILTER-proxy-v2-source", "v2 Candidate Source",
@@ -1365,13 +1364,14 @@ def build_chart_defs(dataset_ids):
         "signature_claim_quality_v1",
         "target_energy_comparability_class",
         "candidate_energy_comparability_class",
-        "critical_severity_overlap_class",
+        "candidate_failure_fraction_overlap_class",
         "terminal_energy_overlap_class",
         "cumulative_exposure_overlap_class",
+        "timescale_overlap_class",
         "power_rate_overlap_class",
         "localization_mismatch_log10",
         "target_severity_point_ratio",
-        "candidate_severity_point_ratio",
+        "candidate_failure_fraction_point",
         "damage_evidence_class",
         "measured_sign_mismatch_axis_count",
         "prediction_sign_mismatch_axis_count",
@@ -1548,7 +1548,7 @@ def build_chart_defs(dataset_ids):
             scatter_params(
                 "log_energy_delta_dex",
                 "damage_signature_distance",
-                "|log10(selected proxy energy / target irradiation energy)|",
+                "|log10(proxy terminal / target terminal energy)|",
                 "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
@@ -1618,7 +1618,7 @@ def build_chart_defs(dataset_ids):
             scatter_params(
                 "log_energy_delta_dex",
                 "damage_signature_distance",
-                "|log10(selected proxy energy / target irradiation energy)|",
+                "|log10(proxy terminal / target terminal energy)|",
                 "Damage signature mismatch distance",
                 groupby=[
                     "candidate_source",
@@ -1642,7 +1642,7 @@ def build_chart_defs(dataset_ids):
                 "damage_signature_distance",
                 "energy_density_ratio",
                 "Damage signature mismatch distance",
-                "Proxy/target local energy-density ratio (log)",
+                "Proxy terminal-density / irradiation deposited-density (log)",
                 groupby=[
                     "candidate_source",
                     "candidate_status",
@@ -1679,7 +1679,7 @@ def build_chart_defs(dataset_ids):
                 description=DEPLETION_STORED_ENERGY_DESCRIPTION,
             ),
             12,
-            90,
+            130,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -1701,7 +1701,7 @@ def build_chart_defs(dataset_ids):
                 description=DEPLETION_RATIO_DESCRIPTION,
             ),
             6,
-            58,
+            75,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -1723,7 +1723,7 @@ def build_chart_defs(dataset_ids):
                 description=DEPLETION_RATIO_DESCRIPTION,
             ),
             6,
-            58,
+            75,
             TAB_DIAGNOSTICS,
             "context",
         ),
@@ -2039,11 +2039,11 @@ def build_chart_defs(dataset_ids):
             "echarts_timeseries_scatter",
             scatter_params(
                 "target_severity_point_ratio",
-                "candidate_severity_point_ratio",
-                "Target severity ratio (÷ own SEB/SELC critical)",
-                "Candidate severity ratio (÷ Kosier U_crit, log)",
+                "candidate_failure_fraction_point",
+                "Target severity ratio (÷ SEB/SELC critical)",
+                "Candidate failure fraction (÷ own electrical threshold, log)",
                 groupby=[
-                    "critical_severity_overlap_class",
+                    "candidate_failure_fraction_overlap_class",
                     "target_stress_record_key",
                     "candidate_stress_record_key",
                 ],
@@ -2058,12 +2058,12 @@ def build_chart_defs(dataset_ids):
             "candidate_v2",
         ),
         (
-            "Proxy Readiness - v2 Critical-Severity Overlap by Scope",
+            "Proxy Readiness - v2 Failure-Fraction Overlap by Scope",
             dataset_ids["candidates_v2"],
             "echarts_timeseries_bar",
             bar_params(
-                "critical_severity_overlap_class",
-                "Critical-severity overlap class",
+                "candidate_failure_fraction_overlap_class",
+                "Candidate failure-fraction overlap class",
                 "rank-1 candidates",
                 groupby=["match_scope"],
                 filters=[v2_rank1_filter],

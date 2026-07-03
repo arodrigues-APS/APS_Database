@@ -24,6 +24,7 @@ OUTPUT_CSV = OUT_DIR / "proxy_truth_curation_shortlist.csv"
 # Reasons worth a human's first pass: strong automatic evidence with no truth
 # label yet, or a same-device measured-damage anchor not already caught above.
 SHORTLIST_REASONS = (
+    "mild_v1_v2_disagreement_v1_pick_inside_v2_top10",
     "needs_truth_label_for_claim_candidate",
     "same_device_measured_damage_anchor",
 )
@@ -39,7 +40,7 @@ SHORTLIST_COLUMNS = [
     "candidate_source",
     "match_scope",
     "damage_evidence_class",
-    "critical_severity_overlap_class",
+    "candidate_failure_fraction_overlap_class",
     "terminal_energy_overlap_class",
     "measured_sign_mismatch_axis_count",
     "prediction_sign_mismatch_axis_count",

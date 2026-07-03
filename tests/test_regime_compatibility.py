@@ -108,5 +108,42 @@ class RegimeTableConsistencyTests(unittest.TestCase):
             self.assertIn("any", rules, target)
 
 
+class PathPenaltyTests(unittest.TestCase):
+    """The v1-scale path_penalty carried on every regime rule (2026-07-02) so
+    the Phase-C v1 flip is a source swap.  Mapping mirrors the v1 constants:
+    first_order 0.15, secondary 0.25, gate/cumulative analogs 0.50,
+    questionable/mismatch 0.75."""
+
+    _EXPECTED_BY_CLASS = {
+        "first_order_analog": 0.15,
+        "secondary_analog": 0.25,
+        "gate_coupled_analog": 0.50,
+        "cumulative_analog": 0.50,
+        "analog_questionable": 0.75,
+        "mechanism_mismatch": 0.75,
+    }
+
+    def test_every_rule_carries_the_class_mapped_penalty(self):
+        for target, rules in _REGIME_COMPATIBILITY.items():
+            for candidate, rule in rules.items():
+                self.assertIsNotNone(rule.path_penalty, (target, candidate))
+                self.assertEqual(
+                    rule.path_penalty,
+                    self._EXPECTED_BY_CLASS[rule.match_class],
+                    (target, candidate, rule.match_class),
+                )
+
+    def test_first_order_analogs_get_the_lowest_penalty(self):
+        proton = regime_match_class("proton_low_collapse_seb", "sc_low_collapse")
+        heavy = regime_match_class(
+            "heavy_ion_hard_collapse_seb", "avalanche_hard_collapse")
+        self.assertEqual(proton.path_penalty, 0.15)
+        self.assertEqual(heavy.path_penalty, 0.15)
+
+    def test_default_fallback_penalty(self):
+        match = regime_match_class("unseeded_regime", "whatever")
+        self.assertEqual(match.path_penalty, 0.75)
+
+
 if __name__ == "__main__":
     unittest.main()

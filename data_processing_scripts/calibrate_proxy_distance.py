@@ -653,7 +653,8 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
                     t.vds_collapse_fraction AS target_vds_collapse_fraction,
                     t.gate_delta_fraction AS target_gate_delta_fraction,
                     t.stress_duration_s AS target_duration_s,
-                    t.path_type AS target_path_type
+                    t.path_type AS target_path_type,
+                    t.mechanistic_regime AS target_mechanistic_regime
                 FROM truth
                 JOIN (
                     SELECT
@@ -723,6 +724,7 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
                 c.sc_voltage_v AS candidate_sc_voltage_v,
                 c.sc_duration_us AS candidate_sc_duration_us,
                 c.electrical_terminal_energy_j AS candidate_energy_j,
+                c.mechanistic_regime AS candidate_mechanistic_regime,
                 CASE
                     WHEN te.target_match_tier = 'energy_comparable'
                       THEN ABS(LN(c.electrical_terminal_energy_j) - LN(te.target_energy_j))
@@ -748,17 +750,9 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
                      AND te.target_duration_s IS NOT NULL AND te.target_duration_s > 0.0
                       THEN ABS(LN(c.stress_duration_s) - LN(te.target_duration_s))
                 END AS duration_log_delta,
-                CASE
-                    WHEN mech.mechanism_match_class IS NOT NULL THEN mech.path_penalty
-                    WHEN te.target_path_type IS NOT NULL
-                     AND c.path_type IS NOT NULL
-                     AND te.target_path_type = c.path_type THEN settings.same_path_penalty
-                    WHEN te.target_path_type IS NULL OR c.path_type IS NULL THEN settings.path_unknown_penalty
-                    ELSE settings.path_mismatch_penalty
-                END AS path_penalty,
-                CASE
-                    WHEN mech.mechanism_match_class IS NOT NULL THEN mech.status_ceiling
-                END AS mechanism_status_ceiling,
+                COALESCE(mech.path_penalty, 0.75) AS path_penalty,
+                COALESCE(mech.preference, 3) AS mechanism_preference,
+                mech.status_ceiling AS mechanism_status_ceiling,
                 dm.nearest_distance AS damage_distance,
                 dm.match_rank AS damage_match_rank,
                 dm.comparability_status AS damage_comparability_status,
@@ -779,14 +773,16 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
             JOIN candidates c ON c.device_type IS NOT DISTINCT FROM te.device_type
             CROSS JOIN stress_proxy_distance_settings settings
             LEFT JOIN LATERAL (
-                SELECT mc.*
-                FROM stress_mechanism_compatibility mc
-                WHERE UPPER(mc.target_event_type) = UPPER(COALESCE(te.target_event_type, ''))
-                  AND (mc.candidate_source = c.source OR mc.candidate_source = 'any')
-                  AND COALESCE(c.vds_collapse_fraction, 0.0) >= mc.min_candidate_collapse
+                SELECT rc.status_ceiling, rc.preference, rc.path_penalty
+                FROM stress_regime_compatibility rc
+                WHERE rc.target_regime = te.target_mechanistic_regime
+                  AND (
+                        rc.candidate_regime = c.mechanistic_regime
+                     OR rc.candidate_regime = 'any'
+                  )
                 ORDER BY
-                    CASE WHEN mc.candidate_source = c.source THEN 0 ELSE 1 END,
-                    mc.min_candidate_collapse DESC
+                    CASE WHEN rc.candidate_regime = c.mechanistic_regime THEN 0 ELSE 1 END,
+                    rc.preference ASC
                 LIMIT 1
             ) mech ON TRUE
             LEFT JOIN damage_equivalence_match_view dm
@@ -864,12 +860,14 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
         return {
             "damage_signature_axes_used": 0,
             "damage_signature_axis_distance_sq": None,
+            "signature_axis_distance": None,
             "damage_signature_distance": None,
             "waveform_distance": None,
             "combined_screening_distance": None,
         }
 
     damage_signature_axis_distance_sq = sum(axis_terms) / len(axis_terms)
+    signature_axis_distance = math.sqrt(damage_signature_axis_distance_sq)
     path_penalty = finite_float(row.get("path_penalty")) or 0.0
     damage_signature_distance = math.sqrt(damage_signature_axis_distance_sq + path_penalty ** 2)
 
@@ -895,6 +893,7 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
     return {
         "damage_signature_axes_used": len(axis_terms),
         "damage_signature_axis_distance_sq": damage_signature_axis_distance_sq,
+        "signature_axis_distance": signature_axis_distance,
         "damage_signature_distance": damage_signature_distance,
         "waveform_distance": waveform_distance,
         "combined_screening_distance": combined,
@@ -956,7 +955,44 @@ def score_row(row: dict[str, Any], settings: DistanceSettings) -> dict[str, Any]
         "candidate_status": status,
         "candidate_status_priority": STATUS_PRIORITY.get(status, 7),
         "candidate_rank_penalty": rank_penalty,
+        "mechanism_preference": _as_int(row.get("mechanism_preference")) or 3,
     }
+
+
+def ranked_candidate_items(
+    scored_rows: list[tuple[dict[str, Any], dict[str, Any]]]
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Mirror SQL's mask-aware candidate ranking for one target."""
+    by_mask: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+    for row, scored in scored_rows:
+        by_mask[str(scored.get("damage_signature_axis_mask") or "none")].append((row, scored))
+
+    for mask_rows in by_mask.values():
+        mask_rows.sort(
+            key=lambda item: (
+                null_last(item[1].get("signature_axis_distance")),
+                null_last(item[0].get("damage_distance")),
+                null_last(item[1].get("waveform_distance")),
+                item[1].get("candidate_rank_penalty", 0),
+                item[0].get("candidate_source") or "",
+                item[0].get("candidate_stress_record_key") or "",
+            )
+        )
+        for index, (_row, scored) in enumerate(mask_rows, start=1):
+            scored["damage_signature_mask_rank"] = index
+
+    return sorted(
+        scored_rows,
+        key=lambda item: (
+            0 if item[0].get("match_scope", "same_device") == "same_device" else 1,
+            item[1]["candidate_status_priority"],
+            item[1]["candidate_rank_penalty"],
+            item[1]["mechanism_preference"],
+            item[1].get("damage_signature_mask_rank", 10**9),
+            item[0].get("candidate_source") or "",
+            item[0].get("candidate_stress_record_key") or "",
+        ),
+    )
 
 
 def evaluate_config(
@@ -986,16 +1022,7 @@ def evaluate_config(
             if damage_distance is not None and waveform is not None:
                 damage_score_pairs.append((float(waveform), damage_distance))
 
-        scored_rows.sort(
-            key=lambda item: (
-                item[1]["candidate_status_priority"],
-                item[1]["candidate_rank_penalty"],
-                null_last(item[1]["combined_screening_distance"]),
-                null_last(item[1]["waveform_distance"]),
-                item[0].get("candidate_source") or "",
-                item[0].get("candidate_stress_record_key") or "",
-            )
-        )
+        scored_rows = ranked_candidate_items(scored_rows)
         truth_candidates = [
             (index + 1, row, scored)
             for index, (row, scored) in enumerate(scored_rows)

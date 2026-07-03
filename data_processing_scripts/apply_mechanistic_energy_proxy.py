@@ -61,6 +61,7 @@ def _print_rows(title, rows):
 REQUIRED_OBJECTS = (
     "stress_energy_equivalence_settings",
     "stress_energy_equivalence_features",
+    "stress_candidate_destruction_boundary_energy_view",
     "stress_regime_compatibility",
     "stress_proxy_candidate_energy_v2",
     "proxy_truth_labels",
@@ -68,7 +69,13 @@ REQUIRED_OBJECTS = (
 
 
 def required_objects_present(conn) -> list[str]:
-    """Return the names of any required schema-028 objects that are missing."""
+    """Return the names of any required mechanistic-proxy objects that are missing.
+
+    Since 2026-07-02 the settings + regime tables are created by schema/025
+    (shared v1/v2 prior layer); the feature/candidate views and truth-label
+    table remain schema/028's.  The apply order (025 then 028) is unchanged,
+    so one missing-object list still covers both.
+    """
     with conn.cursor() as cur:
         missing = []
         for name in REQUIRED_OBJECTS:
@@ -82,9 +89,9 @@ def validate(conn) -> bool:
     missing = required_objects_present(conn)
     if missing:
         print(
-            "\nschema 028 not applied (missing: "
+            "\nmechanistic energy-proxy schema not applied (missing: "
             + ", ".join(missing)
-            + ").\nRun without --validate-only to apply it, e.g.\n"
+            + ").\nRun without --validate-only to apply 025+028, e.g.\n"
             "    python3 data_processing_scripts/apply_mechanistic_energy_proxy.py"
         )
         return False
@@ -234,12 +241,10 @@ def validate(conn) -> bool:
         )
         _print_rows("v1 -> v2 rank-1 source shifts:", cur.fetchall())
 
-        # Phase 5: severity band + point-ratio columns are exposed and coherent.
-        # The nominal point ratio must lie within its [low, high] band (bands are
-        # the point divided/multiplied by EXP(0.5*sigma)); a violation means the
-        # SEB/SELC CASE branch for the band and the point ratio disagree, i.e. an
-        # axis mismatch.  Referencing the columns also fails loudly if 028 was
-        # not re-applied with the Phase-5 extension.
+        # Phase A/E: target severity and candidate own-threshold fractions are
+        # exposed and coherent.  The target point ratio must lie inside the
+        # widened Kosier band; the candidate point must lie inside its measured
+        # electrical destruction-boundary fraction band whenever that band exists.
         cur.execute(
             """
             SELECT
@@ -252,21 +257,44 @@ def validate(conn) -> bool:
                                BETWEEN target_severity_low AND target_severity_high)
                 ) AS target_point_outside_band,
                 COUNT(*) FILTER (
-                    WHERE candidate_severity_point_ratio IS NOT NULL
-                      AND candidate_severity_low IS NOT NULL
-                      AND candidate_severity_high IS NOT NULL
-                      AND NOT (candidate_severity_point_ratio
-                               BETWEEN candidate_severity_low AND candidate_severity_high)
-                ) AS candidate_point_outside_band
+                    WHERE candidate_failure_fraction_point IS NOT NULL
+                      AND candidate_failure_fraction_low IS NOT NULL
+                      AND candidate_failure_fraction_high IS NOT NULL
+                      AND NOT (candidate_failure_fraction_point
+                               BETWEEN candidate_failure_fraction_low
+                                   AND candidate_failure_fraction_high)
+                ) AS candidate_point_outside_band,
+                COUNT(*) FILTER (
+                    WHERE candidate_failure_fraction_overlap_class = 'missing_interval'
+                      AND NOT (energy_v2_blockers @> ARRAY[
+                          'candidate_failure_fraction_missing'
+                      ]::text[])
+                ) AS missing_fraction_without_blocker
             FROM stress_proxy_candidate_energy_v2
             WHERE mechanistic_energy_candidate_rank = 1
             """
         )
         band = cur.fetchone()
-        _print_rows("Phase 5 severity band/point coherence (both must be 0):", [band])
-        if band["target_point_outside_band"] or band["candidate_point_outside_band"]:
+        _print_rows("Own-threshold fraction band coherence (all must be 0):", [band])
+        if (band["target_point_outside_band"]
+                or band["candidate_point_outside_band"]
+                or band["missing_fraction_without_blocker"]):
             ok = False
-            print("  FAIL: a severity point ratio falls outside its band (axis mismatch)")
+            print("  FAIL: own-threshold severity columns or blockers are incoherent")
+
+        cur.execute(
+            """
+            SELECT
+                boundary_scope,
+                COUNT(*) AS cells,
+                COUNT(*) FILTER (WHERE boundary_usable) AS usable_cells,
+                COUNT(*) FILTER (WHERE boundary_inverted) AS inverted_cells
+            FROM stress_candidate_destruction_boundary_energy_view
+            GROUP BY boundary_scope
+            ORDER BY boundary_scope
+            """
+        )
+        _print_rows("Candidate destruction-boundary cells:", cur.fetchall())
 
         # Phase 4: curated truth-label coverage.  These are the human-labeled
         # pairs the v2 calibrator scores against.  An empty table is the

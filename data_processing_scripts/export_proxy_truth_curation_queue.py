@@ -59,7 +59,7 @@ QUEUE_COLUMNS = [
     "truth_review_date",
     "signature_claim_quality_v1",
     "damage_evidence_class",
-    "critical_severity_overlap_class",
+    "candidate_failure_fraction_overlap_class",
     "terminal_energy_overlap_class",
     "measured_sign_mismatch_axis_count",
     "prediction_sign_mismatch_axis_count",
@@ -77,23 +77,41 @@ WITH pool AS (
     SELECT
         v2.*,
         CASE
+            WHEN v2.truth_label IS NULL
+             AND EXISTS (
+                SELECT 1
+                FROM stress_proxy_candidate_energy_v2 v1_pick
+                WHERE v1_pick.target_stress_record_key = v2.target_stress_record_key
+                  AND v1_pick.candidate_rank_v1 = 1
+                  AND v1_pick.mechanistic_energy_candidate_rank BETWEEN 2 AND 10
+             )
+                THEN 1
             WHEN v2.proxy_claim_status IN ('validation_candidate', 'curation_candidate')
              AND v2.truth_label IS NULL
-                THEN 1
-            WHEN v2.truth_validation_status = 'curated_uncertain'
                 THEN 2
-            WHEN v2.proxy_claim_status = 'validated'
+            WHEN v2.truth_validation_status = 'curated_uncertain'
                 THEN 3
-            WHEN v2.proxy_claim_status = 'blocked'
+            WHEN v2.proxy_claim_status = 'validated'
                 THEN 4
+            WHEN v2.proxy_claim_status = 'blocked'
+                THEN 5
             WHEN v2.match_scope = 'same_device'
              AND v2.damage_evidence_class = 'measured_damage'
-                THEN 5
-            WHEN v2.mechanistic_energy_candidate_rank = 1
                 THEN 6
+            WHEN v2.mechanistic_energy_candidate_rank = 1
+                THEN 7
             ELSE 9
         END AS curation_priority,
         CASE
+            WHEN v2.truth_label IS NULL
+             AND EXISTS (
+                SELECT 1
+                FROM stress_proxy_candidate_energy_v2 v1_pick
+                WHERE v1_pick.target_stress_record_key = v2.target_stress_record_key
+                  AND v1_pick.candidate_rank_v1 = 1
+                  AND v1_pick.mechanistic_energy_candidate_rank BETWEEN 2 AND 10
+             )
+                THEN 'mild_v1_v2_disagreement_v1_pick_inside_v2_top10'
             WHEN v2.proxy_claim_status IN ('validation_candidate', 'curation_candidate')
              AND v2.truth_label IS NULL
                 THEN 'needs_truth_label_for_claim_candidate'
@@ -154,7 +172,7 @@ SELECT
     truth_review_date,
     signature_claim_quality_v1,
     damage_evidence_class,
-    critical_severity_overlap_class,
+    candidate_failure_fraction_overlap_class,
     terminal_energy_overlap_class,
     measured_sign_mismatch_axis_count,
     prediction_sign_mismatch_axis_count,
