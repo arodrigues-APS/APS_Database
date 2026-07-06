@@ -1,10 +1,7 @@
 import sys
 import types
 import unittest
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "data_processing_scripts"))
 sys.modules.setdefault("psycopg2", types.SimpleNamespace(connect=None))
 
 from data_processing_scripts import seed_irradiation_campaigns as seed

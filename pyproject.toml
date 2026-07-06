@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aps-database"
+version = "0.1.0"
+description = "APS cross-technology damage-equivalence database: ingestion pipeline, mechanistic proxy engine, Superset dashboard builders, and lab data server"
+readme = "Readme.md"
+requires-python = ">=3.10"
+# Shared by every entry point (server, ingestion, dashboards).
+dependencies = [
+    "psycopg2-binary",
+]
+
+[project.optional-dependencies]
+# Flask/uwsgi lab data server (server.py). Pins reproduce the frozen state
+# the deployed venv was built from — bump deliberately, not incidentally.
+server = [
+    "Flask==2.2.2",
+    "Werkzeug==2.2.2",
+    "Jinja2==3.1.2",
+    "MarkupSafe==2.1.1",
+    "itsdangerous==2.1.2",
+    "click==8.1.3",
+    "Flask-Markdown==0.3",
+    "Flask-WTF==1.0.1",
+    "WTForms==3.0.1",
+    "configobj==5.0.6",
+    "Markdown==3.4.1",
+]
+# Nightly ingestion / enrichment / viewer and dashboard builders
+# (the module set scripts/nightly_update_and_ingest.sh preflight-checks,
+# minus ML).
+pipeline = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "h5py",
+    "openpyxl",
+    "xlrd",
+    "luaparser",
+    "sqlalchemy",
+    "matplotlib>=3.7",
+    "requests",
+]
+# ML training/validation (post-IV physical prediction, SC↔irradiation
+# equivalence).
+ml = [
+    "scikit-learn>=1.3",
+    "joblib",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools]
+# Explicit: only the pipeline package. Root modules (server.py, wsgi.py,
+# data_scraping.py) are the Flask app, deployed as files, not a library.
+packages = ["data_processing_scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["data_processing_scripts/one_time_scripts"]
