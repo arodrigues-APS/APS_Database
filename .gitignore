@@ -10,16 +10,17 @@
 *.xlsx
 data/
 
-# Local reference library
+# Personal notes and reference library (deliberately untracked)
 docs/
 
-# Generated analysis outputs
-# Existing tracked files under out/ stay tracked.
+# Generated analysis outputs (fully untracked; artifacts are rebuilt by the pipeline)
 out/
 
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
 
 # Virtual environments
 venv/
