@@ -36,6 +36,25 @@ that own those files should apply them directly, or call
 `common.apply_schema(conn, include_pipeline={"022_irradiation_single_events.sql"})`
 for a specific file.
 
+## Ledger
+
+Every file `apply_schema` executes is recorded in the `schema_migrations`
+table in the same transaction: one row per (filename, content version) with
+a sha256 checksum; re-applying unchanged SQL only bumps `last_applied_at`,
+while edited SQL gets a new row.  This makes "was 025 applied to this
+database, and which version?" answerable from the database itself.
+
+- Status report (per file: `in_sync` / `edited_since_apply` /
+  `never_recorded` / `missing_file`), and optional apply:
+
+      python -m data_processing_scripts.common            # status only
+      python -m data_processing_scripts.common --apply
+      python -m data_processing_scripts.common --apply --include-pipeline            # all pipeline SQL
+      python -m data_processing_scripts.common --apply --include-pipeline 025_x.sql  # selected
+
+- Applying SQL directly via `psql` bypasses the ledger; prefer the command
+  above, or re-run it after a manual psql apply to record the state.
+
 ## Phase mapping
 
 | Table | Phase | Retires |

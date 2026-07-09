@@ -17,12 +17,60 @@ from pathlib import Path
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
 PIPELINE_SCHEMA_MARKER = "apply_schema: pipeline-owned"
 
+# Ledger of what apply_schema actually executed, and when.  One row per
+# (filename, content version): a re-apply of unchanged SQL only touches
+# last_applied_at; edited SQL gets a fresh row, so the row history answers
+# "which version of 025 ran on this database, and when".  Applies made
+# directly via psql bypass the ledger — prefer `python -m` apply or record
+# manually after a psql apply.
+SCHEMA_LEDGER_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id SERIAL PRIMARY KEY,
+    filename TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    applied_by TEXT NOT NULL DEFAULT current_user,
+    first_applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_schema_migrations_filename
+    ON schema_migrations (filename, id DESC);
+"""
+
+SCHEMA_LEDGER_SELECT_SQL = (
+    "SELECT id, checksum FROM schema_migrations"
+    " WHERE filename = %s ORDER BY id DESC LIMIT 1"
+)
+SCHEMA_LEDGER_INSERT_SQL = (
+    "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)"
+)
+SCHEMA_LEDGER_TOUCH_SQL = (
+    "UPDATE schema_migrations SET last_applied_at = now() WHERE id = %s"
+)
+SCHEMA_LEDGER_STATUS_SQL = (
+    "SELECT DISTINCT ON (filename) filename, checksum, last_applied_at"
+    " FROM schema_migrations ORDER BY filename, id DESC"
+)
+
 
 def _is_pipeline_owned(sql_text):
     return PIPELINE_SCHEMA_MARKER in sql_text[:500]
 
 
-def apply_schema(conn, include_pipeline=False):
+def schema_checksum(sql_text):
+    return hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
+
+
+def _record_schema_apply(cur, filename, sql_text):
+    checksum = schema_checksum(sql_text)
+    cur.execute(SCHEMA_LEDGER_SELECT_SQL, (filename,))
+    row = cur.fetchone()
+    if row is not None and row[1] == checksum:
+        cur.execute(SCHEMA_LEDGER_TOUCH_SQL, (row[0],))
+    else:
+        cur.execute(SCHEMA_LEDGER_INSERT_SQL, (filename, checksum))
+
+
+def apply_schema(conn, include_pipeline=False, schema_dir=None):
     """
     Apply schema/*.sql in lexicographic order.
 
@@ -33,8 +81,12 @@ def apply_schema(conn, include_pipeline=False):
     depend on ingestion-populated tables and are applied by their owning
     pipeline scripts.  Pass True to include every pipeline-owned file, or
     pass an iterable of filenames to include only selected pipeline SQL.
+
+    Every executed file is recorded in the schema_migrations ledger in the
+    same transaction, so a file is applied if and only if it is recorded.
     """
-    if not SCHEMA_DIR.is_dir():
+    schema_dir = Path(schema_dir) if schema_dir is not None else SCHEMA_DIR
+    if not schema_dir.is_dir():
         return
     if include_pipeline is True:
         pipeline_files = None
@@ -46,7 +98,8 @@ def apply_schema(conn, include_pipeline=False):
         pipeline_files = set()
     cur = conn.cursor()
     try:
-        for sql_path in sorted(SCHEMA_DIR.glob("*.sql")):
+        cur.execute(SCHEMA_LEDGER_TABLE_SQL)
+        for sql_path in sorted(schema_dir.glob("*.sql")):
             sql_text = sql_path.read_text()
             if _is_pipeline_owned(sql_text):
                 if include_pipeline is True:
@@ -54,12 +107,52 @@ def apply_schema(conn, include_pipeline=False):
                 elif sql_path.name not in pipeline_files:
                     continue
             cur.execute(sql_text)
+            _record_schema_apply(cur, sql_path.name, sql_text)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         cur.close()
+
+
+def schema_status(conn, schema_dir=None):
+    """
+    Compare schema/*.sql on disk against the schema_migrations ledger.
+
+    Returns a list of (filename, state, last_applied_at) where state is one
+    of: in_sync (latest recorded checksum matches disk), edited_since_apply
+    (file changed after its last recorded apply), never_recorded (no ledger
+    row — never applied through apply_schema on this database), or
+    missing_file (ledger row exists but the file is gone from schema/).
+    """
+    schema_dir = Path(schema_dir) if schema_dir is not None else SCHEMA_DIR
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute(SCHEMA_LEDGER_STATUS_SQL)
+            recorded = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        except Exception:
+            conn.rollback()
+            recorded = {}
+    finally:
+        cur.close()
+    results = []
+    on_disk = sorted(schema_dir.glob("*.sql")) if schema_dir.is_dir() else []
+    for sql_path in on_disk:
+        name = sql_path.name
+        if name not in recorded:
+            results.append((name, "never_recorded", None))
+            continue
+        checksum, applied_at = recorded[name]
+        if schema_checksum(sql_path.read_text()) == checksum:
+            results.append((name, "in_sync", applied_at))
+        else:
+            results.append((name, "edited_since_apply", applied_at))
+    disk_names = {p.name for p in on_disk}
+    for name in sorted(set(recorded) - disk_names):
+        results.append((name, "missing_file", recorded[name][1]))
+    return results
 
 
 # ── Device Library ──────────────────────────────────────────────────────────
@@ -497,3 +590,51 @@ def refine_category_by_sweep(category, stats):
                                 f'Id_min={id_min:.3g} A (reverse sweep)')
 
     return category, ''
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+def _cli(argv=None):
+    """
+    Schema utility CLI.
+
+    Default action prints the ledger status of every schema/*.sql file.
+    --apply runs apply_schema (core files only unless --include-pipeline).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="APS schema ledger status / apply utility"
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="apply schema files (default: only report ledger status)",
+    )
+    parser.add_argument(
+        "--include-pipeline", nargs="*", metavar="FILE",
+        help="with --apply: include pipeline-owned SQL; no names means all",
+    )
+    args = parser.parse_args(argv)
+
+    from db_config import get_connection
+
+    conn = get_connection()
+    try:
+        if args.apply:
+            if args.include_pipeline is None:
+                include = False
+            elif len(args.include_pipeline) == 0:
+                include = True
+            else:
+                include = set(args.include_pipeline)
+            apply_schema(conn, include_pipeline=include)
+            print("apply_schema completed (recorded in schema_migrations).")
+        for name, state, applied_at in schema_status(conn):
+            stamp = applied_at.isoformat() if applied_at is not None else "-"
+            print(f"{name:45s} {state:20s} last_applied={stamp}")
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    _cli()
