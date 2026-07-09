@@ -16,6 +16,7 @@ from data_processing_scripts.create_interactive_damage_signature_viewer import (
     boundary_coverage_payload,
     concordance_3d_plot_payload,
     concordance_enrichment_ecdf_payload,
+    conflict_browser_payload,
     curation_queue_payload,
     dex_series,
     energy_balance_plot_payload,
@@ -667,13 +668,20 @@ class NewViewerSurfacePayloadTests(unittest.TestCase):
         self.assertIn("Kosier-context severity: far_miss", payload["note"])
 
     def test_overview_reports_ranker_state_without_hardcoded_numbers(self):
+        delta = pd.DataFrame([
+            {"target_stress_record_key": "target-a", "dssig_pool_size": 100, "decision_safe_rank": 1},
+            {"target_stress_record_key": "target-a", "dssig_pool_size": 100, "decision_safe_rank": None},
+            {"target_stress_record_key": "target-b", "dssig_pool_size": 200, "decision_safe_rank": None},
+        ])
         payload = overview_payload(
-            pd.DataFrame(), pd.DataFrame([{"decision_safe_rank": 1}]),
+            pd.DataFrame(), delta,
             self._v2_frame(), self._concordance_frame(), pd.DataFrame(),
         )
         self.assertEqual(payload["traces"][0]["type"], "bar")
         self.assertIn("v2 rank-1 targets: 2", payload["note"])
         self.assertIn("own-boundary coverage: 50.0%", payload["note"])
+        self.assertIn("ranked-pool denominator: delta-export target universe", payload["note"])
+        self.assertEqual(payload["traces"][0]["x"][0], 300)
 
     def test_agreement_matrix_uses_payload_definition(self):
         payload = agreement_matrix_payload(self._concordance_frame())
@@ -691,6 +699,34 @@ class NewViewerSurfacePayloadTests(unittest.TestCase):
         payload = reciprocal_enrichment_payload(self._concordance_frame())
         self.assertEqual(payload["traces"], [])
         self.assertIn("No enrichment columns", payload["note"])
+
+    def test_reciprocal_enrichment_normalizes_by_exported_top_n(self):
+        rows = self._concordance_frame()
+        rows = pd.concat([
+            rows,
+            pd.DataFrame([_conc_row("target-b", "cand-other-b", v1_rank=9, v2_rank=4, csr=3.0, ds=0.4, led=0.5)]),
+        ], ignore_index=True)
+        rows["v2_pick_dssig_percentile"] = [5.0, 20.0, 20.0, 20.0]
+        payload = reciprocal_enrichment_payload(rows)
+        self.assertEqual(payload["traces"][0]["y"], [100.0, 50.0])
+        self.assertLessEqual(max(payload["traces"][0]["y"]), 100.0)
+        self.assertIn("2 exported concordance top-N targets", payload["note"])
+
+    def test_conflict_browser_note_reports_truncation(self):
+        rows = self._concordance_frame()
+        rows.loc[rows["target_stress_record_key"].eq("target-b"), "source_conflict"] = True
+        payload = conflict_browser_payload(rows)
+        self.assertIn("Showing", payload["note"])
+        self.assertIn("source conflicts", payload["note"])
+
+    def test_curation_queue_elevates_conflict_targets(self):
+        v2 = self._v2_frame()
+        concordance = self._concordance_frame()
+        concordance.loc[concordance["target_stress_record_key"].eq("target-b"), "c2m0080120d_avalanche_vs_sc_conflict"] = True
+        payload = curation_queue_payload(v2, concordance)
+        table = payload["traces"][0]
+        self.assertEqual(table["cells"]["values"][0][0], "target-b")
+        self.assertEqual(table["cells"]["values"][-1][0], "C2M0080120D")
 
     def test_v3_agreement_bar_counts_matches(self):
         v3 = pd.DataFrame([

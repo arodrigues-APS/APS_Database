@@ -12,6 +12,8 @@ SUPERSET_HEALTH_URL="http://localhost:8088/health"
 BACKUP_RETENTION_DAYS="${APS_BACKUP_RETENTION_DAYS:-14}"
 LOG_RETENTION_DAYS="${APS_LOG_RETENTION_DAYS:-30}"
 DOCKER_IMAGE_PRUNE="${APS_DOCKER_IMAGE_PRUNE:-1}"
+WEB_TOOLS_DIR="${APS_WEB_TOOLS_DIR:-/data/www/tools}"
+DAMAGE_SIGNATURE_VIEWER_HTML="${INGEST_DIR}/out/avalanche_irrad_pilot/damage_signature_3d_interactive.html"
 SOURCE_STATUS_PATHS=(data_processing_scripts schema scripts superset)
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -169,6 +171,39 @@ run_py_optional() {
   fi
 }
 
+publish_damage_signature_viewer_optional() {
+  local src="${DAMAGE_SIGNATURE_VIEWER_HTML}"
+  local dest_dir="${WEB_TOOLS_DIR}/damage-signature-3d"
+  local legacy_dir="${WEB_TOOLS_DIR}/phenotype-3d"
+
+  if [[ ! -s "${src}" ]]; then
+    log "WARNING: damage-signature viewer artifact missing or empty: ${src}"
+    return 1
+  fi
+
+  log "Publishing damage-signature viewer to ${dest_dir}/index.html"
+  mkdir -p "${dest_dir}"
+  cp "${src}" "${dest_dir}/index.html.tmp"
+  chmod 0644 "${dest_dir}/index.html.tmp"
+  mv "${dest_dir}/index.html.tmp" "${dest_dir}/index.html"
+
+  if [[ -d "${legacy_dir}" || -w "${WEB_TOOLS_DIR}" ]]; then
+    mkdir -p "${legacy_dir}"
+    cat > "${legacy_dir}/index.html.tmp" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/tools/damage-signature-3d/">
+<title>Redirecting to damage-signature viewer</title>
+<link rel="canonical" href="/tools/damage-signature-3d/">
+<p>This viewer moved to <a href="/tools/damage-signature-3d/">/tools/damage-signature-3d/</a>.</p>
+HTML
+    chmod 0644 "${legacy_dir}/index.html.tmp"
+    mv "${legacy_dir}/index.html.tmp" "${legacy_dir}/index.html"
+  else
+    log "WARNING: cannot update legacy phenotype viewer directory: ${legacy_dir}"
+  fi
+}
+
 preflight_irradiation_seed_source() {
   local head
   local dirty
@@ -282,6 +317,7 @@ run_py_optional export_proxy_candidate_energy_v2_csv.py || true
 run_py_optional export_proxy_method_concordance_csv.py || true
 run_py_optional export_proxy_candidate_combined_v3_csv.py || true
 run_py_optional create_interactive_damage_signature_viewer.py || true
+publish_damage_signature_viewer_optional || true
 run_py create_sc_irrad_dashboard.py
 run_py create_sc_irrad_prediction_dashboard.py
 

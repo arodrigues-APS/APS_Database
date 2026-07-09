@@ -711,9 +711,9 @@ def delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
         "Proxy file: %{customdata[8]}<br>"
         "Scope / rank: %{customdata[9]} / %{customdata[10]}<br>"
         "Status: %{customdata[11]}<br>"
-        "Claim status: %{customdata[31]}<br>"
-        "Claim basis: %{customdata[32]}<br>"
-        "Decision-safe rank: %{customdata[34]}<br>"
+        "Claim status: %{customdata[33]}<br>"
+        "Claim basis: %{customdata[34]}<br>"
+        "Decision-safe rank: %{customdata[36]}<br>"
         "<br>Collapse delta: %{x:.5g}<br>"
         "Gate delta: %{customdata[12]}<br>"
         "Normalized-Vds delta: %{customdata[13]}<br>"
@@ -722,21 +722,23 @@ def delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
         "Target deposited (ionizing): %{customdata[16]}<br>"
         "Target terminal energy: %{customdata[17]} (%{customdata[18]})<br>"
         "Proxy terminal energy: %{customdata[19]} (%{customdata[20]})<br>"
-        "Energy comparability: %{customdata[37]} / %{customdata[38]}<br>"
+        "Energy comparability: %{customdata[39]} / %{customdata[40]}<br>"
         "Proxy terminal-density / irradiation deposited-density: %{customdata[21]}<br>"
         "Terminal-energy mismatch (dex): %{customdata[22]}<br>"
-        "Damage-signature distance: %{customdata[23]}<br>"
+        "Signature-axis distance: %{customdata[23]}<br>"
+        "Waveform-only distance: %{customdata[24]}<br>"
+        "Legacy damage-signature distance: %{customdata[25]}<br>"
         "<br><b>evidence coverage</b><br>"
-        "Evidence class: %{customdata[26]}<br>"
-        "Signature quality: %{customdata[33]}<br>"
-        "Available axes: %{customdata[27]}<br>"
-        "Missing axes: %{customdata[28]}<br>"
-        "Coverage score: %{customdata[29]}<br>"
-        "Coverage-adjusted distance (diag.): %{customdata[30]}<br>"
-        "Mechanism match: %{customdata[24]}<br>"
-        "Candidate blockers: %{customdata[25]}<br>"
-        "Claim blockers: %{customdata[35]}<br>"
-        "Claim summary: %{customdata[36]}"
+        "Evidence class: %{customdata[28]}<br>"
+        "Signature quality: %{customdata[35]}<br>"
+        "Available axes: %{customdata[29]}<br>"
+        "Missing axes: %{customdata[30]}<br>"
+        "Coverage score: %{customdata[31]}<br>"
+        "Coverage-adjusted distance (diag.): %{customdata[32]}<br>"
+        "Mechanism match: %{customdata[26]}<br>"
+        "Candidate blockers: %{customdata[27]}<br>"
+        "Claim blockers: %{customdata[37]}<br>"
+        "Claim summary: %{customdata[38]}"
         "<extra></extra>"
     )
 
@@ -805,6 +807,9 @@ def delta_plot_payload(comparisons: pd.DataFrame) -> dict[str, Any]:
                     cell(row, "candidate_energy_basis"),
                     cell(row, "energy_density_ratio", display_ratio),
                     cell(row, "log_energy_delta_dex", display_ratio),
+                    cell(row, "signature_axis_distance", display_ratio)
+                    or cell(row, "damage_signature_distance", display_ratio),
+                    cell(row, "waveform_only_distance", display_ratio),
                     cell(row, "damage_signature_distance", display_ratio),
                     cell(row, "mechanism_match_class"),
                     cell(row, "candidate_blockers"),
@@ -1849,7 +1854,7 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     descriptor*, never an equivalence claim, so every hover carries the v2
     status and blockers next to the numbers (Phase-5 acceptance).
     """
-    base_title = "v2 target severity vs candidate failure fraction (rank-1 candidate per target)"
+    base_title = "v2 target severity vs candidate severity proxy (rank-1 candidate per target)"
     empty_note = (
         "No v2 rank-1 candidate rows with severity bands are available. Export "
         "stress_proxy_candidate_energy_v2 with "
@@ -2100,7 +2105,7 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     partial overlap-class boundaries; the x=1 / y=1 crosshairs mark each side's
     critical threshold.
     """
-    base_title = "v2 target severity vs candidate failure fraction (rank-1; log-log parity)"
+    base_title = "v2 target severity vs candidate severity proxy (rank-1; log-log parity)"
     empty_note = (
         "No v2 rank-1 rows with positive target and candidate failure fractions. "
         "Export stress_proxy_candidate_energy_v2 with "
@@ -2241,7 +2246,7 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "xaxis": {"title": {"text": "Target severity ratio "
                             "(stored depletion ÷ its SEB·SELC critical; log)"},
                   "type": "log", "range": x_range_all, "gridcolor": "#d8dee4"},
-        "yaxis": {"title": {"text": "Candidate severity ratio "
+        "yaxis": {"title": {"text": "Candidate severity proxy "
                             "(own threshold when available; Kosier fallback; log)"},
                   "type": "log", "range": y_range_all, "gridcolor": "#d8dee4"},
         "shapes": shapes,
@@ -2496,6 +2501,9 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
 
     for _tkey, group in df.groupby("target_stress_record_key"):
         recs = group.to_dict("records")
+        exported_v2_ranks = [finite_number(r.get("v2_rank")) for r in recs]
+        exported_v2_ranks = [r for r in exported_v2_ranks if r is not None and r > 0]
+        exported_top_n = int(max(exported_v2_ranks)) if exported_v2_ranks else len(recs)
         v2_pick = next((r for r in recs if r.get("v2_rank") == 1), None)
         if v2_pick is None:
             continue
@@ -2769,8 +2777,23 @@ def overview_payload(
     conc_rank1 = _rank1(concordance_rows, "v2_rank")
 
     pool_total = None
-    if not conc_rank1.empty and "dssig_pool_size" in conc_rank1.columns:
+    pool_source = "not exported"
+    if delta_rows is not None and not delta_rows.empty and "dssig_pool_size" in delta_rows.columns:
+        pool_sizes = delta_rows.copy()
+        pool_sizes["_dssig_pool_size"] = numeric(pool_sizes["dssig_pool_size"])
+        pool_sizes = pool_sizes.dropna(subset=["_dssig_pool_size"])
+        if "target_stress_record_key" in pool_sizes.columns:
+            pool_total = pool_sizes.groupby("target_stress_record_key")["_dssig_pool_size"].max().sum()
+            pool_source = "delta-export target universe"
+        elif "target_record_key" in pool_sizes.columns:
+            pool_total = pool_sizes.groupby("target_record_key")["_dssig_pool_size"].max().sum()
+            pool_source = "delta-export target universe"
+        else:
+            pool_total = pool_sizes["_dssig_pool_size"].sum()
+            pool_source = "delta export rows"
+    elif not conc_rank1.empty and "dssig_pool_size" in conc_rank1.columns:
         pool_total = numeric(conc_rank1["dssig_pool_size"]).dropna().sum()
+        pool_source = "v2-covered concordance targets"
     top_export = len(delta_rows) if delta_rows is not None and not delta_rows.empty else len(concordance_rows)
 
     def decision_safe_count(frame: pd.DataFrame) -> tuple[int, int]:
@@ -2838,6 +2861,7 @@ def overview_payload(
         f"v3 rank-1 targets exported: {len(v3_rank1):,}",
         f"own-boundary coverage: {_pct(boundary_usable, len(v2_rank1))}",
         f"curated truth labels on v2 rank-1: {truth_curated:,}",
+        f"ranked-pool denominator: {pool_source}",
         "terminal overlap: " + ", ".join(f"{k}={v}" for k, v in terminal_counts.items()) if terminal_counts else "terminal overlap: not exported",
         "Kosier-context severity: " + ", ".join(f"{k}={v}" for k, v in kosier_counts.items()) if kosier_counts else "Kosier-context severity: not exported",
         "rank-1 source mix: " + ", ".join(f"{k}={v}" for k, v in source_counts.items()) if source_counts else "rank-1 source mix: not exported",
@@ -2964,6 +2988,9 @@ def _concordance_rank1_records(rows: pd.DataFrame) -> list[dict[str, Any]]:
     records = []
     for target, group in df.groupby("target_stress_record_key"):
         recs = group.to_dict("records")
+        exported_v2_ranks = [finite_number(r.get("v2_rank")) for r in recs]
+        exported_v2_ranks = [r for r in exported_v2_ranks if r is not None and r > 0]
+        exported_top_n = int(max(exported_v2_ranks)) if exported_v2_ranks else len(recs)
         v2_pick = next((r for r in recs if r.get("v2_rank") == 1), None)
         if v2_pick is None:
             continue
@@ -2974,7 +3001,7 @@ def _concordance_rank1_records(rows: pd.DataFrame) -> list[dict[str, Any]]:
             category = "mild_v1_in_v2_top10"
         else:
             category = "demoted_v1_outside_v2_top10"
-        records.append({"target": target, "v2": v2_pick, "v1": v1_pick, "category": category})
+        records.append({"target": target, "v2": v2_pick, "v1": v1_pick, "category": category, "exported_top_n": exported_top_n})
     return records
 
 
@@ -3024,9 +3051,11 @@ def conflict_browser_payload(rows: pd.DataFrame) -> dict[str, Any]:
             filtered.append(r)
     filtered.sort(key=lambda r: (
         0 if _truthy_flag(r["v2"].get("c2m0080120d_avalanche_vs_sc_conflict")) else 1,
+        0 if _truthy_flag(r["v2"].get("source_conflict")) else 1,
         str(r["v2"].get("device_type") or ""),
         str(r["target"]),
     ))
+    total_filtered = len(filtered)
     filtered = filtered[:160]
     cols = {
         "Target": [], "Device": [], "Category": [], "v2 source": [], "v1 source": [],
@@ -3045,8 +3074,11 @@ def conflict_browser_payload(rows: pd.DataFrame) -> dict[str, Any]:
         cols["Truth"].append(_v2_clean(v2.get("truth_validation_status")))
         cols["Blockers"].append(_v2_clean(v2.get("energy_v2_blockers")) or "(none)")
         cols["Conflict"].append(_v2_clean(v2.get("c2m0080120d_avalanche_vs_sc_conflict")) or _v2_clean(v2.get("source_conflict")))
-    return _table_payload(title, list(cols.items()),
-                          "Rows where the v1 signature-best and v2 energy-best methods disagree or flag a source conflict. C2M0080120D avalanche-vs-SC conflicts sort first.",
+    note = (
+        f"Showing {len(filtered)} of {total_filtered} rows where the v1 signature-best and v2 energy-best methods disagree "
+        "or flag a source conflict. C2M0080120D avalanche-vs-SC conflicts sort first, then other source conflicts."
+    )
+    return _table_payload(title, list(cols.items()), note,
                           height=max(620, 30 * len(filtered) + 150))
 
 
@@ -3060,7 +3092,27 @@ def curation_queue_payload(v2_rows: pd.DataFrame, concordance_rows: pd.DataFrame
     queue = rank1[status.isin(["validation_candidate", "curation_candidate"]) | truth.eq("no_curated_truth")].copy()
     if queue.empty:
         return _empty_payload(title, "No rank-1 rows currently require curation.", disabled=False)
-    queue = queue.sort_values(["proxy_claim_status", "device_type", "target_stress_record_key"], na_position="last").head(200)
+    conflict_targets: set[str] = set()
+    c2m_targets: set[str] = set()
+    if concordance_rows is not None and not concordance_rows.empty and "target_stress_record_key" in concordance_rows.columns:
+        if "source_conflict" in concordance_rows.columns:
+            conflict_targets = set(concordance_rows.loc[
+                concordance_rows["source_conflict"].map(_truthy_flag), "target_stress_record_key"
+            ].dropna().astype(str))
+        if "c2m0080120d_avalanche_vs_sc_conflict" in concordance_rows.columns:
+            c2m_targets = set(concordance_rows.loc[
+                concordance_rows["c2m0080120d_avalanche_vs_sc_conflict"].map(_truthy_flag), "target_stress_record_key"
+            ].dropna().astype(str))
+    target_keys = queue.get("target_stress_record_key", pd.Series(index=queue.index)).fillna("").astype(str)
+    queue["_c2m_conflict"] = target_keys.isin(c2m_targets)
+    queue["_source_conflict"] = target_keys.isin(conflict_targets)
+    status_priority = {"validation_candidate": 0, "curation_candidate": 1, "blocked": 2, "screening_only": 3}
+    queue["_status_priority"] = queue.get("proxy_claim_status", pd.Series("", index=queue.index)).fillna("").map(status_priority).fillna(4)
+    queue = queue.sort_values(
+        ["_c2m_conflict", "_source_conflict", "_status_priority", "device_type", "target_stress_record_key"],
+        ascending=[False, False, True, True, True],
+        na_position="last",
+    ).head(200)
     cols = {
         "Target": [_v2_key_tail(_v2_clean(v), 34) for v in queue.get("target_stress_record_key", pd.Series(index=queue.index))],
         "Device": queue.get("device_type", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
@@ -3071,6 +3123,10 @@ def curation_queue_payload(v2_rows: pd.DataFrame, concordance_rows: pd.DataFrame
         "Kosier severity": queue.get("critical_severity_overlap_class_kosier_context", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
         "Boundary usable": queue.get("candidate_failure_fraction_gate_usable", pd.Series(False, index=queue.index)).fillna(False).astype(str).tolist(),
         "Blockers": queue.get("energy_v2_blockers", pd.Series(index=queue.index)).fillna("(none)").astype(str).tolist(),
+        "Conflict": [
+            "C2M0080120D" if c2m else ("source_conflict" if conflict else "")
+            for c2m, conflict in zip(queue["_c2m_conflict"].tolist(), queue["_source_conflict"].tolist())
+        ],
     }
     return _table_payload(title, list(cols.items()),
                           f"Top {len(queue)} rank-1 rows needing human truth curation or fail-closed claim review. Truth-label overlay hooks use the same status fields.",
@@ -3089,11 +3145,11 @@ def reciprocal_enrichment_payload(rows: pd.DataFrame) -> dict[str, Any]:
         if pct is None or v1 is None:
             continue
         v1_v2_rank = finite_number(v1.get("v2_rank"))
-        max_rank = finite_number(v2.get("energy_rank")) or 10.0
+        exported_top_n = finite_number(r.get("exported_top_n")) or 10.0
         if v1_v2_rank is None:
             continue
         x.append(pct)
-        y.append(100.0 * v1_v2_rank / max(max_rank, 1.0))
+        y.append(100.0 * v1_v2_rank / max(exported_top_n, 1.0))
         scope = _v2_clean(v2.get("match_scope")) or "unknown"
         colors.append("#24292f" if scope == "cross_device" else DEEMPHASIS_GRAY)
         labels.append(scope)
@@ -3113,7 +3169,7 @@ def reciprocal_enrichment_payload(rows: pd.DataFrame) -> dict[str, Any]:
                     "line": {"color": "#8c959f", "dash": "dash"}}],
     })
     return {"traces": [trace], "layout": layout,
-            "note": "Mirror enrichment computed from the exported concordance top-N join. X is schema/029's v2-pick percentile in v1 ordering; Y is the v1 pick's location inside the exported v2 ordering when present."}
+            "note": f"Mirror enrichment computed from {len(x)} exported concordance top-N targets. X is schema/029's v2-pick percentile in v1 ordering; Y is the v1 pick's location inside the exported v2 ordering, normalized by the exported top-N depth for that target."}
 
 
 def v3_agreement_payload(v3_rows: pd.DataFrame, concordance_rows: pd.DataFrame) -> dict[str, Any]:
@@ -3865,6 +3921,7 @@ def main() -> None:
         f"{count_points(agreement_payload):,} agreement; "
         f"{count_points(concordance_ecdf_payload):,} ECDF; "
         f"{count_points(conflict_payload):,} conflicts; "
+        f"{count_points(reciprocal_payload):,} reciprocal; "
         f"{count_points(v3_payload):,} v3 components; "
         f"{count_points(v3_agreement):,} v3 agreement; "
         f"{count_points(curation_payload_data):,} curation rows; "

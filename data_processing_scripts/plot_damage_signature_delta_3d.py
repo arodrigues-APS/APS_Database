@@ -46,6 +46,9 @@ SELECT target_stress_record_key,
        target_ion_species,
        candidate_stress_record_key,
        candidate_rank,
+       dssig_pool_size,
+       signature_axis_distance,
+       waveform_only_distance,
        decision_safe_rank,
        proxy_claim_status,
        proxy_claim_basis,
@@ -113,8 +116,15 @@ SELECT target_stress_record_key,
        energy_density_ratio,
        log_energy_delta,
        log_energy_delta_dex
-FROM stress_proxy_candidate_view
-WHERE candidate_source IN ('sc', 'avalanche')
+FROM (
+    SELECT r.*,
+           COUNT(*) FILTER (WHERE r.signature_axis_distance IS NOT NULL) OVER (
+               PARTITION BY r.target_stress_record_key
+           ) AS dssig_pool_size
+    FROM stress_proxy_candidate_ranked_view r
+    WHERE r.candidate_source IN ('sc', 'avalanche')
+) ranked
+WHERE candidate_rank <= 10
 ORDER BY candidate_source, target_stress_record_key, candidate_rank;
 """
 
