@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.seed_proxy_truth_labels_auto import (
+from aps.seeds.seed_proxy_truth_labels_auto import (
     AUTO_LABEL_BASIS,
     AUTO_REVIEWER,
     build_seed_sql,

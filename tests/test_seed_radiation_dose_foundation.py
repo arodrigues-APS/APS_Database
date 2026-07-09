@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.seed_radiation_dose_foundation import (
+from aps.seeds.seed_radiation_dose_foundation import (
     KOSIER_TABLE_I_DOPING_BASIS,
     sic_active_layer_defaults,
     voltage_class_from_rating,

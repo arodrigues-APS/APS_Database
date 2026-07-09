@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.calibrate_mechanistic_energy_proxy import (
+from aps.proxy.calibrate_mechanistic_energy_proxy import (
     compute_truth_metrics,
     compute_truth_metrics_by_basis,
     is_auto_seeded_label,

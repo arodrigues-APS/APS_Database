@@ -1,7 +1,8 @@
 import unittest
 
-from data_processing_scripts import proxy_viz_palette as p
-from data_processing_scripts.create_interactive_damage_signature_viewer import V3_COMPONENTS
+from aps.viewers import proxy_viz_palette as p
+
+from aps.viewers.create_interactive_damage_signature_viewer import V3_COMPONENTS
 
 
 def _rgb(hex_color):

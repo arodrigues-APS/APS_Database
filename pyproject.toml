@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aps-database"
-version = "0.1.0"
+version = "0.2.0"
 description = "APS cross-technology damage-equivalence database: ingestion pipeline, mechanistic proxy engine, Superset dashboard builders, and lab data server"
 readme = "Readme.md"
 requires-python = ">=3.10"
@@ -56,9 +56,20 @@ dev = [
 ]
 
 [tool.setuptools]
-# Explicit: only the pipeline package. Root modules (server.py, wsgi.py,
-# data_scraping.py) are the Flask app, deployed as files, not a library.
-packages = ["data_processing_scripts"]
+# Explicit: only the pipeline package (src layout). Root modules (server.py,
+# wsgi.py, data_scraping.py) are the Flask app, deployed as files, not a library.
+package-dir = {"" = "src"}
+packages = [
+    "aps",
+    "aps.ingest",
+    "aps.seeds",
+    "aps.enrich",
+    "aps.proxy",
+    "aps.ml",
+    "aps.superset",
+    "aps.viewers",
+    "aps.exports",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -66,4 +77,4 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["data_processing_scripts/one_time_scripts"]
+extend-exclude = ["archive"]

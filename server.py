@@ -9,8 +9,13 @@
 
 import os
 import re
+import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+# The pipeline package lives in src/ (installable as aps-database); under
+# uwsgi only the repo root is on sys.path, so add src/ before aps imports.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from configobj import ConfigObj
 from flask import Flask, flash, jsonify, request
 from flask_wtf import FlaskForm
@@ -87,8 +92,8 @@ def readme():
 
 
 # ── Device Library ───────────────────────────────────────────────────────────
-from data_processing_scripts.db_config import get_connection
-from data_processing_scripts.common import apply_schema
+from aps.db_config import get_connection
+from aps.common import apply_schema
 
 def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
@@ -718,7 +723,7 @@ def sync_irradiation_metadata():
 
 # ── Avalanche Campaigns ───────────────────────────────────────────────────────
 
-from data_processing_scripts.db_config import NAS_ROOT
+from aps.db_config import NAS_ROOT
 
 AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
 

@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.extract_stress_pulse_history import (
+from aps.enrich.extract_stress_pulse_history import (
     build_history_rows,
     parse_avalanche_pulse_index,
     parse_sc_pulse_index,

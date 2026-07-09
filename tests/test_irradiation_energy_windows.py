@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.irradiation_energy_windows import infer_energy_window
+from aps.enrich.irradiation_energy_windows import infer_energy_window
 
 
 def point(index, time_s, vds=100.0, id_drain=1e-6, fluence=None):

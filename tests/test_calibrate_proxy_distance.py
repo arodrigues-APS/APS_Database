@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.calibrate_proxy_distance import (
+from aps.proxy.calibrate_proxy_distance import (
     DistanceSettings,
     ranked_candidate_items,
     score_row,

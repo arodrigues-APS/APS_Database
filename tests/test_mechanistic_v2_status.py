@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.mechanistic_energy_proxy import (
+from aps.proxy.mechanistic_energy_proxy import (
     cumulative_exposure_overlap_class,
     localization_mismatch_class,
     mechanistic_energy_candidate_status,

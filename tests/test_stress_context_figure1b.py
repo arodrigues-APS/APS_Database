@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.db_config import get_connection
+from aps.db_config import get_connection
 
 
 class StressContextFigure1BTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.depletion_threshold_model import (
+from aps.proxy.depletion_threshold_model import (
     KOSIER_2026_SEB_CRITICAL_J_CM2,
     KOSIER_2026_SELC_CRITICAL_J_CM2,
     ELEMENTARY_CHARGE_C,

@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from data_processing_scripts.radiation_stress_dose import (
+from aps.enrich.radiation_stress_dose import (
     FluenceContext,
     LayerSpec,
     StoppingPoint,

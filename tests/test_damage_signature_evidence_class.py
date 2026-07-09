@@ -7,7 +7,7 @@ CTEs in schema/025_proxy_readiness_waveforms.sql.  Keep both in sync.
 import math
 import unittest
 
-from data_processing_scripts.calibrate_proxy_distance import (
+from aps.proxy.calibrate_proxy_distance import (
     damage_signature_evidence,
     proxy_claim,
     signature_claim_quality,

@@ -3,7 +3,7 @@ import unittest
 
 import pandas as pd
 
-from data_processing_scripts.create_interactive_damage_signature_viewer import (
+from aps.viewers.create_interactive_damage_signature_viewer import (
     CONCORDANCE_STYLE,
     CRITICAL_OVERLAP_COLORS,
     HTML_TEMPLATE,
@@ -30,10 +30,10 @@ from data_processing_scripts.create_interactive_damage_signature_viewer import (
     v3_agreement_payload,
     v3_vector_explorer_payload,
 )
-from data_processing_scripts.export_proxy_candidate_energy_v2_csv import (
+from aps.exports.export_proxy_candidate_energy_v2_csv import (
     _flatten_array,
 )
-from data_processing_scripts.export_proxy_truth_curation_queue import (
+from aps.exports.export_proxy_truth_curation_queue import (
     _flatten_array as _flatten_queue_array,
 )
 

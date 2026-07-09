@@ -1,6 +1,6 @@
 """Destruction-boundary interval + candidate failure-fraction helpers (R1 prep).
 
-These pure functions in data_processing_scripts/mechanistic_energy_proxy.py are
+These pure functions in aps/proxy/mechanistic_energy_proxy.py are
 the spec the future boundary SQL view must mirror.  They pin the review's
 degenerate-case rules (2026-07-02): inverted brackets are emitted and flagged,
 never discarded; thin cells and one-sided/missing brackets fall to
@@ -12,7 +12,7 @@ repetitive candidate regimes.
 import math
 import unittest
 
-from data_processing_scripts.mechanistic_energy_proxy import (
+from aps.proxy.mechanistic_energy_proxy import (
     BOUNDARY_MIN_DESTRUCTIVE_COUNT,
     BOUNDARY_MIN_SURVIVED_COUNT,
     BOUNDARY_UNKNOWN_OUTCOME_NOTE,

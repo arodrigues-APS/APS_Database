@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 REPO_ROOT="/opt/aps_database/APS_Database"
 COMPOSE_DIR="${REPO_ROOT}/superset"
-INGEST_DIR="${REPO_ROOT}/data_processing_scripts"
+SRC_DIR="${REPO_ROOT}/src"
 PYTHON="/opt/aps_database/venv/bin/python"
 BACKUP_DIR="/opt/aps_database/backups"
 LOG_DIR="${REPO_ROOT}/logs/nightly"
@@ -13,8 +13,8 @@ BACKUP_RETENTION_DAYS="${APS_BACKUP_RETENTION_DAYS:-14}"
 LOG_RETENTION_DAYS="${APS_LOG_RETENTION_DAYS:-30}"
 DOCKER_IMAGE_PRUNE="${APS_DOCKER_IMAGE_PRUNE:-1}"
 WEB_TOOLS_DIR="${APS_WEB_TOOLS_DIR:-/data/www/tools}"
-DAMAGE_SIGNATURE_VIEWER_HTML="${INGEST_DIR}/out/avalanche_irrad_pilot/damage_signature_3d_interactive.html"
-SOURCE_STATUS_PATHS=(data_processing_scripts schema scripts superset)
+DAMAGE_SIGNATURE_VIEWER_HTML="${REPO_ROOT}/out/avalanche_irrad_pilot/damage_signature_3d_interactive.html"
+SOURCE_STATUS_PATHS=(src schema scripts superset)
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "${BACKUP_DIR}" "${LOG_DIR}"
@@ -236,11 +236,11 @@ preflight_irradiation_seed_source() {
 
 require_file "${REPO_ROOT}"
 require_file "${COMPOSE_DIR}/docker-compose.yml"
-require_file "${INGEST_DIR}"
+require_file "${SRC_DIR}"
 require_file "${PYTHON}"
 
 export PATH="/opt/aps_database/venv/bin:/usr/local/bin:/usr/bin:/bin"
-export PYTHONPATH="${INGEST_DIR}:${REPO_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${SRC_DIR}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
 log "Starting APS nightly container update and ingest."
@@ -267,34 +267,34 @@ wait_for_postgres "postgresqlv2" "postgres" "mosfets" "APS data database"
 wait_for_postgres "superset_db" "superset" "superset" "Superset metadata database"
 wait_for_superset
 
-cd "${INGEST_DIR}"
-run_py seed_device_library.py
-run_py seed_device_mapping_rules.py
-run_py ingestion_baselines.py
-run_py ingestion_sc.py
+cd "${REPO_ROOT}"
+run_py -m aps.seeds.seed_device_library
+run_py -m aps.seeds.seed_device_mapping_rules
+run_py -m aps.ingest.ingestion_baselines
+run_py -m aps.ingest.ingestion_sc
 if preflight_irradiation_seed_source; then
-  run_py seed_irradiation_campaigns.py
+  run_py -m aps.seeds.seed_irradiation_campaigns
 else
-  log "WARNING: continuing downstream without seed_irradiation_campaigns.py."
+  log "WARNING: continuing downstream without seed_irradiation_campaigns."
 fi
-run_py ingestion_irradiation.py
-run_py parse_logbooks_assign_runs.py
-run_py irradiation_energy_windows.py
-run_py extract_single_event_effects.py
-run_py radiation_stress_dose.py
-run_py ingestion_avalanche.py
-run_py -c "from db_config import get_connection; conn=get_connection(); cur=conn.cursor(); cur.execute('REFRESH MATERIALIZED VIEW baselines_run_max_current'); conn.commit(); cur.close(); conn.close(); print('refreshed baselines_run_max_current')"
-run_py extract_damage_metrics.py
-run_py create_baselines_dashboard.py
-if [[ -f create_baselines_dashboard_device_library.py ]]; then
-  run_py create_baselines_dashboard_device_library.py
+run_py -m aps.ingest.ingestion_irradiation
+run_py -m aps.ingest.parse_logbooks_assign_runs
+run_py -m aps.enrich.irradiation_energy_windows
+run_py -m aps.enrich.extract_single_event_effects
+run_py -m aps.enrich.radiation_stress_dose
+run_py -m aps.ingest.ingestion_avalanche
+run_py -c "from aps.db_config import get_connection; conn=get_connection(); cur=conn.cursor(); cur.execute('REFRESH MATERIALIZED VIEW baselines_run_max_current'); conn.commit(); cur.close(); conn.close(); print('refreshed baselines_run_max_current')"
+run_py -m aps.enrich.extract_damage_metrics
+run_py -m aps.superset.create_baselines_dashboard
+if [[ -f "${SRC_DIR}/aps/superset/create_baselines_dashboard_device_library.py" ]]; then
+  run_py -m aps.superset.create_baselines_dashboard_device_library
 else
-  log "Skipping create_baselines_dashboard_device_library.py; not present in this checkout."
+  log "Skipping create_baselines_dashboard_device_library; not present in this checkout."
 fi
-run_py create_sc_dashboard.py
-run_py create_irradiation_dashboard.py
-run_py create_avalanche_dashboard.py
-run_py ml_post_iv_physical_prediction.py \
+run_py -m aps.superset.create_sc_dashboard
+run_py -m aps.superset.create_irradiation_dashboard
+run_py -m aps.superset.create_avalanche_dashboard
+run_py -m aps.ml.ml_post_iv_physical_prediction \
   --rebuild-sql \
   --extract-features \
   --build-pairs \
@@ -304,22 +304,22 @@ run_py ml_post_iv_physical_prediction.py \
   --validation-mode both \
   --reference-tier both \
   --predict-curves
-run_py create_iv_physical_prediction_dashboard.py
-run_py ml_sc_irrad_equivalence.py --rebuild
-run_py create_proxy_readiness_dashboard.py
+run_py -m aps.superset.create_iv_physical_prediction_dashboard
+run_py -m aps.ml.ml_sc_irrad_equivalence --rebuild
+run_py -m aps.superset.create_proxy_readiness_dashboard
 # The self-contained interactive viewer is an exported artifact, not a core
 # ingest dependency. Keep it fresh when possible, but do not abort nightly
 # ingestion if a viewer-only export/regeneration step fails.
-run_py_optional apply_mechanistic_energy_proxy.py || true
-run_py_optional plot_source_damage_signature_3d.py || true
-run_py_optional plot_damage_signature_delta_3d.py || true
-run_py_optional export_proxy_candidate_energy_v2_csv.py || true
-run_py_optional export_proxy_method_concordance_csv.py || true
-run_py_optional export_proxy_candidate_combined_v3_csv.py || true
-run_py_optional create_interactive_damage_signature_viewer.py || true
+run_py_optional -m aps.proxy.apply_mechanistic_energy_proxy || true
+run_py_optional -m aps.viewers.plot_source_damage_signature_3d || true
+run_py_optional -m aps.viewers.plot_damage_signature_delta_3d || true
+run_py_optional -m aps.exports.export_proxy_candidate_energy_v2_csv || true
+run_py_optional -m aps.exports.export_proxy_method_concordance_csv || true
+run_py_optional -m aps.exports.export_proxy_candidate_combined_v3_csv || true
+run_py_optional -m aps.viewers.create_interactive_damage_signature_viewer || true
 publish_damage_signature_viewer_optional || true
-run_py create_sc_irrad_dashboard.py
-run_py create_sc_irrad_prediction_dashboard.py
+run_py -m aps.superset.create_sc_irrad_dashboard
+run_py -m aps.superset.create_sc_irrad_prediction_dashboard
 
 prune_docker_images
 cleanup_old_files

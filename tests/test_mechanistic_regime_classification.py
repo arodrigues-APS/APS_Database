@@ -1,6 +1,6 @@
 import unittest
 
-from data_processing_scripts.mechanistic_energy_proxy import (
+from aps.proxy.mechanistic_energy_proxy import (
     CANDIDATE_REGIMES,
     TARGET_REGIMES,
     classify_mechanistic_regime,

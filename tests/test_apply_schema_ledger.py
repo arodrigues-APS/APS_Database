@@ -1,6 +1,7 @@
 import unittest
 
-from data_processing_scripts import common
+from aps import common
+
 
 
 PLAIN_SQL = "CREATE TABLE IF NOT EXISTS demo (id INT);\n"

@@ -1,0 +1,1504 @@
+#!/usr/bin/env python3
+"""
+Create the "Irradiation" dashboard in Apache Superset via its REST API.
+
+This dashboard visualises irradiation characterisation data:
+  - Pre- vs post-irradiation IV curve overlays per device
+  - Cross-campaign comparison across ion species and beam energies
+  - Per-file individual runs with full metadata
+  - Campaign overview summary tables and charts
+
+Datasets (SQL views created by seed_irradiation_campaigns.py and
+extract_single_event_effects.py):
+  1. irradiation_view               – all IV curves linked to campaigns
+  2. irradiation_degradation_summary – pre-aggregated per voltage bin
+  3. irradiation_campaign_overview   – summary counts per campaign
+  4. irradiation_single_event_let_frequency_view
+                                     – SEB/SELCI/SELCII counts by LET
+  5. irradiation_single_event_energy_view
+                                     – per-event integrated energy
+
+Tabs:
+  1. Campaign Overview       – summary tables and bar charts
+  2. Pre/Post Comparison     – overlay pre_irrad vs post_irrad IV curves
+  3. Waveform Viewer         – time-domain monitor traces
+  4. Cross-Campaign          – compare degradation across ion species
+  5. Individual Runs         – per-file curves with full metadata
+
+Filters (15 total; 10 metadata/IV filters + 3 waveform file filters +
+2 event-energy filters):
+  1. Ion Species             – proton / Au / Ca / etc.
+  2. Beam Energy (MeV)       – cascades from Ion Species
+  3. Beam Type               – broad_beam / micro_beam
+  4. Campaign                – cascades from Ion Species
+  5. Manufacturer            – device manufacturer
+  6. Device Type             – cascades from Manufacturer
+  7. Test Condition          – pre_irrad / post_irrad
+  8. Measurement Category    – IdVg, IdVd, Blocking, etc.
+  9. V_Drain Bias (V)        – range slider; IdVg / Subthreshold charts only
+ 10. V_Gate Bias (V)         – range slider; IdVd / Blocking charts only
+ 11. SEB Detected            – Waveform and event-energy charts
+ 12. SELC-I Detected         – Waveform and event-energy charts
+ 13. SELC-II Detected        – Waveform and event-energy charts
+ 14. Single Event Type       – Event energy charts only
+ 15. Event Energy Basis      – Event energy charts only
+
+Usage:
+    source /home/apsadmin/py3/bin/activate
+    python3 create_irradiation_dashboard.py
+"""
+
+import json
+import sys
+
+from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
+                          refresh_dataset_columns, create_chart,
+                          create_or_update_dashboard, build_json_metadata)
+from aps.db_config import SUPERSET_URL
+
+DASHBOARD_TITLE = "Irradiation"
+DASHBOARD_SLUG = "irradiation"
+
+
+# ── Dashboard Layout ─────────────────────────────────────────────────────────
+
+def build_dashboard_layout(tab_defs):
+    """Build position_json from a list of (tab_name, tab_id, chart_tuples).
+
+    chart_tuples: list of (chart_id, chart_uuid, chart_name, width, height).
+    """
+    layout = {
+        "DASHBOARD_VERSION_KEY": "v2",
+        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
+        "GRID_ID": {
+            "type": "GRID", "id": "GRID_ID",
+            "children": [], "parents": ["ROOT_ID"],
+        },
+        "HEADER_ID": {
+            "type": "HEADER", "id": "HEADER_ID",
+            "meta": {"text": DASHBOARD_TITLE},
+        },
+    }
+
+    tabs_id = "TABS-irrad"
+    tab_children = [td[1] for td in tab_defs]
+    layout["GRID_ID"]["children"] = [tabs_id]
+    layout[tabs_id] = {
+        "type": "TABS", "id": tabs_id,
+        "children": tab_children,
+        "parents": ["ROOT_ID", "GRID_ID"],
+    }
+
+    for tab_name, tab_id, chart_list in tab_defs:
+        tab_parents = ["ROOT_ID", "GRID_ID", tabs_id, tab_id]
+        row_ids = []
+        for i, (cid, cuuid, cname, width, height) in enumerate(chart_list):
+            if cid is None:
+                continue
+            row_id = f"ROW-{tab_id}-{i}"
+            chart_key = f"CHART-{tab_id}-{i}"
+            layout[row_id] = {
+                "type": "ROW", "id": row_id,
+                "children": [chart_key],
+                "parents": tab_parents,
+                "meta": {"background": "BACKGROUND_TRANSPARENT"},
+            }
+            layout[chart_key] = {
+                "type": "CHART", "id": chart_key, "children": [],
+                "parents": tab_parents + [row_id],
+                "meta": {
+                    "chartId": cid, "width": width, "height": height,
+                    "sliceName": cname, "uuid": cuuid,
+                },
+            }
+            row_ids.append(row_id)
+
+        layout[tab_id] = {
+            "type": "TAB", "id": tab_id,
+            "children": row_ids,
+            "parents": ["ROOT_ID", "GRID_ID", tabs_id],
+            "meta": {"text": tab_name},
+        }
+
+    return layout
+
+
+# ── Native Filters ───────────────────────────────────────────────────────────
+
+def build_native_filters(all_chart_ids, main_ds_id, degrad_ds_id=None,
+                         overview_ds_id=None, waveform_ds_id=None,
+                         event_let_ds_id=None, event_energy_ds_id=None,
+                         waveform_chart_ids=None, event_energy_chart_ids=None,
+                         v_drain_chart_ids=None, v_gate_chart_ids=None):
+    """Build native filters for the Irradiation dashboard.
+
+    *v_drain_chart_ids* — charts where v_drain_plot_bin is the BIAS (IdVg /
+    Subthreshold / Vth).  These are scoped to the V_Drain Bias range slider.
+    *v_gate_chart_ids*  — charts where v_gate_plot_bin is the BIAS (IdVd /
+    Blocking).  Scoped to the V_Gate Bias range slider.
+    """
+    ion_fid  = "NATIVE_FILTER-irrad-ion-species"
+    nrg_fid  = "NATIVE_FILTER-irrad-beam-energy"
+    bt_fid   = "NATIVE_FILTER-irrad-beam-type"
+    camp_fid = "NATIVE_FILTER-irrad-campaign"
+    mfr_fid  = "NATIVE_FILTER-irrad-manufacturer"
+    dev_fid  = "NATIVE_FILTER-irrad-device-type"
+    tc_fid   = "NATIVE_FILTER-irrad-test-condition"
+    cat_fid  = "NATIVE_FILTER-irrad-meas-category"
+    vd_fid   = "NATIVE_FILTER-irrad-v-drain-bias"
+    vg_fid   = "NATIVE_FILTER-irrad-v-gate-bias"
+    seb_fid  = "NATIVE_FILTER-irrad-seb-detected"
+    s1_fid   = "NATIVE_FILTER-irrad-selc-i-detected"
+    s2_fid   = "NATIVE_FILTER-irrad-selc-ii-detected"
+    evt_fid  = "NATIVE_FILTER-irrad-event-type"
+    eng_fid  = "NATIVE_FILTER-irrad-event-energy-basis"
+
+    v_drain_chart_ids = v_drain_chart_ids or []
+    v_gate_chart_ids  = v_gate_chart_ids  or []
+    vd_excluded = [c for c in all_chart_ids if c not in v_drain_chart_ids]
+    vg_excluded = [c for c in all_chart_ids if c not in v_gate_chart_ids]
+
+    # Bias range filters target IV datasets only (not overview / waveform)
+    def bias_targets(col):
+        targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
+        if degrad_ds_id:
+            targets.append({"datasetId": degrad_ds_id,
+                            "column": {"name": col}})
+        return targets
+
+    def multi_targets(col):
+        targets = [{"datasetId": main_ds_id, "column": {"name": col}}]
+        if degrad_ds_id:
+            targets.append({"datasetId": degrad_ds_id,
+                            "column": {"name": col}})
+        if overview_ds_id:
+            targets.append({"datasetId": overview_ds_id,
+                            "column": {"name": col}})
+        if waveform_ds_id:
+            targets.append({"datasetId": waveform_ds_id,
+                            "column": {"name": col}})
+        event_metadata_cols = {
+            "ion_species",
+            "beam_energy_mev",
+            "beam_type",
+            "campaign_name",
+            "manufacturer",
+            "device_type",
+        }
+        if event_let_ds_id and col in event_metadata_cols:
+            targets.append({"datasetId": event_let_ds_id,
+                            "column": {"name": col}})
+        if event_energy_ds_id and col in event_metadata_cols | {"test_condition"}:
+            targets.append({"datasetId": event_energy_ds_id,
+                            "column": {"name": col}})
+        return targets
+
+    def make_filter(fid, name, col, cascade_from=None, description="",
+                    targets=None, chart_scope=None, tab_scope=None):
+        return {
+            "id": fid,
+            "controlValues": {
+                "enableEmptyFilter": False,
+                "defaultToFirstItem": False,
+                "multiSelect": True,
+                "searchAllOptions": True,
+                "inverseSelection": False,
+            },
+            "name": name,
+            "filterType": "filter_select",
+            "targets": targets if targets is not None else multi_targets(col),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [cascade_from] if cascade_from else [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "description": description,
+            "chartsInScope": list(chart_scope or all_chart_ids),
+            "tabsInScope": list(tab_scope or []),
+        }
+
+    filters = [
+        # 1. Ion Species
+        make_filter(ion_fid, "Ion Species", "ion_species",
+                    description="Filter by radiation particle type"),
+
+        # 2. Beam Energy (cascades from Ion Species)
+        make_filter(nrg_fid, "Beam Energy (MeV)", "beam_energy_mev",
+                    cascade_from=ion_fid,
+                    description="Filter by beam energy in MeV"),
+
+        # 3. Beam Type
+        make_filter(bt_fid, "Beam Type", "beam_type",
+                    description="broad_beam or micro_beam"),
+
+        # 4. Campaign (cascades from Ion Species)
+        make_filter(camp_fid, "Campaign", "campaign_name",
+                    cascade_from=ion_fid,
+                    description="Filter by irradiation campaign"),
+
+        # 5. Manufacturer
+        make_filter(mfr_fid, "Manufacturer", "manufacturer",
+                    description="Filter by device manufacturer"),
+
+        # 6. Device Type (cascades from Manufacturer)
+        make_filter(dev_fid, "Device Type", "device_type",
+                    cascade_from=mfr_fid,
+                    description="Filter by commercial part number"),
+
+        # 7. Test Condition (pre_irrad / post_irrad)
+        make_filter(tc_fid, "Test Condition", "test_condition",
+                    description="pre_irrad = baseline before irradiation, "
+                                "post_irrad = after irradiation"),
+
+        # 8. Measurement Category — excludes overview and waveform datasets
+        #    (overview is pre-grouped; waveform is pinned to 'Irradiation')
+        make_filter(cat_fid, "Measurement Category", "measurement_category",
+                    description="IdVg, IdVd, Blocking, Igss, etc.",
+                    targets=(
+                        [{"datasetId": main_ds_id,
+                          "column": {"name": "measurement_category"}}]
+                        + ([{"datasetId": degrad_ds_id,
+                             "column": {"name": "measurement_category"}}]
+                           if degrad_ds_id else [])
+                    )),
+
+        # 9. V_Drain Bias — range slider for IdVg / Subthreshold / Vth charts
+        {
+            "id": vd_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Drain Bias (V) → IdVg, Subthreshold",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_drain_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vd_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVg / Subthreshold charts to a specific "
+                           "drain bias range (V)",
+            "chartsInScope": v_drain_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN ('IdVg', 'Vth', 'Subthreshold')",
+                "clause": "WHERE",
+            }],
+        },
+
+        # 10. V_Gate Bias — range slider for IdVd / Blocking charts
+        {
+            "id": vg_fid,
+            "controlValues": {"enableEmptyFilter": False},
+            "name": "V_Gate Bias (V) → IdVd, Blocking",
+            "filterType": "filter_range",
+            "targets": bias_targets("v_gate_plot_bin"),
+            "defaultDataMask": {"extraFormData": {},
+                                "filterState": {"value": None}},
+            "cascadeParentIds": [dev_fid],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": vg_excluded},
+            "type": "NATIVE_FILTER",
+            "description": "Restrict IdVd / Blocking charts to a specific "
+                           "gate bias range (V)",
+            "chartsInScope": v_gate_chart_ids,
+            "tabsInScope": [],
+            "adhoc_filters": [{
+                "expressionType": "SQL",
+                "sqlExpression":
+                    "measurement_category IN ('IdVd', 'Blocking')",
+                "clause": "WHERE",
+            }],
+        },
+    ]
+
+    if waveform_ds_id:
+        waveform_scope = waveform_chart_ids or all_chart_ids
+        event_energy_scope = event_energy_chart_ids or []
+        detected_scope = list(dict.fromkeys(waveform_scope + event_energy_scope))
+        waveform_tab = ["TAB-waveform"]
+
+        def detected_targets(col):
+            targets = [{"datasetId": waveform_ds_id, "column": {"name": col}}]
+            if event_energy_ds_id:
+                targets.append({"datasetId": event_energy_ds_id,
+                                "column": {"name": col}})
+            return targets
+
+        filters.extend([
+            make_filter(
+                seb_fid, "SEB Detected", "seb_detected",
+                description="Waveform files with at least one SEB detected",
+                targets=detected_targets("seb_detected"),
+                chart_scope=detected_scope,
+                tab_scope=waveform_tab,
+            ),
+            make_filter(
+                s1_fid, "SELC-I Detected", "selc_i_detected",
+                description="Waveform files with at least one SELC-I detected",
+                targets=detected_targets("selc_i_detected"),
+                chart_scope=detected_scope,
+                tab_scope=waveform_tab,
+            ),
+            make_filter(
+                s2_fid, "SELC-II Detected", "selc_ii_detected",
+                description="Waveform files with at least one SELC-II detected",
+                targets=detected_targets("selc_ii_detected"),
+                chart_scope=detected_scope,
+                tab_scope=waveform_tab,
+            ),
+        ])
+
+    if event_energy_ds_id:
+        event_energy_scope = event_energy_chart_ids or all_chart_ids
+        event_energy_tab = ["TAB-waveform"]
+        filters.extend([
+            make_filter(
+                evt_fid, "Single Event Type", "event_type",
+                description="SEB / SELC-I / SELC-II event labels",
+                targets=[{"datasetId": event_energy_ds_id,
+                          "column": {"name": "event_type"}}],
+                chart_scope=event_energy_scope,
+                tab_scope=event_energy_tab,
+            ),
+            make_filter(
+                eng_fid, "Event Energy Basis", "event_energy_basis",
+                description="Integrated waveform energy or proxy-only estimate",
+                targets=[{"datasetId": event_energy_ds_id,
+                          "column": {"name": "event_energy_basis"}}],
+                chart_scope=event_energy_scope,
+                tab_scope=event_energy_tab,
+            ),
+        ])
+
+    return filters
+
+
+# ── Chart Helpers ────────────────────────────────────────────────────────────
+
+def cat_filter(cat):
+    """Adhoc WHERE filter for a measurement category."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"measurement_category = '{cat}'",
+        "clause": "WHERE",
+    }
+
+
+def source_rows_only_filter():
+    """Exclude synthetic shared-reference rows from individual-run charts."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": "COALESCE(is_shared_reference, FALSE) = FALSE",
+        "clause": "WHERE",
+    }
+
+
+def irrad_curve_params(x_axis, cat, x_title, y_title,
+                       metric_expr="AVG(i_drain)",
+                       metric_label="I_Drain (A)",
+                       log_y=False, series_limit=50,
+                       bias_col=None):
+    """Line-chart params for mean irradiation IV curves (Pre/Post tab).
+
+    Groups by device_type × test_condition × irrad_condition, averaging
+    across all devices and files.  One mean curve per condition/bias level.
+    Individual Runs tab uses its own inlined params that include device_id,
+    metadata_id, and step_index.  If bias_col is given, adds it as an
+    additional groupby to separate multi-step sweeps.
+    """
+    groupby = ["device_type", "test_condition", "irrad_condition_label"]
+    if bias_col:
+        groupby.append({
+            "expressionType": "SQL",
+            "sqlExpression": f"ROUND({bias_col}::numeric)",
+            "label": bias_col.replace("_bin", "").replace("v_", "V_") + " (V)",
+        })
+
+    params = {
+        "x_axis": x_axis,
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": metric_expr,
+            "label": metric_label,
+        }],
+        "groupby": groupby,
+        "adhoc_filters": [cat_filter(cat)],
+        "row_limit": 100000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": x_title,
+        "y_axis_title": y_title,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "sort_series_type": "max",
+        "sort_series_ascending": False,
+    }
+    if log_y:
+        params["logAxis"] = "y"
+    if series_limit:
+        params["series_limit"] = series_limit
+        params["series_limit_metric"] = {
+            "expressionType": "SQL",
+            "sqlExpression": f"COUNT(DISTINCT {x_axis})",
+            "label": "_rank_by_sweep_range",
+        }
+    return params
+
+
+def irrad_waveform_params(y_col, y_label, y_title, metric_expr=None,
+                          log_y=False, adhoc_filters=None):
+    """Line-chart params for irradiation waveform time-domain plots.
+
+    Groups by (device_type, device_id, irrad_condition_label) so each
+    device / ion-run combination appears as a separate series.  Time axis
+    is in seconds (Keithley SMU monitoring, not oscilloscope µs traces).
+    """
+    params = {
+        "x_axis": "time_val",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": metric_expr or f"AVG({y_col})",
+            "label": y_label,
+        }],
+        "groupby": [
+            "device_type", "device_id", "metadata_id",
+            "irrad_condition_label",
+        ],
+        "adhoc_filters": list(adhoc_filters or []),
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Time (s)",
+        "y_axis_title": y_title,
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": False,
+        "connectNulls": True,
+        "zoomable": True,
+        "sort_series_type": "max",
+        "sort_series_ascending": False,
+        "series_limit": 50,
+    }
+    if log_y:
+        params["logAxis"] = "y"
+        params["y_axis_bounds"] = [1e-12, None]
+    return params
+
+
+def non_null_filter(col):
+    """Adhoc WHERE filter for non-null waveform channels."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": f"{col} IS NOT NULL",
+        "clause": "WHERE",
+    }
+
+
+def sql_filter(sql):
+    """Generic SQL WHERE filter for Superset chart params."""
+    return {
+        "expressionType": "SQL",
+        "sqlExpression": sql,
+        "clause": "WHERE",
+    }
+
+
+def event_energy_scatter_params():
+    """Scatter params for per-event integrated energy."""
+    return {
+        "x_axis": "time_peak",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(event_electrical_terminal_energy_j)",
+            "label": "Electrical terminal energy (J)",
+        }],
+        "groupby": [
+            "event_type", "device_type", "device_id",
+            "metadata_id", "event_index", "event_energy_basis",
+            "active_window_basis", "energy_censored_reason",
+            "energy_is_comparable", "energy_level",
+        ],
+        "adhoc_filters": [
+            sql_filter("event_type IN ('SEB', 'SELCI', 'SELCII')"),
+            sql_filter("event_electrical_terminal_energy_j IS NOT NULL"),
+        ],
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Event time (s)",
+        "y_axis_title": "Electrical terminal energy (J)",
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": True,
+        "markerSize": 12,
+        "zoomable": True,
+        "series_limit": 100,
+    }
+
+
+def event_operating_points_params():
+    """Scatter params for per-event Vds/Ids operating points."""
+    return {
+        "x_axis": "vds_before_v",
+        "time_grain_sqla": None,
+        "x_axis_sort_asc": True,
+        "metrics": [{
+            "expressionType": "SQL",
+            "sqlExpression": "AVG(id_after_a)",
+            "label": "Ids after event (A)",
+        }],
+        "groupby": ["event_type"],
+        "adhoc_filters": [
+            sql_filter("event_type IN ('SEB', 'SELCI', 'SELCII')"),
+            sql_filter("vds_before_v IS NOT NULL"),
+            sql_filter("id_after_a IS NOT NULL"),
+        ],
+        "row_limit": 50000,
+        "truncate_metric": True,
+        "show_legend": True,
+        "legendType": "scroll",
+        "rich_tooltip": True,
+        "x_axis_title": "Vds before Event (V)",
+        "y_axis_title": "Ids after event (A)",
+        "y_axis_format": "SMART_NUMBER",
+        "truncateYAxis": False,
+        "y_axis_bounds": [None, None],
+        "tooltipTimeFormat": "smart_date",
+        "markerEnabled": True,
+        "markerSize": 12,
+        "zoomable": True,
+        "series_limit": 100,
+    }
+
+
+def event_energy_table_params():
+    """Raw table params for one row per detected SELC/SEB event."""
+    return {
+        "query_mode": "raw",
+        "all_columns": [
+            "event_id", "event_type", "path_type", "severity",
+            "is_catastrophic", "confidence", "device_type",
+            "device_id", "metadata_id", "filename", "campaign_name",
+            "ion_species", "beam_energy_mev", "let_mev_cm2_mg",
+            "seb_detected", "selc_i_detected", "selc_ii_detected",
+            "fluence_peak", "time_start", "time_peak", "time_end",
+            "event_detected_duration_s", "event_energy_start_s",
+            "event_energy_end_s", "event_duration_s",
+            "event_electrical_terminal_energy_j",
+            "event_energy_put_into_device_j",
+            "event_energy_vds_id_j", "event_energy_abs_j",
+            "event_energy_proxy_j", "event_energy_basis",
+            "active_window_basis", "energy_censored_reason",
+            "active_window_confidence", "energy_is_comparable",
+            "energy_level", "file_energy_censored_reason",
+            "file_energy_is_comparable", "compliance_source",
+            "compliance_current_a", "failure_time_s",
+            "event_integrated_power_points",
+            "event_integrated_power_segments", "vds_before_v",
+            "vds_after_v", "vds_delta_v", "vds_collapse_fraction",
+            "id_before_a", "id_after_a", "delta_id_abs_a",
+            "ig_before_a", "ig_after_a", "delta_ig_abs_a",
+            "gate_delta_fraction",
+        ],
+        "order_by_cols": [json.dumps(["time_peak", True])],
+        "row_limit": 1000,
+        "include_time": False,
+        "table_timestamp_format": "smart_date",
+    }
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    print("=" * 70)
+    print(f"Creating {DASHBOARD_TITLE} Dashboard")
+    print("=" * 70)
+
+    # 1. Authenticate
+    print("\n1. Authenticating...")
+    session = get_session()
+    print("   OK")
+
+    # 2. Find database
+    print("\n2. Finding database...")
+    db_id = find_database(session)
+    if not db_id:
+        print("  Please add the mosfets database connection first.")
+        sys.exit(1)
+
+    # 3. Create datasets
+    print("\n3. Creating datasets...")
+    main_ds = find_or_create_dataset(session, db_id, "irradiation_view")
+    degrad_ds = find_or_create_dataset(session, db_id,
+                                        "irradiation_degradation_summary")
+    overview_ds = find_or_create_dataset(session, db_id,
+                                          "irradiation_campaign_overview")
+    waveform_ds = find_or_create_dataset(session, db_id,
+                                          "irradiation_waveform_view")
+    event_let_ds = find_or_create_dataset(
+        session, db_id, "irradiation_single_event_let_frequency_view"
+    )
+    event_energy_ds = find_or_create_dataset(
+        session, db_id, "irradiation_single_event_energy_view"
+    )
+    if not main_ds:
+        print("  FATAL: Could not create irradiation_view dataset.")
+        print("  Run seed_irradiation_campaigns.py first to create the views.")
+        sys.exit(1)
+
+    for ds_id in [
+        main_ds, degrad_ds, overview_ds, waveform_ds, event_let_ds,
+        event_energy_ds,
+    ]:
+        if ds_id:
+            refresh_dataset_columns(session, ds_id)
+
+    # 4. Create charts
+    print("\n4. Creating charts...")
+
+    # ── Tab 1: Campaign Overview ─────────────────────────────────────────
+    print("\n   Tab 1: Campaign Overview...")
+
+    tab1_chart_defs = []
+    if overview_ds:
+        tab1_chart_defs = [
+        # 0 – Campaign Summary table
+        (
+            "Irrad – Campaign Summary",
+            overview_ds,
+            "table",
+            {
+                "query_mode": "aggregate",
+                "groupby": ["campaign_name", "ion_species", "beam_energy_mev",
+                            "beam_type", "facility", "device_type",
+                            "manufacturer", "test_condition",
+                            "measurement_category"],
+                "metrics": [
+                    {"expressionType": "SQL",
+                     "sqlExpression": "SUM(n_devices)",
+                     "label": "Devices"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "SUM(n_files)",
+                     "label": "Files"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "SUM(n_points)",
+                     "label": "Data Points"},
+                ],
+                "all_columns": [],
+                "order_by_cols": [],
+                "row_limit": 10000,
+                "include_time": False,
+                "table_timestamp_format": "smart_date",
+            },
+            12, 50,
+        ),
+
+        # 1 – Devices per Campaign (stacked bar by test condition)
+        (
+            "Irrad – Devices per Campaign",
+            overview_ds,
+            "echarts_timeseries_bar",
+            {
+                "x_axis": "campaign_name",
+                "time_grain_sqla": None,
+                "x_axis_sort_asc": True,
+                "metrics": [{"expressionType": "SQL",
+                             "sqlExpression": "SUM(n_devices)",
+                             "label": "Devices"}],
+                "groupby": ["test_condition"],
+                "adhoc_filters": [],
+                "row_limit": 1000,
+                "show_legend": True,
+                "rich_tooltip": True,
+                "x_axis_title": "Campaign",
+                "y_axis_title": "Number of Devices",
+                "y_axis_format": "SMART_NUMBER",
+                "stack": True,
+            },
+            6, 50,
+        ),
+
+        # 2 – Data Points per Ion Species (stacked bar by measurement category)
+        (
+            "Irrad – Points per Ion Species",
+            overview_ds,
+            "echarts_timeseries_bar",
+            {
+                "x_axis": "ion_species",
+                "time_grain_sqla": None,
+                "x_axis_sort_asc": True,
+                "metrics": [{"expressionType": "SQL",
+                             "sqlExpression": "SUM(n_points)",
+                             "label": "Data Points"}],
+                "groupby": ["measurement_category"],
+                "adhoc_filters": [],
+                "row_limit": 1000,
+                "show_legend": True,
+                "rich_tooltip": True,
+                "x_axis_title": "Ion Species",
+                "y_axis_title": "Data Points",
+                "y_axis_format": "SMART_NUMBER",
+                "stack": True,
+            },
+            6, 50,
+        ),
+    ]
+
+    if event_let_ds:
+        tab1_chart_defs.append(
+            # 3 – SEB/SELCI/SELCII events per LET (stacked by event type)
+            (
+                "Irrad – SE Events per LET",
+                event_let_ds,
+                "echarts_timeseries_bar",
+                {
+                    "x_axis": "let_mev_cm2_mg",
+                    "time_grain_sqla": None,
+                    "x_axis_sort_asc": True,
+                    "metrics": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": "SUM(n_events)",
+                        "label": "Events",
+                    }],
+                    "groupby": ["event_type"],
+                    "adhoc_filters": [
+                        {
+                            "expressionType": "SQL",
+                            "sqlExpression": (
+                                "event_type IN ('SEB', 'SELCI', 'SELCII')"
+                            ),
+                            "clause": "WHERE",
+                        },
+                        {
+                            "expressionType": "SQL",
+                            "sqlExpression": "let_mev_cm2_mg IS NOT NULL",
+                            "clause": "WHERE",
+                        },
+                    ],
+                    "row_limit": 1000,
+                    "show_legend": True,
+                    "rich_tooltip": True,
+                    "x_axis_title": "LET (MeV cm^2/mg)",
+                    "y_axis_title": "Events",
+                    "y_axis_format": "SMART_NUMBER",
+                    "stack": True,
+                    "order_desc": False,
+                },
+                12, 55,
+            )
+        )
+
+    # ── Tab 2: Pre/Post Irradiation Comparison ───────────────────────────
+    print("   Tab 2: Pre/Post Irradiation Comparison...")
+
+    tab2_chart_defs = [
+        # 0 – Data Summary table
+        (
+            "Irrad – Data Summary",
+            main_ds,
+            "table",
+            {
+                "query_mode": "aggregate",
+                "groupby": ["device_type", "manufacturer",
+                            "test_condition", "campaign_name",
+                            "measurement_category"],
+                "metrics": [
+                    {"expressionType": "SQL",
+                     "sqlExpression": "COUNT(DISTINCT device_id)",
+                     "label": "Devices"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "COUNT(DISTINCT metadata_id)",
+                     "label": "Files"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "COUNT(*)",
+                     "label": "Data Points"},
+                ],
+                "all_columns": [],
+                "order_by_cols": [],
+                "row_limit": 10000,
+                "include_time": False,
+                "table_timestamp_format": "smart_date",
+            },
+            12, 50,
+        ),
+
+        # 1 – IdVg Transfer Curves (pre vs post overlay)
+        (
+            "Irrad – IdVg Transfer Curves",
+            main_ds,
+            "echarts_timeseries_line",
+            irrad_curve_params(
+                x_axis="v_gate_plot_bin",
+                cat="IdVg",
+                x_title="V_Gate (V)",
+                y_title="I_Drain (A)",
+                bias_col="v_drain_plot_bin",
+            ),
+            12, 60,
+        ),
+
+        # 2 – IdVd Output Curves
+        (
+            "Irrad – IdVd Output Curves",
+            main_ds,
+            "echarts_timeseries_line",
+            irrad_curve_params(
+                x_axis="v_drain_plot_bin",
+                cat="IdVd",
+                x_title="V_Drain (V)",
+                y_title="I_Drain (A)",
+                bias_col="v_gate_plot_bin",
+            ),
+            12, 60,
+        ),
+
+        # 3 – Blocking Characteristics (log Y)
+        (
+            "Irrad – Blocking Characteristics",
+            main_ds,
+            "echarts_timeseries_line",
+            irrad_curve_params(
+                x_axis="v_drain_plot_bin",
+                cat="Blocking",
+                x_title="V_Drain (V)",
+                y_title="|I_Drain| (A)",
+                metric_expr="AVG(ABS(i_drain))",
+                metric_label="|I_Drain| (A)",
+                log_y=True,
+            ),
+            12, 60,
+        ),
+
+        # 4 – Gate Leakage Igss (log Y)
+        (
+            "Irrad – Gate Leakage (Igss)",
+            main_ds,
+            "echarts_timeseries_line",
+            irrad_curve_params(
+                x_axis="v_gate_plot_bin",
+                cat="Igss",
+                x_title="V_Gate (V)",
+                y_title="|I_Gate| (A)",
+                metric_expr="AVG(ABS(i_gate))",
+                metric_label="|I_Gate| (A)",
+                log_y=True,
+            ),
+            12, 60,
+        ),
+
+        # 5 – Subthreshold Curves (log Y)
+        (
+            "Irrad – Subthreshold Curves",
+            main_ds,
+            "echarts_timeseries_line",
+            irrad_curve_params(
+                x_axis="v_gate_plot_bin",
+                cat="Subthreshold",
+                x_title="V_Gate (V)",
+                y_title="|I_Drain| (A)",
+                metric_expr="AVG(ABS(i_drain))",
+                metric_label="|I_Drain| (A)",
+                log_y=True,
+                bias_col="v_drain_plot_bin",
+            ),
+            12, 60,
+        ),
+    ]
+
+    # ── Tab 3: Waveform Viewer ───────────────────────────────────────────
+    print("   Tab 3: Waveform Viewer...")
+
+    tab3_chart_defs = []
+    if waveform_ds:
+        tab3_chart_defs = [
+            # 0 – Vds vs Time
+            (
+                "Irrad – Waveform: Vds vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("vds", "Vds (V)", "V_DS (V)"),
+                12, 60,
+            ),
+            # 1 – Id vs Time
+            (
+                "Irrad – Waveform: Id vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("id_drain", "Id (A)", "I_D (A)"),
+                12, 60,
+            ),
+            # 2 – Vgs vs Time (populated only for 7-col files)
+            (
+                "Irrad – Waveform: Vgs vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params("vgs", "Vgs (V)", "V_GS (V)"),
+                12, 60,
+            ),
+            # 3 – Igs vs Time (populated only for files with gate current)
+            (
+                "Irrad – Waveform: Igs vs Time",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "igs", "Igs (A)", "I_GS (A)",
+                    adhoc_filters=[non_null_filter("igs")],
+                ),
+                12, 60,
+            ),
+            # 4 – Absolute Id on log scale for leakage-step inspection
+            (
+                "Irrad – Waveform: |Id| vs Time (log)",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "id_drain", "|Id| (A)", "|I_D| (A)",
+                    metric_expr="AVG(NULLIF(ABS(id_drain), 0))",
+                    log_y=True,
+                    adhoc_filters=[non_null_filter("id_drain")],
+                ),
+                12, 60,
+            ),
+            # 5 – Absolute Igs on log scale for SELC-I gate leakage
+            (
+                "Irrad – Waveform: |Igs| vs Time (log)",
+                waveform_ds,
+                "echarts_timeseries_line",
+                irrad_waveform_params(
+                    "igs", "|Igs| (A)", "|I_GS| (A)",
+                    metric_expr="AVG(NULLIF(ABS(igs), 0))",
+                    log_y=True,
+                    adhoc_filters=[non_null_filter("igs")],
+                ),
+                12, 60,
+            ),
+            # 6 – File-level event summary for the selected traces
+            (
+                "Irrad – Waveform Event Summary",
+                waveform_ds,
+                "table",
+                {
+                    "query_mode": "aggregate",
+                    "groupby": [
+                        "metadata_id", "device_type", "device_id",
+                        "filename", "irrad_condition_label",
+                        "single_event_status", "dominant_event_type",
+                        "seb_detected", "selc_i_detected",
+                        "selc_ii_detected",
+                    ],
+                    "metrics": [
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(event_count_total)",
+                         "label": "Events"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(seb_count)",
+                         "label": "SEB"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(selc_i_count)",
+                         "label": "SELC-I"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(selc_ii_count)",
+                         "label": "SELC-II"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(duration_s)",
+                         "label": "Duration (s)"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "MAX(fluence_span)",
+                         "label": "Fluence Span"},
+                    ],
+                    "all_columns": [],
+                    "order_by_cols": [],
+                    "row_limit": 1000,
+                    "include_time": False,
+                    "table_timestamp_format": "smart_date",
+                },
+                12, 55,
+            ),
+        ]
+
+    if event_energy_ds:
+        tab3_chart_defs.extend([
+            # 7 – Per-event integrated energy scatter
+            (
+                "Irrad – SE Event Energy vs Time",
+                event_energy_ds,
+                "echarts_timeseries_scatter",
+                event_energy_scatter_params(),
+                12, 60,
+            ),
+            # 8 – Per-event Vds/Ids operating point scatter
+            (
+                "Irrad – SE Event Operating Points (Vds vs Ids)",
+                event_energy_ds,
+                "echarts_timeseries_scatter",
+                event_operating_points_params(),
+                12, 60,
+            ),
+            # 9 – One row per detected SELC/SEB event with energy columns
+            (
+                "Irrad – SE Event Energy Detail",
+                event_energy_ds,
+                "table",
+                event_energy_table_params(),
+                12, 65,
+            ),
+        ])
+
+    # ── Tab 4: Cross-Campaign Comparison ────────────────────────────────
+    print("   Tab 4: Cross-Campaign Comparison...")
+
+    tab4_chart_defs = []
+    if degrad_ds:
+        tab4_chart_defs = [
+            # 0 – IdVg shift comparison by ion species (log Y)
+            (
+                "Irrad – IdVg Shift by Ion Species",
+                degrad_ds,
+                "echarts_timeseries_line",
+                {
+                    "x_axis": "v_gate_plot_bin",
+                    "time_grain_sqla": None,
+                    "x_axis_sort_asc": True,
+                    "metrics": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": (
+                            "SUM(avg_abs_i_drain * n_points) "
+                            "/ NULLIF(SUM(n_points), 0)"
+                        ),
+                        "label": "Avg |I_Drain| (A)",
+                    }],
+                    "groupby": ["device_type", "ion_species", "test_condition"],
+                    "adhoc_filters": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": (
+                            "measurement_category IN "
+                            "('IdVg', 'Vth', 'Subthreshold')"
+                        ),
+                        "clause": "WHERE",
+                    }],
+                    "row_limit": 50000,
+                    "truncate_metric": True,
+                    "show_legend": True,
+                    "legendType": "scroll",
+                    "rich_tooltip": True,
+                    "x_axis_title": "V_Gate (V)",
+                    "y_axis_title": "Avg |I_Drain| (A)",
+                    "y_axis_format": "SMART_NUMBER",
+                    "truncateYAxis": False,
+                    "y_axis_bounds": [None, None],
+                    "tooltipTimeFormat": "smart_date",
+                    "markerEnabled": False,
+                    "connectNulls": True,
+                    "zoomable": True,
+                    "logAxis": "y",
+                    "series_limit": 50,
+                },
+                12, 60,
+            ),
+
+            # 1 – Blocking leakage comparison by ion species (log Y)
+            (
+                "Irrad – Blocking by Ion Species",
+                degrad_ds,
+                "echarts_timeseries_line",
+                {
+                    "x_axis": "v_drain_plot_bin",
+                    "time_grain_sqla": None,
+                    "x_axis_sort_asc": True,
+                    "metrics": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": (
+                            "SUM(avg_abs_i_drain * n_points) "
+                            "/ NULLIF(SUM(n_points), 0)"
+                        ),
+                        "label": "Avg |I_Drain| (A)",
+                    }],
+                    "groupby": ["device_type", "ion_species", "test_condition"],
+                    "adhoc_filters": [cat_filter("Blocking")],
+                    "row_limit": 50000,
+                    "truncate_metric": True,
+                    "show_legend": True,
+                    "legendType": "scroll",
+                    "rich_tooltip": True,
+                    "x_axis_title": "V_Drain (V)",
+                    "y_axis_title": "Avg |I_Drain| (A)",
+                    "y_axis_format": "SMART_NUMBER",
+                    "truncateYAxis": False,
+                    "y_axis_bounds": [None, None],
+                    "tooltipTimeFormat": "smart_date",
+                    "markerEnabled": False,
+                    "connectNulls": True,
+                    "zoomable": True,
+                    "logAxis": "y",
+                    "series_limit": 50,
+                },
+                12, 60,
+            ),
+
+            # 2 – Degradation Summary table
+            (
+                "Irrad – Degradation Summary",
+                degrad_ds,
+                "table",
+                {
+                    "query_mode": "aggregate",
+                    "groupby": ["device_type", "manufacturer", "ion_species",
+                                "beam_energy_mev", "test_condition",
+                                "measurement_category"],
+                    "metrics": [
+                        {"expressionType": "SQL",
+                         "sqlExpression": "SUM(n_points)",
+                         "label": "Total Points"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "AVG(avg_abs_i_drain)",
+                         "label": "Avg |Id| (A)"},
+                        {"expressionType": "SQL",
+                         "sqlExpression": "AVG(avg_i_gate)",
+                         "label": "Avg Ig (A)"},
+                    ],
+                    "all_columns": [],
+                    "order_by_cols": [],
+                    "row_limit": 10000,
+                    "include_time": False,
+                    "table_timestamp_format": "smart_date",
+                },
+                12, 50,
+            ),
+        ]
+
+    # ── Tab 5: Individual Runs ───────────────────────────────────────────
+    print("   Tab 5: Individual Runs...")
+
+    tab5_chart_defs = [
+        # 0 – Run Summary table
+        (
+            "Irrad – Run Summary",
+            main_ds,
+            "table",
+            {
+                "query_mode": "aggregate",
+                "groupby": ["device_type", "device_id", "experiment",
+                            "measurement_type", "measurement_category",
+                            "test_condition", "campaign_name",
+                            "irrad_condition_label"],
+                "metrics": [
+                    {"expressionType": "SQL",
+                     "sqlExpression": "COUNT(*)",
+                     "label": "Data Points"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "MIN(v_gate)",
+                     "label": "Vg Min"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "MAX(v_gate)",
+                     "label": "Vg Max"},
+                    {"expressionType": "SQL",
+                     "sqlExpression": "MAX(ABS(i_drain))",
+                     "label": "Max |Id|"},
+                ],
+                "all_columns": [],
+                "order_by_cols": [],
+                "adhoc_filters": [source_rows_only_filter()],
+                "row_limit": 10000,
+                "include_time": False,
+                "table_timestamp_format": "smart_date",
+            },
+            12, 50,
+        ),
+
+        # 1 – Individual IdVg curves (per device_id)
+        (
+            "Irrad – IdVg (Individual Runs)",
+            main_ds,
+            "echarts_timeseries_line",
+            {
+                "x_axis": "v_gate_plot_bin",
+                "time_grain_sqla": None,
+                "x_axis_sort_asc": True,
+                "metrics": [{
+                    "expressionType": "SQL",
+                    "sqlExpression": "AVG(i_drain)",
+                    "label": "I_Drain (A)",
+                }],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
+                "adhoc_filters": [
+                    cat_filter("IdVg"),
+                    source_rows_only_filter(),
+                ],
+                "row_limit": 100000,
+                "truncate_metric": True,
+                "show_legend": True,
+                "legendType": "scroll",
+                "rich_tooltip": True,
+                "x_axis_title": "V_Gate (V)",
+                "y_axis_title": "I_Drain (A)",
+                "y_axis_format": "SMART_NUMBER",
+                "truncateYAxis": False,
+                "y_axis_bounds": [None, None],
+                "tooltipTimeFormat": "smart_date",
+                "markerEnabled": False,
+                "connectNulls": True,
+                "zoomable": True,
+                "series_limit": 50,
+                "series_limit_metric": {
+                    "expressionType": "SQL",
+                    "sqlExpression": "COUNT(DISTINCT v_gate_plot_bin)",
+                    "label": "_rank_by_sweep_range",
+                },
+            },
+            12, 60,
+        ),
+
+        # 2 – Individual IdVd curves
+        (
+            "Irrad – IdVd (Individual Runs)",
+            main_ds,
+            "echarts_timeseries_line",
+            {
+                "x_axis": "v_drain_plot_bin",
+                "time_grain_sqla": None,
+                "x_axis_sort_asc": True,
+                "metrics": [{
+                    "expressionType": "SQL",
+                    "sqlExpression": "AVG(i_drain)",
+                    "label": "I_Drain (A)",
+                }],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
+                "adhoc_filters": [
+                    cat_filter("IdVd"),
+                    source_rows_only_filter(),
+                ],
+                "row_limit": 100000,
+                "truncate_metric": True,
+                "show_legend": True,
+                "legendType": "scroll",
+                "rich_tooltip": True,
+                "x_axis_title": "V_Drain (V)",
+                "y_axis_title": "I_Drain (A)",
+                "y_axis_format": "SMART_NUMBER",
+                "truncateYAxis": False,
+                "y_axis_bounds": [None, None],
+                "tooltipTimeFormat": "smart_date",
+                "markerEnabled": False,
+                "connectNulls": True,
+                "zoomable": True,
+                "series_limit": 50,
+                "series_limit_metric": {
+                    "expressionType": "SQL",
+                    "sqlExpression": "COUNT(DISTINCT v_drain_plot_bin)",
+                    "label": "_rank_by_sweep_range",
+                },
+            },
+            12, 60,
+        ),
+
+        # 3 – Individual Blocking curves (log Y)
+        (
+            "Irrad – Blocking (Individual Runs)",
+            main_ds,
+            "echarts_timeseries_line",
+            {
+                "x_axis": "v_drain_plot_bin",
+                "time_grain_sqla": None,
+                "x_axis_sort_asc": True,
+                "metrics": [{
+                    "expressionType": "SQL",
+                    "sqlExpression": "AVG(ABS(i_drain))",
+                    "label": "|I_Drain| (A)",
+                }],
+                "groupby": ["device_id", "measurement_type", "metadata_id",
+                            "step_index", "test_condition",
+                            "irrad_condition_label"],
+                "adhoc_filters": [
+                    cat_filter("Blocking"),
+                    source_rows_only_filter(),
+                ],
+                "row_limit": 100000,
+                "truncate_metric": True,
+                "show_legend": True,
+                "legendType": "scroll",
+                "rich_tooltip": True,
+                "x_axis_title": "V_Drain (V)",
+                "y_axis_title": "|I_Drain| (A)",
+                "y_axis_format": "SMART_NUMBER",
+                "truncateYAxis": False,
+                "y_axis_bounds": [None, None],
+                "tooltipTimeFormat": "smart_date",
+                "markerEnabled": False,
+                "connectNulls": True,
+                "zoomable": True,
+                "logAxis": "y",
+                "series_limit": 50,
+                "series_limit_metric": {
+                    "expressionType": "SQL",
+                    "sqlExpression": "COUNT(DISTINCT v_drain_plot_bin)",
+                    "label": "_rank_by_sweep_range",
+                },
+            },
+            12, 60,
+        ),
+    ]
+
+    # ── Create all charts and build tabs ─────────────────────────────────
+    print("\n   Creating all charts...")
+
+    all_chart_ids = []
+
+    def create_tab_charts(chart_defs):
+        """Create charts for a tab, return list of (id, uuid, name, w, h)."""
+        info = []
+        for name, ds_id, viz_type, params, width, height in chart_defs:
+            cid, cuuid = create_chart(session, name, ds_id, viz_type, params)
+            info.append((cid, cuuid, name, width, height))
+            if cid:
+                all_chart_ids.append(cid)
+        return info
+
+    tab1_info = create_tab_charts(tab1_chart_defs)
+    tab2_info = create_tab_charts(tab2_chart_defs)
+    tab3_info = create_tab_charts(tab3_chart_defs)
+    tab4_info = create_tab_charts(tab4_chart_defs)
+    tab5_info = create_tab_charts(tab5_chart_defs)
+
+    # Resolve filter chart scopes by chart name (robust to reordering)
+    def named_cid(info, name):
+        return next((c[0] for c in info if c[2] == name), None)
+
+    waveform_chart_names = [
+        "Irrad – Waveform: Vds vs Time",
+        "Irrad – Waveform: Id vs Time",
+        "Irrad – Waveform: Vgs vs Time",
+        "Irrad – Waveform: Igs vs Time",
+        "Irrad – Waveform: |Id| vs Time (log)",
+        "Irrad – Waveform: |Igs| vs Time (log)",
+        "Irrad – Waveform Event Summary",
+    ]
+    event_energy_chart_names = [
+        "Irrad – SE Event Energy vs Time",
+        "Irrad – SE Event Operating Points (Vds vs Ids)",
+        "Irrad – SE Event Energy Detail",
+    ]
+    waveform_chart_ids = list(filter(None, [
+        named_cid(tab3_info, name) for name in waveform_chart_names
+    ]))
+    event_energy_chart_ids = list(filter(None, [
+        named_cid(tab3_info, name) for name in event_energy_chart_names
+    ]))
+
+    v_drain_chart_ids = list(filter(None, [
+        named_cid(tab2_info, "Irrad – IdVg Transfer Curves"),
+        named_cid(tab2_info, "Irrad – Subthreshold Curves"),
+        named_cid(tab4_info, "Irrad – IdVg Shift by Ion Species"),
+        named_cid(tab5_info, "Irrad – IdVg (Individual Runs)"),
+    ]))
+    v_gate_chart_ids = list(filter(None, [
+        named_cid(tab2_info, "Irrad – IdVd Output Curves"),
+        named_cid(tab2_info, "Irrad – Blocking Characteristics"),
+        named_cid(tab4_info, "Irrad – Blocking by Ion Species"),
+        named_cid(tab5_info, "Irrad – IdVd (Individual Runs)"),
+        named_cid(tab5_info, "Irrad – Blocking (Individual Runs)"),
+    ]))
+
+    # 5. Build dashboard
+    print("\n5. Building dashboard layout...")
+
+    tab_defs = [
+        ("Campaign Overview",         "TAB-overview",    tab1_info),
+        ("Pre/Post Comparison",        "TAB-prepost",     tab2_info),
+        ("Waveform Viewer",            "TAB-waveform",    tab3_info),
+        ("Cross-Campaign Comparison",  "TAB-crosscamp",   tab4_info),
+        ("Individual Runs",            "TAB-individual",  tab5_info),
+    ]
+    # Skip empty tabs
+    tab_defs = [td for td in tab_defs if td[2]]
+
+    position_json = build_dashboard_layout(tab_defs)
+
+    native_filters = build_native_filters(
+        all_chart_ids, main_ds,
+        degrad_ds_id=degrad_ds,
+        overview_ds_id=overview_ds,
+        waveform_ds_id=waveform_ds,
+        event_let_ds_id=event_let_ds,
+        event_energy_ds_id=event_energy_ds,
+        waveform_chart_ids=waveform_chart_ids,
+        event_energy_chart_ids=event_energy_chart_ids,
+        v_drain_chart_ids=v_drain_chart_ids,
+        v_gate_chart_ids=v_gate_chart_ids,
+    )
+    json_metadata = build_json_metadata(all_chart_ids, native_filters)
+
+    print("\n6. Creating dashboard...")
+    dash_id = create_or_update_dashboard(
+        session, DASHBOARD_TITLE, position_json, json_metadata,
+        slug=DASHBOARD_SLUG,
+    )
+
+    # 7. Associate charts with dashboard
+    print("\n7. Associating charts with dashboard...")
+    if dash_id:
+        for cid in all_chart_ids:
+            resp = session.put(
+                f"{SUPERSET_URL}/api/v1/chart/{cid}",
+                json={"dashboards": [dash_id]},
+            )
+            status = "OK" if resp.ok else f"FAIL ({resp.status_code})"
+            print(f"  Chart {cid} -> dashboard {dash_id}: {status}")
+
+    print("\n" + "=" * 70)
+    if dash_id:
+        print("Dashboard ready!")
+        print(f"  URL: {SUPERSET_URL}/superset/dashboard/{DASHBOARD_SLUG}/")
+        print(f"  Charts: {len(all_chart_ids)}")
+        tab_summary = ", ".join(
+            f"{td[0]} ({len([c for c in td[2] if c[0]])})"
+            for td in tab_defs
+        )
+        print(f"  Tabs: {tab_summary}")
+        print("  Filters:")
+        print("    1. Ion Species           (top-level radiation type)")
+        print("    2. Beam Energy (MeV)     (cascades from Ion Species)")
+        print("    3. Beam Type             (broad_beam / micro_beam)")
+        print("    4. Campaign              (cascades from Ion Species)")
+        print("    5. Manufacturer          (optional)")
+        print("    6. Device Type           (cascades from Manufacturer)")
+        print("    7. Test Condition        (pre_irrad / post_irrad)")
+        print("    8. Measurement Category  (IdVg, IdVd, Blocking, etc.)")
+        print(f"   9. V_Drain Bias (V)      (range; {len(v_drain_chart_ids)} charts)")
+        print(f"  10. V_Gate Bias (V)       (range; {len(v_gate_chart_ids)} charts)")
+        print("   11. SEB Detected          (waveform/event charts)")
+        print("   12. SELC-I Detected       (waveform/event charts)")
+        print("   13. SELC-II Detected      (waveform/event charts)")
+        print("   14. Single Event Type     (event energy charts)")
+        print("   15. Event Energy Basis    (event energy charts)")
+    else:
+        print("Dashboard creation failed — see errors above.")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()

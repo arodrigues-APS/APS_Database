@@ -4,7 +4,8 @@ import unittest
 
 sys.modules.setdefault("psycopg2", types.SimpleNamespace(connect=None))
 
-from data_processing_scripts import seed_irradiation_campaigns as seed
+from aps.seeds import seed_irradiation_campaigns as seed
+
 
 
 def existing_run(**overrides):

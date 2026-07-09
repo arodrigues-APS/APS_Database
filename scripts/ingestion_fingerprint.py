@@ -27,10 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "data_processing_scripts"))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from db_config import get_connection  # noqa: E402
+from aps.db_config import get_connection  # noqa: E402
 
 
 FINGERPRINT_VERSION = 1

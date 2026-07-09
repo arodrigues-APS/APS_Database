@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from data_processing_scripts.mechanistic_energy_proxy import (
+from aps.proxy.mechanistic_energy_proxy import (
     EnergyEquivalenceSettings,
     combine_log_sigmas,
     depletion_ratio_interval,

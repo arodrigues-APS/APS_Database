@@ -20,7 +20,7 @@ tables or populated model outputs.
 - Include the table's `CREATE INDEX IF NOT EXISTS` statements in the
   same file.
 - Do not include seed data here — seeds belong in
-  `data_processing_scripts/seed_*.py` and are applied separately.
+  `src/aps/seeds/` and are applied separately.
 - Core UI and ingestion views usually live with their owning ingestion
   script (e.g. `baselines_view` in `ingestion_baselines.py`).
 - Pipeline dashboards may keep their reporting views beside their pipeline
@@ -47,10 +47,10 @@ database, and which version?" answerable from the database itself.
 - Status report (per file: `in_sync` / `edited_since_apply` /
   `never_recorded` / `missing_file`), and optional apply:
 
-      python -m data_processing_scripts.common            # status only
-      python -m data_processing_scripts.common --apply
-      python -m data_processing_scripts.common --apply --include-pipeline            # all pipeline SQL
-      python -m data_processing_scripts.common --apply --include-pipeline 025_x.sql  # selected
+      python -m aps.common            # status only
+      python -m aps.common --apply
+      python -m aps.common --apply --include-pipeline            # all pipeline SQL
+      python -m aps.common --apply --include-pipeline 025_x.sql  # selected
 
 - Applying SQL directly via `psql` bypasses the ledger; prefer the command
   above, or re-run it after a manual psql apply to record the state.

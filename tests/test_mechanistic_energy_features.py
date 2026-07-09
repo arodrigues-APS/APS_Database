@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from data_processing_scripts.mechanistic_energy_proxy import (
+from aps.proxy.mechanistic_energy_proxy import (
     SEB_CRITICAL_J_CM2,
     SELC_CRITICAL_J_CM2,
     SIC_DENSITY_MG_CM3,

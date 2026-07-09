@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 TARGET_REPO="${APS_DEPLOY_TARGET:-/opt/aps_database/APS_Database}"
 SOURCE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_STATUS_PATHS=(data_processing_scripts schema scripts superset)
-TARGET_STATUS_PATHS=(data_processing_scripts schema scripts superset)
+SOURCE_STATUS_PATHS=(src schema scripts superset)
+TARGET_STATUS_PATHS=(src schema scripts superset)
 PRESERVE_TMP=""
 
 usage() {
