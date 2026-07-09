@@ -167,14 +167,17 @@ class RenderConcordanceTests(unittest.TestCase):
         return {
             "summary": {
                 "targets": 1300,
-                "v2_eq_v1_combined": 416,
+                "v2_eq_v1_rank": 390,
                 "v2_eq_v1_damagesig": 174,
+                "v2_eq_v1_energy_blended": 416,
             },
             "by_scope": [
                 {"scope": "same_device", "targets": 183,
-                 "independent_agree": 137, "blended_agree": 150},
+                 "rank_agree": 140, "prior_free_agree": 137,
+                 "energy_blended_agree": 150},
                 {"scope": "cross_device", "targets": 1117,
-                 "independent_agree": 37, "blended_agree": 266},
+                 "rank_agree": 250, "prior_free_agree": 37,
+                 "energy_blended_agree": 266},
             ],
             "curation_queue": [
                 {"v2_pick_evidence_class": "measured_strong",
@@ -182,13 +185,16 @@ class RenderConcordanceTests(unittest.TestCase):
             ],
         }
 
-    def test_reports_blended_and_independent_rates(self):
+    def test_reports_three_comparator_rates(self):
         out = "\n".join(render_concordance(self._conc()))
         self.assertIn("Cross-method concordance", out)
-        # 416/1300 = 32.0%, 174/1300 = 13.4%
-        self.assertIn("32.0%", out)
-        self.assertIn("13.4%", out)
-        self.assertIn("gap is the ablation", out)
+        self.assertIn("prior+mask rank-1", out)
+        self.assertIn("prior-free signature-axis rank-1", out)
+        self.assertIn("headline", out)
+        self.assertIn("energy-blended distance rank-1", out)
+        self.assertIn("30.0%", out)  # 390/1300
+        self.assertIn("13.4%", out)  # 174/1300
+        self.assertIn("32.0%", out)  # 416/1300
 
     def test_includes_scope_and_curation_tables(self):
         out = "\n".join(render_concordance(self._conc()))
@@ -203,12 +209,10 @@ class RenderConcordanceTests(unittest.TestCase):
         self.assertIn("n/a", out)
 
     def test_prior_rebaseline_caveats_present(self):
-        # Fix 2 (2026-07-02): once v1 adopts the unified regime prior the
-        # blended/independent rates jump structurally; the report must say so
-        # and must not oversell "independent" as prior-free.
         out = "\n".join(render_concordance({}))
-        self.assertIn("same regime-prior table", out)
-        self.assertIn("durable prior-free comparator", out)
+        self.assertIn("re-baselines all three rates", out)
+        self.assertIn("durable comparator", out)
+        self.assertIn("32.0% / 13.4%", out)
 
 
 class AutoSeedQuarantineTests(unittest.TestCase):

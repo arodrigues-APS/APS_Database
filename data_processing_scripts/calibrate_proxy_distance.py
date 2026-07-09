@@ -71,7 +71,6 @@ STATUS_PRIORITY = {
     "inspect_manually": 6,
     "missing_damage_signature_overlap": 6,
     "damage_signature_mismatch": 6,
-    "energy_out_of_range": 7,
 }
 
 # Damage-signature evidence-coverage model.  These mirror the CASE expressions
@@ -119,7 +118,6 @@ CURATION_CANDIDATE_STATUSES = {
 }
 
 BLOCKED_CANDIDATE_STATUSES = {
-    "energy_out_of_range",
     "missing_damage_signature_overlap",
     "damage_signature_mismatch",
 }
@@ -752,7 +750,8 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
                 END AS duration_log_delta,
                 COALESCE(mech.path_penalty, 0.75) AS path_penalty,
                 COALESCE(mech.preference, 3) AS mechanism_preference,
-                mech.status_ceiling AS mechanism_status_ceiling,
+                CASE WHEN mech.match_class IS NULL THEN 'analog_questionable'
+                     ELSE mech.status_ceiling END AS mechanism_status_ceiling,
                 dm.nearest_distance AS damage_distance,
                 dm.match_rank AS damage_match_rank,
                 dm.comparability_status AS damage_comparability_status,
@@ -773,7 +772,7 @@ def load_calibration_rows(conn) -> list[dict[str, Any]]:
             JOIN candidates c ON c.device_type IS NOT DISTINCT FROM te.device_type
             CROSS JOIN stress_proxy_distance_settings settings
             LEFT JOIN LATERAL (
-                SELECT rc.status_ceiling, rc.preference, rc.path_penalty
+                SELECT rc.match_class, rc.status_ceiling, rc.preference, rc.path_penalty
                 FROM stress_regime_compatibility rc
                 WHERE rc.target_regime = te.target_mechanistic_regime
                   AND (
@@ -814,7 +813,10 @@ def generate_grid(default: DistanceSettings, include_default: bool = True) -> li
     collapse_scales = sorted({default.collapse_delta_scale, 0.20, 0.25, 0.30})
     gate_scales = sorted({default.gate_delta_scale, 0.15, 0.20, 0.25})
     norm_scales = sorted({default.normalized_vds_delta_scale, 0.10, 0.15, 0.20})
-    energy_weights = sorted({default.energy_log_weight, 0.50, 1.00, 1.50})
+    # Since the 2026-07-06 separation, waveform ranking ignores the energy
+    # term.  Keep the setting field in the output for schema compatibility, but
+    # do not sweep no-op values that would duplicate every grid result.
+    energy_weights = [default.energy_log_weight]
     damage_signature_thresholds = sorted({default.damage_signature_mismatch_distance, 2.25, 2.50, 2.75})
     weak_thresholds = sorted({default.weak_waveform_max, 2.50, 3.00, 3.50})
 
@@ -862,6 +864,7 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
             "damage_signature_axis_distance_sq": None,
             "signature_axis_distance": None,
             "damage_signature_distance": None,
+            "waveform_only_distance": None,
             "waveform_distance": None,
             "combined_screening_distance": None,
         }
@@ -871,20 +874,14 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
     path_penalty = finite_float(row.get("path_penalty")) or 0.0
     damage_signature_distance = math.sqrt(damage_signature_axis_distance_sq + path_penalty ** 2)
 
-    energy_term = 0.0
-    log_energy = finite_float(row.get("log_energy_delta"))
-    if row.get("target_match_tier") == "energy_comparable" and log_energy is not None:
-        energy_term = settings.energy_log_weight * log_energy ** 2
-
     duration = finite_float(row.get("duration_log_delta"))
     if duration is None:
         duration = 1.0
-    waveform_distance = math.sqrt(
-        energy_term
-        + damage_signature_axis_distance_sq
-        + path_penalty ** 2
+    waveform_only_distance = math.sqrt(
+        damage_signature_axis_distance_sq
         + settings.duration_log_weight * duration ** 2
     )
+    waveform_distance = waveform_only_distance
     damage_distance = finite_float(row.get("damage_distance"))
     if damage_distance is None:
         damage_distance = settings.best_damage_distance_fallback
@@ -895,24 +892,18 @@ def distance_terms(row: dict[str, Any], settings: DistanceSettings) -> dict[str,
         "damage_signature_axis_distance_sq": damage_signature_axis_distance_sq,
         "signature_axis_distance": signature_axis_distance,
         "damage_signature_distance": damage_signature_distance,
+        "waveform_only_distance": waveform_only_distance,
         "waveform_distance": waveform_distance,
         "combined_screening_distance": combined,
     }
 
 
 def classify_row(row: dict[str, Any], settings: DistanceSettings, distances: dict[str, Any]) -> str:
-    log_energy = finite_float(row.get("log_energy_delta"))
-    if (
-        row.get("target_match_tier") == "energy_comparable"
-        and log_energy is not None
-        and log_energy > settings.energy_out_of_range_log_delta
-    ):
-        status = "energy_out_of_range"
-    elif distances["damage_signature_axes_used"] == 0:
+    if distances["damage_signature_axes_used"] == 0:
         status = "missing_damage_signature_overlap"
     elif (
-        distances["damage_signature_distance"] is not None
-        and distances["damage_signature_distance"] > settings.damage_signature_mismatch_distance
+        distances["signature_axis_distance"] is not None
+        and distances["signature_axis_distance"] > settings.damage_signature_mismatch_distance
     ):
         status = "damage_signature_mismatch"
     elif (
@@ -971,9 +962,7 @@ def ranked_candidate_items(
         mask_rows.sort(
             key=lambda item: (
                 null_last(item[1].get("signature_axis_distance")),
-                null_last(item[0].get("damage_distance")),
-                null_last(item[1].get("waveform_distance")),
-                item[1].get("candidate_rank_penalty", 0),
+                null_last(item[0].get("duration_log_delta")),
                 item[0].get("candidate_source") or "",
                 item[0].get("candidate_stress_record_key") or "",
             )
@@ -981,14 +970,19 @@ def ranked_candidate_items(
         for index, (_row, scored) in enumerate(mask_rows, start=1):
             scored["damage_signature_mask_rank"] = index
 
+    def axes_used(item):
+        value = item[1].get("damage_signature_axes_used")
+        if value is not None:
+            return _as_int(value) or 0
+        return len(item[1].get("damage_signature_available_axes") or [])
+
     return sorted(
         scored_rows,
         key=lambda item: (
             0 if item[0].get("match_scope", "same_device") == "same_device" else 1,
             item[1]["candidate_status_priority"],
-            item[1]["candidate_rank_penalty"],
-            item[1]["mechanism_preference"],
             item[1].get("damage_signature_mask_rank", 10**9),
+            -axes_used(item),
             item[0].get("candidate_source") or "",
             item[0].get("candidate_stress_record_key") or "",
         ),
@@ -1038,7 +1032,6 @@ def evaluate_config(
         if best_truth_rank <= 3:
             top3_hits += 1
         if truth_score["candidate_status"] not in {
-            "energy_out_of_range",
             "missing_damage_signature_overlap",
             "damage_signature_mismatch",
         }:

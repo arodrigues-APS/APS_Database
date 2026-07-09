@@ -58,6 +58,15 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
     }
 
+    # Legacy pre-rename URL; keep old bookmarks from serving stale phenotype artifacts.
+    location = /tools/phenotype-3d {
+        return 302 /tools/damage-signature-3d/;
+    }
+
+    location = /tools/phenotype-3d/ {
+        return 302 /tools/damage-signature-3d/;
+    }
+
     location = /tools/sc-irrad-equivalence-3d {
         return 302 /tools/sc-irrad-equivalence-3d/;
     }

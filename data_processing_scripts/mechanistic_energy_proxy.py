@@ -24,6 +24,10 @@ Design rules enforced here (see the rollout plan):
   * Uncertainty is expressed as deterministic lower/nominal/upper bands.  The
     interval-overlap helpers exist for the (later) v2 ranker; the feature view
     only emits the bands.
+  * Candidate destruction-boundary cells choose a dominant terminal-energy
+    basis family, and both bracket edges and counts are computed only from
+    rows in that family.  Rows with unknown outcomes are excluded from both
+    bracket sides and counted separately.
 """
 
 from __future__ import annotations
@@ -544,7 +548,7 @@ MECH_STATUS_PRIORITY = {
     "mechanistic_measured_candidate": 1,
     "mechanistic_predicted_candidate": 2,
     "mechanistic_cumulative_candidate": 3,
-    "mechanistic_waveform_candidate": 4,
+    "mechanistic_energy_screening_only": 4,
     "mechanistic_analog_questionable": 5,
     "mechanistic_cross_device_screening_only": 6,
     "mechanistic_missing_damage_context": 6,
@@ -612,7 +616,7 @@ def mechanistic_energy_candidate_status(
     prediction_comparability_status,
     target_regime,
     candidate_pulse_count,
-    has_waveform,
+    energy_rankable,
 ):
     """Staged v2 status.  Post-IV damage stays the anchor; the regime ceiling
     caps optimistic statuses; mechanism_mismatch is ranked last, not dropped.
@@ -642,8 +646,8 @@ def mechanistic_energy_candidate_status(
         return "mechanistic_predicted_candidate"
     if cumulative_pair:
         return "mechanistic_cumulative_candidate"
-    if has_waveform:
-        return "mechanistic_waveform_candidate"
+    if energy_rankable:
+        return "mechanistic_energy_screening_only"
     return "mechanistic_inspect_manually"
 
 
@@ -686,6 +690,7 @@ WU_2024_AVALANCHE_FAILURE_TJ_BAND_K = (783.0, 1221.0)
 # rank anything (screening assumptions, not fitted constants).
 BOUNDARY_MIN_SURVIVED_COUNT = 3
 BOUNDARY_MIN_DESTRUCTIVE_COUNT = 3
+BOUNDARY_UNKNOWN_OUTCOME_NOTE = "unknown_outcome_rows_excluded_from_bracket"
 
 # Boundary cells are built from single-pulse regimes only.  A per-pulse energy
 # bracket is meaningless for repetitive sequences (damage accrues over the
@@ -701,6 +706,28 @@ _ENERGY_BASIS_FAMILIES = (
     ("proxy", "proxy"),
     ("integrated", "integrated"),
 )
+
+
+def survived_evidence(response_reversibility, avalanche_outcome=None) -> bool:
+    """Whether a row has positive evidence for the survived bracket side.
+
+    Destructive evidence is still ``response_reversibility ==
+    'destructive_or_catastrophic'``.  Everything that is neither destructive
+    nor positively survived is unknown and must be excluded from both bracket
+    sides, not silently counted as survived.
+
+    A destructive row is never survived evidence, even when it also carries a
+    non-fail avalanche outcome (contradictory metadata: e.g. a catastrophic
+    flag from waveform extraction next to a 'pass' outcome string).  Without
+    this guard such a row would sit on BOTH bracket sides.
+    """
+    if response_reversibility == "destructive_or_catastrophic":
+        return False
+    if response_reversibility == "post_iv_measured":
+        return True
+    if avalanche_outcome is None:
+        return False
+    return "fail" not in str(avalanche_outcome).lower()
 
 
 def energy_basis_family(basis):
@@ -727,6 +754,7 @@ def destruction_boundary_interval(
     destructive_count,
     min_survived_count=BOUNDARY_MIN_SURVIVED_COUNT,
     min_destructive_count=BOUNDARY_MIN_DESTRUCTIVE_COUNT,
+    unknown_outcome_count=0,
 ):
     """Bracket the electrical destruction boundary for one boundary cell.
 
@@ -772,6 +800,9 @@ def destruction_boundary_interval(
             return int(value) if value is not None else 0
         except (TypeError, ValueError):
             return 0
+
+    if _count(unknown_outcome_count) > 0:
+        notes.append(BOUNDARY_UNKNOWN_OUTCOME_NOTE)
 
     if low_bound is not None and _count(survived_count) < min_survived_count:
         blockers.append("destruction_boundary_insufficient_survived_count")

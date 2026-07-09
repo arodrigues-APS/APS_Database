@@ -18,6 +18,27 @@ import numpy as np
 import pandas as pd
 
 try:
+    from data_processing_scripts.proxy_viz_palette import (
+        CONCORDANCE_STYLE,
+        DEEMPHASIS_GRAY,
+        EVENT_TYPE_COLORS,
+        EVENT_TYPE_FALLBACK,
+        OVERLAP_COLORS as CRITICAL_OVERLAP_COLORS,
+        SOURCE_STYLES,
+        V3_COMPONENT_COLORS,
+    )
+except ImportError:  # Allows running from inside data_processing_scripts/.
+    from proxy_viz_palette import (
+        CONCORDANCE_STYLE,
+        DEEMPHASIS_GRAY,
+        EVENT_TYPE_COLORS,
+        EVENT_TYPE_FALLBACK,
+        OVERLAP_COLORS as CRITICAL_OVERLAP_COLORS,
+        SOURCE_STYLES,
+        V3_COMPONENT_COLORS,
+    )
+
+try:
     from data_processing_scripts.depletion_threshold_model import (
         KOSIER_2026_SEB_CRITICAL_J_CM2,
         KOSIER_2026_SELC_CRITICAL_J_CM2,
@@ -37,34 +58,13 @@ DELTA_CSV = OUT_DIR / "damage_signature_delta_3d.csv"
 V2_CSV = OUT_DIR / "proxy_candidate_energy_v2.csv"
 # Optional: written by export_proxy_method_concordance_csv.py (v1×v2 join).
 CONCORDANCE_CSV = OUT_DIR / "proxy_method_concordance.csv"
+# Optional: written by export_proxy_candidate_combined_v3_csv.py.
+V3_CSV = OUT_DIR / "proxy_candidate_combined_v3.csv"
 PLOTLY_ASSET = OUT_DIR / "plotly-2.35.2.min.js"
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 OUTPUT_HTML = OUT_DIR / "damage_signature_3d_interactive.html"
 
 
-SOURCE_STYLES = {
-    "irradiation": {
-        "name": "Irradiation",
-        "color": "#377eb8",
-        "symbol": "circle",
-        "size": 3,
-        "opacity": 0.42,
-    },
-    "avalanche": {
-        "name": "Avalanche",
-        "color": "#1b9e77",
-        "symbol": "diamond",
-        "size": 3,
-        "opacity": 0.45,
-    },
-    "sc": {
-        "name": "Short circuit",
-        "color": "#e66101",
-        "symbol": "square",
-        "size": 6,
-        "opacity": 0.95,
-    },
-}
 
 DELTA_STYLES = {
     "avalanche": {
@@ -232,16 +232,6 @@ def scaled_marker_size(series: pd.Series, minimum: float = 3.0,
     return (minimum + (maximum - minimum) * values.fillna(0.0) / vmax).tolist()
 
 
-# Irradiation event-type palette, shared with the dashboard CANDIDATE_COLORS.
-EVENT_TYPE_COLORS = {
-    "SEB": "#54a24b",
-    "SELCI": "#e45756",
-    "SELCII": "#72b7b2",
-    "MIXED": "#b279a2",
-    "UNKNOWN": "#9d755d",
-}
-EVENT_TYPE_FALLBACK = "#9d755d"
-
 
 def json_for_html(value: Any) -> str:
     text = json.dumps(
@@ -341,16 +331,95 @@ def cartesian_legend_row_layout(title: str) -> dict[str, Any]:
     margin cannot hold both, so give them an explicit vertical order inside a
     taller margin: title first, legend below, plot area last."""
     layout = common_cartesian_layout(title)
-    layout["margin"] = {**layout["margin"], "t": 210}
-    layout["title"] = {**layout["title"], "y": 1.0, "yanchor": "top",
-                       "pad": {"t": 10}}
+    layout["margin"] = {**layout["margin"], "t": 230}
+    layout["title"] = {**layout["title"], "y": 0.97, "yanchor": "top",
+                       "pad": {"t": 0, "b": 12}}
     layout["showlegend"] = True
     layout["legend"] = {"orientation": "h", "x": 0.5, "xanchor": "center",
-                        "y": 0.955, "yanchor": "top",
+                        "y": 0.885, "yanchor": "top",
                         "font": {"size": 11},
                         "bgcolor": "rgba(255,255,255,0.86)",
                         "itemsizing": "constant"}
     return layout
+
+
+def _empty_payload(title: str, note: str, *, disabled: bool = True) -> dict[str, Any]:
+    payload = {
+        "traces": [],
+        "layout": common_cartesian_layout(title),
+        "note": note,
+    }
+    if disabled:
+        payload["disabledReason"] = note
+    return payload
+
+
+def _rank1(frame: pd.DataFrame, rank_column: str) -> pd.DataFrame:
+    if frame is None or frame.empty or rank_column not in frame.columns:
+        return pd.DataFrame()
+    out = frame.copy()
+    out[rank_column] = numeric(out[rank_column])
+    return out[out[rank_column] == 1].copy()
+
+
+def _value_counts(frame: pd.DataFrame, column: str) -> dict[str, int]:
+    if frame is None or frame.empty or column not in frame.columns:
+        return {}
+    counts = frame[column].fillna("not recorded").astype(str).value_counts()
+    return {str(k): int(v) for k, v in counts.items()}
+
+
+def _truth_status_is_curated(series: pd.Series) -> pd.Series:
+    values = series.fillna("no_curated_truth").astype(str)
+    return values.ne("no_curated_truth") & values.ne("")
+
+
+def _table_payload(
+    title: str,
+    columns: list[tuple[str, list[Any]]],
+    note: str,
+    *,
+    height: int = 720,
+    disabled_reason: str | None = None,
+) -> dict[str, Any]:
+    layout = common_cartesian_layout(title)
+    layout.update({"height": height, "margin": {"l": 20, "r": 20, "t": 82, "b": 20}})
+    payload = {
+        "traces": [{
+            "type": "table",
+            "header": {
+                "values": [label for label, _values in columns],
+                "fill": {"color": "#eaeef2"},
+                "align": "left",
+                "font": {"color": "#24292f", "size": 12},
+            },
+            "cells": {
+                "values": [values for _label, values in columns],
+                "align": "left",
+                "height": 24,
+                "fill": {"color": "#ffffff"},
+                "font": {"color": "#24292f", "size": 11},
+            },
+        }],
+        "layout": layout,
+        "note": note,
+    }
+    if disabled_reason:
+        payload["disabledReason"] = disabled_reason
+    return payload
+
+
+def _format_count(value: Any) -> str:
+    number = finite_number(value)
+    if number is None:
+        return "not exported"
+    return f"{int(number):,}"
+
+
+def _pct(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "not available"
+    return f"{numerator / denominator:.1%}"
 
 
 def source_plot_payload(records: pd.DataFrame) -> dict[str, Any]:
@@ -1688,22 +1757,13 @@ def energy_balance_plot_payload(records: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-CRITICAL_OVERLAP_COLORS = {
-    "strong_overlap": "#1a9850",
-    "partial_overlap": "#a6d96a",
-    "near_miss": "#fdae61",
-    "far_miss": "#d73027",
-    "missing_interval": "#999999",
-}
-V2_TARGET_BAND_COLOR = "#4575b4"
-V2_NEEDED_BAND_COLUMNS = [
+
+V2_TARGET_BAND_COLUMNS = [
     "target_severity_low",
     "target_severity_high",
     "target_severity_point_ratio",
-    "candidate_failure_fraction_low",
-    "candidate_failure_fraction_high",
-    "candidate_failure_fraction_point",
 ]
+V2_TARGET_BAND_COLOR = "#2f6f9f"
 
 
 def _v2_clean(value: Any) -> str:
@@ -1736,6 +1796,48 @@ def _v2_target_label(rec: dict[str, Any]) -> str:
     return f"{event} · {_v2_key_tail(key)}" if key else event
 
 
+def _v2_numeric_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype="float64")
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def _with_v2_candidate_axis(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach candidate severity columns used by the v2 charts.
+
+    Own-threshold failure fraction is the preferred Phase-5 axis. Some live
+    exports legitimately lack a two-sided destruction boundary for every
+    candidate, leaving that axis empty. In that case, fall back row-by-row to
+    the exported Kosier-context severity interval so the viewer can still show
+    the available screening comparison without pretending it is own-threshold.
+    """
+    out = df.copy()
+    failure_low = _v2_numeric_column(out, "candidate_failure_fraction_low")
+    failure_high = _v2_numeric_column(out, "candidate_failure_fraction_high")
+    failure_point = _v2_numeric_column(out, "candidate_failure_fraction_point")
+    kosier_low = _v2_numeric_column(out, "candidate_severity_low_kosier_context")
+    kosier_high = _v2_numeric_column(out, "candidate_severity_high_kosier_context")
+    kosier_point = _v2_numeric_column(out, "candidate_severity_point_ratio_kosier_context")
+
+    use_failure = failure_low.notna() & failure_high.notna() & failure_point.notna()
+    out["_v2_candidate_low"] = failure_low.where(use_failure, kosier_low)
+    out["_v2_candidate_high"] = failure_high.where(use_failure, kosier_high)
+    out["_v2_candidate_point"] = failure_point.where(use_failure, kosier_point)
+    out["_v2_candidate_axis_basis"] = np.where(
+        use_failure,
+        "own-threshold failure fraction",
+        "Kosier-context severity fallback",
+    )
+    failure_overlap = out.get("candidate_failure_fraction_overlap_class")
+    if failure_overlap is None:
+        failure_overlap = pd.Series("", index=out.index, dtype="object")
+    kosier_overlap = out.get("critical_severity_overlap_class_kosier_context")
+    if kosier_overlap is None:
+        kosier_overlap = pd.Series("", index=out.index, dtype="object")
+    out["_v2_candidate_overlap_class"] = failure_overlap.where(use_failure, kosier_overlap)
+    return out
+
+
 def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     """Per-target severity-interval overlap for v2's rank-1 candidate.
 
@@ -1766,9 +1868,19 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     df = rows.copy()
     if "mechanistic_energy_candidate_rank" in df.columns:
         df = df[df["mechanistic_energy_candidate_rank"] == 1]
-    if any(col not in df.columns for col in V2_NEEDED_BAND_COLUMNS):
+    if any(col not in df.columns for col in V2_TARGET_BAND_COLUMNS):
         return empty()
-    df = df.dropna(subset=V2_NEEDED_BAND_COLUMNS)
+    df = _with_v2_candidate_axis(df)
+    needed = V2_TARGET_BAND_COLUMNS + [
+        "_v2_candidate_low", "_v2_candidate_high", "_v2_candidate_point",
+    ]
+    df = df.dropna(subset=needed)
+    df = df[(df["target_severity_low"] > 0)
+            & (df["target_severity_high"] > 0)
+            & (df["target_severity_point_ratio"] > 0)
+            & (df["_v2_candidate_low"] > 0)
+            & (df["_v2_candidate_high"] > 0)
+            & (df["_v2_candidate_point"] > 0)]
     if df.empty:
         return empty()
 
@@ -1784,9 +1896,10 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     )
     candidate_hover = (
         "<b>Candidate %{customdata[0]}</b><br>"
-        "Candidate failure fraction: %{x:.3g}<br>"
+        "Candidate severity ratio: %{x:.3g}<br>"
         "Band: [%{customdata[1]}, %{customdata[2]}]<br>"
-        "Failure-fraction overlap: %{customdata[3]}<br>"
+        "Basis: %{customdata[21]}<br>"
+        "Overlap: %{customdata[3]}<br>"
         "v1 rank %{customdata[4]} → v2 rank %{customdata[5]}<br>"
         "Status: %{customdata[6]}<br>"
         "Proxy claim: %{customdata[11]} (%{customdata[12]})<br>"
@@ -1797,7 +1910,7 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "Claim blockers: %{customdata[16]}<br>"
         "Claim summary: %{customdata[17]}<br>"
         "Notes: %{customdata[10]}"
-        "<extra>Candidate (own-threshold fraction)</extra>"
+        "<extra>Candidate severity</extra>"
     )
 
     traces: list[dict[str, Any]] = []
@@ -1835,18 +1948,18 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             "visible": True,
         })
 
-        c_x = [float(r["candidate_failure_fraction_point"]) for r in recs]
-        c_plus = [float(r["candidate_failure_fraction_high"]) - x for r, x in zip(recs, c_x)]
-        c_minus = [x - float(r["candidate_failure_fraction_low"]) for r, x in zip(recs, c_x)]
+        c_x = [float(r["_v2_candidate_point"]) for r in recs]
+        c_plus = [float(r["_v2_candidate_high"]) - x for r, x in zip(recs, c_x)]
+        c_minus = [x - float(r["_v2_candidate_low"]) for r, x in zip(recs, c_x)]
         marker_colors = [
             CRITICAL_OVERLAP_COLORS.get(
-                _v2_clean(r.get("candidate_failure_fraction_overlap_class")), "#999999")
+                _v2_clean(r.get("_v2_candidate_overlap_class")), "#999999")
             for r in recs
         ]
         traces.append({
             "type": "scatter",
             "mode": "markers",
-            "name": "Candidate failure-fraction band",
+            "name": "Candidate severity band",
             "legendgroup": "candidate",
             "showlegend": dev == devices[0],
             "x": c_x,
@@ -1860,9 +1973,9 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
                        "line": {"color": "#24292f", "width": 0.5}},
             "customdata": [[
                 _v2_clean(r.get("candidate_source")),
-                display_value(r["candidate_failure_fraction_low"]),
-                display_value(r["candidate_failure_fraction_high"]),
-                _v2_clean(r.get("candidate_failure_fraction_overlap_class")),
+                display_value(r["_v2_candidate_low"]),
+                display_value(r["_v2_candidate_high"]),
+                _v2_clean(r.get("_v2_candidate_overlap_class")),
                 _v2_clean(r.get("candidate_rank_v1")),
                 _v2_clean(r.get("mechanistic_energy_candidate_rank")),
                 _v2_clean(r.get("mechanistic_energy_candidate_status")),
@@ -1880,6 +1993,7 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
                 _v2_clean(r.get("proxy_claim_status_v1")) or "not recorded",
                 _v2_clean(r.get("decision_safe_rank_v1")) or "not ranked",
                 _v2_clean(r.get("signature_claim_quality_v1")) or "not recorded",
+                _v2_clean(r.get("_v2_candidate_axis_basis")),
             ] for r in recs],
             "hovertemplate": candidate_hover,
             "visible": True,
@@ -1900,17 +2014,30 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
                     "yref": "paper", "line": {"color": "#8c959f", "dash": "dot", "width": 1}}],
     })
 
+    own_boundary_usable = bool(
+        "candidate_failure_fraction_gate_usable" in df.columns
+        and df["candidate_failure_fraction_gate_usable"].fillna(False).astype(bool).any()
+    )
+    disabled_reason = None
+    if not own_boundary_usable:
+        disabled_reason = (
+            "Own-threshold candidate failure-fraction coverage is 0%; interval "
+            "bands are hidden until candidate destruction-boundary data exists."
+        )
     note = (
         "Each row is one target's rank-1 v2 candidate. The blue band is the "
         "target stored-field severity interval (depletion ratio to its SEB/SELC "
-        "threshold); the diamond band is the candidate's own electrical "
-        "failure-threshold fraction, colored by the candidate failure-fraction overlap class (green strong → "
-        "red far-miss). These are different physical quantities on a shared "
+        "threshold); the diamond band is the candidate severity interval. It "
+        "uses the own electrical failure-threshold fraction when available and "
+        "falls back to the Kosier-context severity interval when the candidate "
+        "has no two-sided destruction boundary. Colors follow the plotted "
+        "overlap class (green strong → red far-miss). These are different "
+        "physical quantities on a shared "
         "screening axis — overlap is a retrieval hint, not an equivalence claim. "
         "Every candidate hover shows the v2 status and blockers next to the "
         "numbers. Use the device filter at the top to switch device."
     )
-    return {
+    payload = {
         "traces": traces,
         "layout": layout,
         "note": note,
@@ -1922,6 +2049,9 @@ def v2_interval_overlap_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             "allShowsOnly": devices[0] if devices and devices[0] is not None else None,
         },
     }
+    if disabled_reason:
+        payload["disabledReason"] = disabled_reason
+    return payload
 
 
 SEVERITY_CLASS_ORDER = [
@@ -1939,6 +2069,7 @@ SEVERITY_CLASS_LABELS = {
 # summarized separately.
 V2_OVERLAP_SUMMARY_AXES = [
     ("candidate_failure_fraction_overlap_class", "Own-threshold severity"),
+    ("critical_severity_overlap_class_kosier_context", "Kosier-context severity"),
     ("terminal_energy_overlap_class", "Terminal energy"),
     ("timescale_overlap_class", "Timescale"),
 ]
@@ -1985,12 +2116,13 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     df = rows.copy()
     if "mechanistic_energy_candidate_rank" in df.columns:
         df = df[df["mechanistic_energy_candidate_rank"] == 1]
-    need = ["target_severity_point_ratio", "candidate_failure_fraction_point"]
+    need = ["target_severity_point_ratio"]
     if any(c not in df.columns for c in need):
         return empty()
-    df = df.dropna(subset=need)
+    df = _with_v2_candidate_axis(df)
+    df = df.dropna(subset=need + ["_v2_candidate_point"])
     df = df[(df["target_severity_point_ratio"] > 0)
-            & (df["candidate_failure_fraction_point"] > 0)]
+            & (df["_v2_candidate_point"] > 0)]
     if df.empty:
         return empty()
 
@@ -2001,8 +2133,8 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         float(df["target_severity_point_ratio"].max()),
     )
     y_range_all = _parity_log_range(
-        float(df["candidate_failure_fraction_point"].min()),
-        float(df["candidate_failure_fraction_point"].max()),
+        float(df["_v2_candidate_point"].min()),
+        float(df["_v2_candidate_point"].max()),
     )
     range_all = {"x": x_range_all, "y": y_range_all}
     shape_lo_log = min(x_range_all[0], y_range_all[0])
@@ -2011,7 +2143,8 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     hover = (
         "<b>%{customdata[0]}</b><br>"
         "Target severity ratio: %{x:.3g}<br>"
-        "Candidate failure fraction: %{y:.3g}<br>"
+        "Candidate severity ratio: %{y:.3g}<br>"
+        "Basis: %{customdata[8]}<br>"
         "Overlap: %{customdata[1]}<br>"
         "Candidate %{customdata[2]} · status %{customdata[3]}<br>"
         "Proxy claim: %{customdata[5]} · truth %{customdata[6]}<br>"
@@ -2037,13 +2170,13 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
                     float(sub["target_severity_point_ratio"].max()),
                 ),
                 "y": _parity_log_range(
-                    float(sub["candidate_failure_fraction_point"].min()),
-                    float(sub["candidate_failure_fraction_point"].max()),
+                    float(sub["_v2_candidate_point"].min()),
+                    float(sub["_v2_candidate_point"].max()),
                 ),
             }
         colors = [
             CRITICAL_OVERLAP_COLORS.get(
-                _v2_clean(r.get("candidate_failure_fraction_overlap_class")), "#999999")
+                _v2_clean(r.get("_v2_candidate_overlap_class")), "#999999")
             for r in recs
         ]
         traces.append({
@@ -2051,19 +2184,20 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             "name": _v2_clean(dev) or "pairs",
             "showlegend": False,
             "x": [float(r["target_severity_point_ratio"]) for r in recs],
-            "y": [float(r["candidate_failure_fraction_point"]) for r in recs],
+            "y": [float(r["_v2_candidate_point"]) for r in recs],
             "marker": {"color": colors, "size": 7, "opacity": 0.82,
                        "line": {"color": "#24292f", "width": 0.4}},
             "customdata": [[
                 (_v2_clean(r.get("target_event_type")) + " · "
                  + _v2_key_tail(_v2_clean(r.get("target_stress_record_key")))),
-                _v2_clean(r.get("candidate_failure_fraction_overlap_class")),
+                _v2_clean(r.get("_v2_candidate_overlap_class")),
                 _v2_clean(r.get("candidate_source")),
                 _v2_clean(r.get("mechanistic_energy_candidate_status")),
                 _v2_clean(r.get("energy_v2_blockers")) or "(none)",
                 _v2_clean(r.get("proxy_claim_status")) or "screening_only",
                 _v2_clean(r.get("truth_validation_status")) or "no_curated_truth",
                 _v2_clean(r.get("proxy_claim_blockers")) or "(none)",
+                _v2_clean(r.get("_v2_candidate_axis_basis")),
             ] for r in recs],
             "hovertemplate": hover,
             "visible": True,
@@ -2107,8 +2241,8 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "xaxis": {"title": {"text": "Target severity ratio "
                             "(stored depletion ÷ its SEB·SELC critical; log)"},
                   "type": "log", "range": x_range_all, "gridcolor": "#d8dee4"},
-        "yaxis": {"title": {"text": "Candidate failure fraction "
-                            "(bulk terminal ÷ Kosier U_crit; log)"},
+        "yaxis": {"title": {"text": "Candidate severity ratio "
+                            "(own threshold when available; Kosier fallback; log)"},
                   "type": "log", "range": y_range_all, "gridcolor": "#d8dee4"},
         "shapes": shapes,
     })
@@ -2121,9 +2255,13 @@ def v2_severity_parity_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "mark each side's critical threshold. Most rank-1 candidates sit far "
         "ABOVE the diagonal — they reach a far higher multiple of their own "
         "threshold than the irradiation target does, which is why critical "
-        "severity overlap is mostly far-miss. Both axes are normalized to their "
-        "OWN threshold, so this is a screening comparison, not a claim the raw "
-        "joules are equal."
+        "severity overlap is mostly far-miss. Candidate points use the own "
+        "threshold when a two-sided destruction boundary exists; otherwise they "
+        "use the exported Kosier-context severity fallback. This is a screening "
+        "comparison, not a claim the raw joules are equal. For SELC targets, "
+        "the target axis is a leakage-onset fraction while the candidate axis "
+        "is a destruction-threshold fraction; they are like-for-like only as "
+        "fractions of each side's own threshold."
     )
     return {
         "traces": traces, "layout": layout, "note": note,
@@ -2198,50 +2336,77 @@ def v2_overlap_summary_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         cc = df["cumulative_exposure_overlap_class"].value_counts().to_dict()
         cum_note = (" Cumulative-exposure (evidence availability, not overlap): "
                     + ", ".join(f"{k}={v}" for k, v in cc.items()) + ".")
+    modal_bits = []
+    for col, label in present_axes:
+        counts = df[col].fillna("missing_interval").astype(str).value_counts()
+        if counts.empty:
+            continue
+        modal_bits.append(f"{label}: {counts.index[0]} ({int(counts.iloc[0])}/{total})")
+    modal_sentence = "; ".join(modal_bits) if modal_bits else "no overlap classes recorded"
     note = (
         f"Rank-1 candidates (n={total}) by overlap class on each comparable "
-        "energy axis. Headline equivalence read: terminal-energy overlap is "
-        "mostly strong while candidate failure-fraction overlap is mostly far-miss — "
-        "candidates release comparable raw energy but sit at very different "
-        "multiples of the irradiation failure threshold. Green=strong "
-        "(equivalent) → red=far-miss; gray=missing interval." + cum_note
+        f"energy axis. Current modal state: {modal_sentence}. The own-threshold "
+        "severity row is the decision-quality axis; when it is missing, the "
+        "Kosier-context row is an explicit fallback diagnostic rather than an "
+        "equivalence claim. Green=strong overlap, orange=near/partial miss, "
+        "red=far miss, gray=missing interval." + cum_note
         + " Global summary; use the parity tab for per-device, per-pair detail."
     )
     return {"traces": traces, "layout": layout, "note": note}
 
 
 # v1 (damage-signature) vs v2 (energy) concordance categories.
-CONCORDANCE_STYLE = {
-    "consensus": ("#1a9850", "diamond"),        # both methods rank-1 the same pair
-    "v2_pick": ("#e6731a", "circle"),           # v2's pick (mild disagreement)
-    "v1_pick": ("#4575b4", "square"),           # v1's pick (mild disagreement)
-    "strong_disagree": ("#d73027", "circle"),   # v2 pick; v1 pick demoted out of v2 top-10
-}
+
 CONCORDANCE_LABELS = {
     "consensus": "Consensus (both rank-1)",
     "v2_pick": "v2 (energy) pick",
     "v1_pick": "v1 (damage-sig) pick",
     "strong_disagree": "v2 pick · v1 demoted",
+    "conflict_focus": "C2M0080120D avalanche-vs-SC conflict",
 }
 
 
 def _concordance_coords(rec: dict[str, Any]) -> tuple[float, float, float] | None:
-    """(signature-axis distance, failure-fraction dist [dex], terminal dist [dex]) or None.
+    """(signature-axis distance, failure-fraction distance, terminal distance).
 
-    X is v1's prior-free signature_axis_distance; Y is the v2 target-severity
-    vs candidate-failure-fraction log-distance; Z is |log10 terminal-energy
-    delta|. A point at the origin is an identical proxy on all three.
+    X is v1's prior-free signature_axis_distance.  Y is the v2 target-severity
+    vs candidate-failure-fraction log-distance when the own-threshold boundary
+    is usable; otherwise it falls back to the staged overlap-class score
+    (strong=0, partial=1, near=2, far=3, missing=4).  Z is |log10 terminal
+    energy delta|.
     """
     try:
         x = float(rec.get("signature_axis_distance", rec.get("damage_signature_distance")))
-        tsr = float(rec.get("target_severity_point_ratio"))
-        csr = float(rec.get("candidate_failure_fraction_point"))
         led = float(rec.get("log_energy_delta_dex"))
     except (TypeError, ValueError):
         return None
-    if not (math.isfinite(x) and math.isfinite(led)) or tsr <= 0 or csr <= 0:
+    if not (math.isfinite(x) and math.isfinite(led)):
         return None
-    return (x, abs(math.log10(csr) - math.log10(tsr)), abs(led))
+
+    y = finite_number(rec.get("v2_pick_dssig_percentile"))
+    if y is None:
+        try:
+            tsr = float(rec.get("target_severity_point_ratio"))
+            csr = float(rec.get("candidate_failure_fraction_point"))
+            if math.isfinite(tsr) and math.isfinite(csr) and tsr > 0 and csr > 0:
+                y = abs(math.log10(csr) - math.log10(tsr))
+        except (TypeError, ValueError):
+            y = None
+    if y is None:
+        y = {
+            "strong_overlap": 0.0,
+            "partial_overlap": 1.0,
+            "near_miss": 2.0,
+            "far_miss": 3.0,
+            "missing_interval": 4.0,
+        }.get(_v2_clean(rec.get("candidate_failure_fraction_overlap_class")), 4.0)
+    return (x, y, abs(led))
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "t", "1", "yes"}
 
 
 def _concordance_customdata(rec: dict[str, Any], category: str) -> list[str]:
@@ -2264,6 +2429,9 @@ def _concordance_customdata(rec: dict[str, Any], category: str) -> list[str]:
         _v2_clean(rec.get("signature_claim_quality_v1"))
         or _v2_clean(rec.get("v1_signature_claim_quality"))
         or "not recorded",
+        "C2M0080120D avalanche-vs-SC conflict"
+        if _truthy_flag(rec.get("c2m0080120d_avalanche_vs_sc_conflict"))
+        else ("source conflict" if _truthy_flag(rec.get("source_conflict")) else "no source conflict"),
     ]
 
 
@@ -2272,7 +2440,7 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
 
     Per target, the v1 (damage-signature) pick and v2 (energy) pick are placed
     in a shared distance space — X = v1 prior-free signature-axis distance,
-    Y = v2 failure-fraction distance (dex), Z = terminal-energy distance (dex) —
+    Y = v2 failure-fraction distance (class fallback), Z = terminal-energy distance (dex) —
     and joined by a line whose length is literally how far apart the two methods'
     chosen proxies are. Consensus picks coincide (zero-length); disagreements
     pull toward different axes. Colored by agreement; v1 picks demoted out of
@@ -2286,7 +2454,7 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     scene = {
         "dragmode": "orbit",
         "xaxis": {"title": {"text": "v1 signature-axis distance (prior-free)"}},
-        "yaxis": {"title": {"text": "v2 failure-fraction distance (dex)"}},
+        "yaxis": {"title": {"text": "v2 pick percentile in v1 ordering / fallback"}},
         "zaxis": {"title": {"text": "terminal-energy distance (dex)"}},
     }
 
@@ -2314,12 +2482,14 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     dev_x: dict[Any, list] = {}
     dev_pts: dict[Any, dict[str, list]] = {}
     dev_conn: dict[Any, dict[str, list]] = {}
-    counts = {"consensus": 0, "mild": 0, "strong": 0, "unplottable": 0}
+    counts = {"consensus": 0, "mild": 0, "strong": 0, "unplottable": 0, "conflict_focus": 0}
 
     def _add_point(device, coord, category, rec):
         p = dev_pts.setdefault(device, {"x": [], "y": [], "z": [],
                                         "color": [], "symbol": [], "cdat": []})
         color, symbol = CONCORDANCE_STYLE[category]
+        if _truthy_flag(rec.get("c2m0080120d_avalanche_vs_sc_conflict")):
+            color, symbol = CONCORDANCE_STYLE["conflict_focus"]
         p["x"].append(coord[0]); p["y"].append(coord[1]); p["z"].append(coord[2])
         p["color"].append(color); p["symbol"].append(symbol)
         p["cdat"].append(_concordance_customdata(rec, category))
@@ -2331,6 +2501,8 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             continue
         device = _v2_clean(v2_pick.get("device_type")) or None
         v2c = _concordance_coords(v2_pick)
+        if _truthy_flag(v2_pick.get("c2m0080120d_avalanche_vs_sc_conflict")):
+            counts["conflict_focus"] += 1
         v1_pick = next((r for r in recs if r.get("v1_rank") == 1), None)
         if v1_pick is not None and v2_pick.get("v1_rank") == 1:
             if v2c is None:
@@ -2366,10 +2538,11 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "<b>%{customdata[0]}</b><br>"
         "%{customdata[1]} · cand %{customdata[2]}<br>"
         "v1 rank %{customdata[3]} → v2 rank %{customdata[4]}<br>"
-        "damage-sig %{x:.3g} · failure fraction %{y:.2f} dex · terminal %{z:.2f} dex<br>"
+        "signature %{x:.3g} · enrichment/fallback Y %{y:.2f} · terminal %{z:.2f} dex<br>"
         "v2 %{customdata[5]} · overlap %{customdata[6]}<br>"
         "proxy claim: %{customdata[8]} (%{customdata[9]}) · truth %{customdata[10]}<br>"
         "v1 claim: %{customdata[11]} · signature %{customdata[12]}<br>"
+        "conflict: %{customdata[13]}<br>"
         "blockers: %{customdata[7]}<extra></extra>"
     )
 
@@ -2402,7 +2575,7 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
             titles[dev] = f"{base_title}<br>{dev}"
 
     # Legend proxies (always visible) for the agreement categories + connector.
-    for cat in ("consensus", "v2_pick", "v1_pick", "strong_disagree"):
+    for cat in ("consensus", "v2_pick", "v1_pick", "strong_disagree", "conflict_focus"):
         color, symbol = CONCORDANCE_STYLE[cat]
         traces.append({
             "type": "scatter3d", "mode": "markers",
@@ -2429,10 +2602,12 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         f"rank-1 the same candidate — points coincide), {counts['mild']} mild "
         f"disagreement (different pick inside v2's top-10, connected by a line), "
         f"{counts['strong']} strong disagreement (v1's pick demoted out of v2's "
-        f"top-10 — only v2's pick shown, in red). {counts['unplottable']} more "
-        f"targets can't be placed in 3D (a distance axis is missing — usually "
-        f"terminal energy), itself a data-coverage signal. X is energy-FREE "
-        f"(damage_signature_distance), so agreement here is an independent "
+        f"top-10 — only v2's pick shown, in red). "
+        f"{counts['conflict_focus']} C2M0080120D avalanche-vs-SC conflict targets "
+        f"are highlighted with the conflict accent. {counts['unplottable']} more "
+        f"targets can't be placed in 3D (signature or terminal-energy axis is "
+        f"missing), itself a data-coverage signal. X is energy-FREE "
+        f"(signature_axis_distance), so agreement here is an independent "
         f"cross-method check, not circular. All devices shown together by "
         f"default; drag to orbit, or pick a device above to isolate it."
     )
@@ -2448,6 +2623,534 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         },
     }
 
+
+V3_COMPONENTS = [
+    ("signature", "signature_component_share", "signature_component_weighted_sq"),
+    ("duration", "duration_component_share", "duration_component_weighted_sq"),
+    ("failure fraction", "failure_fraction_component_share", "failure_fraction_component_weighted_sq"),
+    ("regime/path", "regime_path_component_share", "regime_path_component_weighted_sq"),
+    ("terminal energy", "log_energy_component_share", "log_energy_component_weighted_sq"),
+    ("post-IV damage", "post_iv_damage_component_share", "post_iv_damage_component_weighted_sq"),
+    ("coverage gap", "coverage_gap_component_share", "coverage_gap_component_weighted_sq"),
+]
+
+
+def concordance_enrichment_ecdf_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """2D enrichment ECDF for v2 picks inside v1's signature ordering."""
+    base_title = "v2 picks inside v1 prior-free signature ordering — enrichment ECDF"
+    layout = common_cartesian_layout(base_title)
+    layout.update({
+        "xaxis": {"title": "v2-pick percentile in v1 signature ordering (lower is better)",
+                  "range": [0, 100]},
+        "yaxis": {"title": "Cumulative share of v2 rank-1 targets", "range": [0, 1]},
+        "shapes": [
+            {"type": "line", "xref": "x", "yref": "paper", "x0": 10, "x1": 10,
+             "y0": 0, "y1": 1, "line": {"color": "#8c959f", "dash": "dash"}},
+            {"type": "line", "xref": "x", "yref": "paper", "x0": 50, "x1": 50,
+             "y0": 0, "y1": 1, "line": {"color": "#d0d7de", "dash": "dot"}},
+        ],
+    })
+    if rows is None or rows.empty or "v2_pick_dssig_percentile" not in rows:
+        return {"traces": [], "layout": layout,
+                "note": "No enrichment columns found. Re-export proxy_method_concordance.csv after applying schema/029."}
+    df = rows.copy()
+    df = df[pd.to_numeric(df.get("v2_rank"), errors="coerce") == 1]
+    df["percentile"] = numeric(df["v2_pick_dssig_percentile"])
+    df = df[df["percentile"].notna()]
+    if df.empty:
+        return {"traces": [], "layout": layout,
+                "note": "No v2 rank-1 rows have a signature-ordering percentile."}
+    traces = []
+    trace_device = []
+    titles = {}
+    for scope, sub in df.groupby(df.get("match_scope", pd.Series("all", index=df.index)).fillna("all")):
+        vals = sorted(float(v) for v in sub["percentile"] if math.isfinite(float(v)))
+        if not vals:
+            continue
+        y = [(i + 1) / len(vals) for i in range(len(vals))]
+        color = "#24292f" if scope == "cross_device" else DEEMPHASIS_GRAY
+        traces.append({
+            "type": "scatter", "mode": "lines+markers", "name": str(scope),
+            "x": vals, "y": y,
+            "line": {"color": color, "width": 3 if scope == "cross_device" else 2},
+            "marker": {"size": 5, "color": color},
+            "hovertemplate": "percentile %{x:.1f}<br>ECDF %{y:.1%}<extra>" + str(scope) + "</extra>",
+            "visible": True,
+        })
+        trace_device.append(None)
+    median = float(df["percentile"].median())
+    best_decile = int((df["percentile"] <= 10.0).sum())
+    note = (
+        f"Post-separation enrichment check: exact rank-1 concordance is a lower-bound diagnostic, "
+        f"while this ECDF asks where v2 rank-1 picks fall in v1's energy-free signature ordering. "
+        f"Median percentile is {median:.1f}; {best_decile}/{len(df)} ({best_decile / len(df):.1%}) "
+        f"fall in the best decile. Cross-device enrichment is the independence-evidence series; "
+        f"same-device rows are context."
+    )
+    return {"traces": traces, "layout": layout, "note": note,
+            "filter": {"devices": [], "traceDevices": trace_device,
+                       "titleAll": base_title, "titles": {}, "allShowsOnly": None}}
+
+
+def v3_vector_explorer_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """Horizontal stacked bars of v3 weighted component shares for rank-1 picks."""
+    base_title = "v3 combined vector — rank-1 weighted component shares"
+    layout = common_cartesian_layout(base_title)
+    layout.update({
+        "barmode": "stack",
+        "xaxis": {"title": "Share of weighted squared vector distance", "range": [0, 1], "tickformat": ".0%"},
+        "yaxis": {"title": "target -> v3 rank-1 candidate", "automargin": True},
+        "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        "margin": {"l": 260, "r": 30, "t": 90, "b": 70},
+        "height": 900,
+    })
+    if rows is None or rows.empty:
+        return {"traces": [], "layout": layout,
+                "note": "No v3 CSV found. Run export_proxy_candidate_combined_v3_csv.py after applying schema/028."}
+    df = rows.copy()
+    if "combined_rank" not in df:
+        return {"traces": [], "layout": layout,
+                "note": "v3 CSV is missing combined_rank; regenerate the v3 export."}
+    df["combined_rank"] = numeric(df["combined_rank"])
+    df = df[df["combined_rank"] == 1].copy()
+    if df.empty:
+        return {"traces": [], "layout": layout,
+                "note": "No v3 rank-1 rows in the export."}
+    df["combined_vector_distance"] = numeric_column(df, "combined_vector_distance")
+    df = df.sort_values(["combined_vector_distance", "target_stress_record_key"], na_position="last").head(80)
+    labels = [
+        (_v2_clean(r.get("target_event_type")) + " · " + _v2_key_tail(_v2_clean(r.get("target_stress_record_key")))
+         + " -> " + _v2_clean(r.get("candidate_source")))
+        for r in df.to_dict("records")
+    ]
+    traces = []
+    trace_device = []
+    for label, share_col, sq_col in V3_COMPONENTS:
+        shares = numeric_column(df, share_col).fillna(0.0).clip(lower=0.0, upper=1.0)
+        sq = numeric_column(df, sq_col).fillna(0.0)
+        traces.append({
+            "type": "bar", "orientation": "h", "name": label,
+            "x": shares.tolist(), "y": labels,
+            "marker": {"color": V3_COMPONENT_COLORS[label]},
+            "customdata": np.stack([
+                sq.astype(float).to_numpy(),
+                numeric_column(df, "combined_vector_distance").fillna(np.nan).to_numpy(),
+                df.get("proxy_claim_status", pd.Series("", index=df.index)).fillna("").astype(str).to_numpy(),
+            ], axis=-1).tolist(),
+            "hovertemplate": (
+                "%{y}<br>" + label + " share %{x:.1%}<br>weighted sq %{customdata[0]:.3g}"
+                "<br>combined distance %{customdata[1]:.3g}<br>proxy claim %{customdata[2]}<extra></extra>"
+            ),
+            "visible": True,
+        })
+        trace_device.append(None)
+    note = (
+        "v3 is an uncalibrated, screening-only weighted vector over v2's top-10 pool. "
+        "Each bar sums the seven weighted squared terms for the rank-1 combined pick; "
+        "large segments show which axis drove the choice and should be inspected before trusting weights."
+    )
+    return {"traces": traces, "layout": layout, "note": note,
+            "filter": {"devices": [], "traceDevices": trace_device,
+                       "titleAll": base_title, "titles": {}, "allShowsOnly": None}}
+
+
+
+def overview_payload(
+    source_records: pd.DataFrame,
+    delta_rows: pd.DataFrame,
+    v2_rows: pd.DataFrame,
+    concordance_rows: pd.DataFrame,
+    v3_rows: pd.DataFrame,
+) -> dict[str, Any]:
+    """Landing view: build-time readiness KPIs plus candidate funnel."""
+    title = "Proxy readiness overview"
+    v2_rank1 = _rank1(v2_rows, "mechanistic_energy_candidate_rank")
+    v3_rank1 = _rank1(v3_rows, "combined_rank")
+    conc_rank1 = _rank1(concordance_rows, "v2_rank")
+
+    pool_total = None
+    if not conc_rank1.empty and "dssig_pool_size" in conc_rank1.columns:
+        pool_total = numeric(conc_rank1["dssig_pool_size"]).dropna().sum()
+    top_export = len(delta_rows) if delta_rows is not None and not delta_rows.empty else len(concordance_rows)
+
+    def decision_safe_count(frame: pd.DataFrame) -> tuple[int, int]:
+        if frame is None or frame.empty:
+            return (0, 0)
+        rank_col = "decision_safe_rank" if "decision_safe_rank" in frame.columns else "v1_decision_safe_rank"
+        status_col = "proxy_claim_status" if "proxy_claim_status" in frame.columns else "v1_proxy_claim_status"
+        if rank_col in frame.columns:
+            safe = numeric(frame[rank_col]).notna()
+            rank1 = numeric(frame[rank_col]).eq(1)
+            return (int(safe.sum()), int(rank1.sum()))
+        if status_col in frame.columns:
+            status = frame[status_col].fillna("").astype(str)
+            safe = status.isin(["validation_candidate", "curation_candidate"])
+            return (int(safe.sum()), 0)
+        return (0, 0)
+
+    decision_safe, decision_rank1 = decision_safe_count(delta_rows)
+    funnel_labels = ["Ranked pool", "Exported top candidates", "Decision-safe", "Decision-safe rank-1"]
+    funnel_values = [
+        int(pool_total) if pool_total and math.isfinite(float(pool_total)) else None,
+        int(top_export),
+        int(decision_safe),
+        int(decision_rank1),
+    ]
+    plotted_labels = [label for label, value in zip(funnel_labels, funnel_values) if value is not None]
+    plotted_values = [value for value in funnel_values if value is not None]
+
+    traces = [{
+        "type": "bar",
+        "orientation": "h",
+        "y": plotted_labels,
+        "x": plotted_values,
+        "marker": {"color": ["#6f7782", "#2f6f9f", "#1a9850", "#54a24b"][:len(plotted_values)]},
+        "hovertemplate": "%{y}: %{x:,}<extra></extra>",
+    }]
+    layout = common_cartesian_layout(title)
+    layout.update({
+        "height": 700,
+        "xaxis": {"title": {"text": "Candidate rows"}, "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Funnel stage"}, "automargin": True},
+        "margin": {"l": 190, "r": 36, "t": 88, "b": 70},
+    })
+
+    terminal_counts = _value_counts(v2_rank1, "terminal_energy_overlap_class")
+    kosier_counts = _value_counts(v2_rank1, "critical_severity_overlap_class_kosier_context")
+    source_counts = _value_counts(v2_rank1, "candidate_source")
+    boundary_usable = int(
+        v2_rank1.get("candidate_failure_fraction_gate_usable", pd.Series(False, index=v2_rank1.index))
+        .fillna(False).astype(bool).sum()
+    ) if not v2_rank1.empty else 0
+    truth_curated = int(_truth_status_is_curated(
+        v2_rank1.get("truth_validation_status", pd.Series(index=v2_rank1.index, dtype="object"))
+    ).sum()) if not v2_rank1.empty else 0
+    median_enrichment = None
+    best_decile = None
+    if not conc_rank1.empty and "v2_pick_dssig_percentile" in conc_rank1.columns:
+        pct = numeric(conc_rank1["v2_pick_dssig_percentile"]).dropna()
+        if not pct.empty:
+            median_enrichment = float(pct.median())
+            best_decile = int((pct <= 10.0).sum())
+
+    note_bits = [
+        f"v2 rank-1 targets: {len(v2_rank1):,}",
+        f"v3 rank-1 targets exported: {len(v3_rank1):,}",
+        f"own-boundary coverage: {_pct(boundary_usable, len(v2_rank1))}",
+        f"curated truth labels on v2 rank-1: {truth_curated:,}",
+        "terminal overlap: " + ", ".join(f"{k}={v}" for k, v in terminal_counts.items()) if terminal_counts else "terminal overlap: not exported",
+        "Kosier-context severity: " + ", ".join(f"{k}={v}" for k, v in kosier_counts.items()) if kosier_counts else "Kosier-context severity: not exported",
+        "rank-1 source mix: " + ", ".join(f"{k}={v}" for k, v in source_counts.items()) if source_counts else "rank-1 source mix: not exported",
+    ]
+    if median_enrichment is None:
+        note_bits.append("enrichment percentile: not exported; apply schema/029 and re-export concordance")
+    else:
+        note_bits.append(
+            f"enrichment: median {median_enrichment:.1f}th percentile; "
+            f"best-decile share {_pct(best_decile or 0, len(numeric(conc_rank1['v2_pick_dssig_percentile']).dropna()))}"
+        )
+    note = "Overview computed from the CSVs at build time. " + "; ".join(note_bits) + "."
+    return {"traces": traces, "layout": layout, "note": note}
+
+
+def boundary_coverage_payload(v2_rows: pd.DataFrame) -> dict[str, Any]:
+    title = "Candidate destruction-boundary coverage by device"
+    rank1 = _rank1(v2_rows, "mechanistic_energy_candidate_rank")
+    if rank1.empty or "candidate_failure_fraction_gate_usable" not in rank1.columns:
+        return _empty_payload(title, "No v2 rank-1 boundary-coverage columns are exported.")
+    device = rank1.get("device_type", pd.Series("unknown", index=rank1.index)).fillna("unknown").astype(str)
+    usable = rank1["candidate_failure_fraction_gate_usable"].fillna(False).astype(bool)
+    table = pd.DataFrame({"device": device, "usable": usable})
+    grouped = table.groupby("device")["usable"].agg(["sum", "count"]).sort_values("count", ascending=False)
+    devices = grouped.index.tolist()
+    usable_counts = grouped["sum"].astype(int).tolist()
+    missing_counts = (grouped["count"] - grouped["sum"]).astype(int).tolist()
+    traces = [
+        {"type": "bar", "orientation": "h", "name": "usable own-boundary", "y": devices, "x": usable_counts,
+         "marker": {"color": "#1a9850"}},
+        {"type": "bar", "orientation": "h", "name": "missing own-boundary", "y": devices, "x": missing_counts,
+         "marker": {"color": "#d73027"}},
+    ]
+    layout = cartesian_legend_row_layout(title)
+    layout.update({
+        "barmode": "stack",
+        "height": max(560, 34 * len(devices) + 220),
+        "xaxis": {"title": {"text": "v2 rank-1 targets"}, "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Device"}, "automargin": True},
+    })
+    total = int(grouped["count"].sum())
+    usable_total = int(grouped["sum"].sum())
+    note = (
+        f"Own-threshold candidate failure-fraction coverage is {usable_total}/{total} "
+        f"({_pct(usable_total, total)}). Missing rows fall back to Kosier-context severity in the parity view; "
+        "this chart is the measurement-priority view for collecting candidate destruction boundaries."
+    )
+    return {"traces": traces, "layout": layout, "note": note}
+
+
+def energy_context_2d_payload(records: pd.DataFrame) -> dict[str, Any]:
+    title = "Irradiation depletion threshold ratio vs blocking bias"
+    if records is None or records.empty:
+        return _empty_payload(title, "No source-record CSV rows are available.")
+    df = records.copy()
+    if "source" in df.columns:
+        df = df[df["source"].eq("irradiation")].copy()
+    for col in ("normalized_vds", "se_depletion_ratio_to_seb", "se_depletion_ratio_to_selc", "electrical_terminal_energy_j"):
+        df[col] = numeric_column(df, col)
+    df = df[df["normalized_vds"].notna() & df["se_depletion_ratio_to_seb"].gt(0.0)].copy()
+    if df.empty:
+        return _empty_payload(title, "No irradiation rows carry normalized blocking bias and depletion threshold ratios.")
+    traces = []
+    for event_type, group in df.groupby(df.get("event_type", pd.Series("UNKNOWN", index=df.index)).fillna("UNKNOWN")):
+        color = EVENT_TYPE_COLORS.get(str(event_type), EVENT_TYPE_FALLBACK)
+        customdata = [[
+            display_value(row.device_label),
+            display_value(row.filename),
+            display_ratio(row.se_depletion_ratio_to_selc),
+            display_joules(row.electrical_terminal_energy_j),
+        ] for row in group.itertuples(index=False)]
+        traces.append({
+            "type": "scatter", "mode": "markers", "name": str(event_type),
+            "x": group["normalized_vds"].astype(float).tolist(),
+            "y": group["se_depletion_ratio_to_seb"].astype(float).tolist(),
+            "customdata": customdata,
+            "hovertemplate": (
+                "Device %{customdata[0]}<br>File %{customdata[1]}<br>"
+                "Normalized Vds %{x:.3g}<br>SEB ratio %{y:.3g}<br>"
+                "SELC ratio %{customdata[2]}<br>Terminal energy %{customdata[3]}<extra></extra>"
+            ),
+            "marker": {"color": color, "size": 6, "opacity": 0.72,
+                       "line": {"color": "#24292f", "width": 0.25}},
+        })
+    layout = cartesian_legend_row_layout(title)
+    layout.update({
+        "xaxis": {"title": {"text": "Normalized blocking voltage |Vds| / rating"}, "gridcolor": "#d8dee4"},
+        "yaxis": {"title": {"text": "Stored depletion energy / SEB threshold (log)"}, "type": "log", "gridcolor": "#d8dee4"},
+        "shapes": [{"type": "line", "xref": "paper", "yref": "y", "x0": 0, "x1": 1, "y0": 1.0, "y1": 1.0,
+                    "line": {"color": "#d73027", "dash": "dash", "width": 1}}],
+    })
+    return {"traces": traces, "layout": layout,
+            "note": "2D replacement for the old irradiation-only 3D energy scene. The dashed line marks the SEB threshold ratio of 1.0; terminal energy remains in hover context."}
+
+
+def evidence_quality_summary_payload(delta_rows: pd.DataFrame) -> dict[str, Any]:
+    title = "v1 signature evidence quality by proxy source"
+    if delta_rows is None or delta_rows.empty or "damage_signature_evidence_class" not in delta_rows.columns:
+        return _empty_payload(title, "No damage-signature evidence-class columns are exported.")
+    df = delta_rows.copy()
+    source = df.get("candidate_source", pd.Series("unknown", index=df.index)).fillna("unknown").astype(str)
+    evidence = df["damage_signature_evidence_class"].fillna("not recorded").astype(str)
+    grouped = pd.crosstab(evidence, source)
+    traces = []
+    for col in grouped.columns:
+        traces.append({"type": "bar", "name": col, "x": grouped.index.tolist(), "y": grouped[col].astype(int).tolist()})
+    layout = cartesian_legend_row_layout(title)
+    layout.update({
+        "barmode": "stack",
+        "xaxis": {"title": {"text": "Evidence class"}, "tickangle": -12},
+        "yaxis": {"title": {"text": "Candidate pairs"}, "gridcolor": "#d8dee4"},
+    })
+    return {"traces": traces, "layout": layout,
+            "note": "Archive companion for the demoted signature-space views. Distances should be compared within, not across, evidence classes."}
+
+
+def _concordance_rank1_records(rows: pd.DataFrame) -> list[dict[str, Any]]:
+    if rows is None or rows.empty or "target_stress_record_key" not in rows.columns:
+        return []
+    df = rows.copy()
+    for col in ("v1_rank", "v2_rank", "waveform_rank"):
+        if col in df.columns:
+            df[col] = numeric(df[col])
+    records = []
+    for target, group in df.groupby("target_stress_record_key"):
+        recs = group.to_dict("records")
+        v2_pick = next((r for r in recs if r.get("v2_rank") == 1), None)
+        if v2_pick is None:
+            continue
+        v1_pick = next((r for r in recs if r.get("v1_rank") == 1), None)
+        if v2_pick.get("v1_rank") == 1:
+            category = "consensus"
+        elif v1_pick is not None:
+            category = "mild_v1_in_v2_top10"
+        else:
+            category = "demoted_v1_outside_v2_top10"
+        records.append({"target": target, "v2": v2_pick, "v1": v1_pick, "category": category})
+    return records
+
+
+def agreement_matrix_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    title = "v1/v2 rank-1 agreement matrix"
+    recs = _concordance_rank1_records(rows)
+    if not recs:
+        return _empty_payload(title, "No concordance rows are available for the agreement matrix.")
+    labels = {
+        "consensus": "Consensus",
+        "mild_v1_in_v2_top10": "v1 pick in v2 top-10",
+        "demoted_v1_outside_v2_top10": "v1 pick demoted",
+    }
+    devices = sorted({str(r["v2"].get("device_type") or "unknown") for r in recs})
+    traces = []
+    for category, label in labels.items():
+        counts = []
+        for dev in devices:
+            counts.append(sum(1 for r in recs if r["category"] == category and str(r["v2"].get("device_type") or "unknown") == dev))
+        traces.append({"type": "bar", "name": label, "x": devices, "y": counts,
+                       "marker": {"color": CONCORDANCE_STYLE.get("consensus" if category == "consensus" else ("v2_pick" if category.startswith("mild") else "strong_disagree"), ("#999", "circle"))[0]}})
+    layout = cartesian_legend_row_layout(title)
+    layout.update({
+        "barmode": "stack",
+        "xaxis": {"title": {"text": "Device"}, "tickangle": -18},
+        "yaxis": {"title": {"text": "Targets"}, "gridcolor": "#d8dee4"},
+    })
+    counts = {key: sum(1 for r in recs if r["category"] == key) for key in labels}
+    note = (
+        "Agreement definition: consensus means v2's rank-1 candidate is also v1's rank-1; "
+        "mild means v1's rank-1 survives inside v2's exported top-10; demoted means it does not. "
+        "Raw rank-1 agreement is chance-level after ranker separation, so use enrichment percentile as the headline independence metric. "
+        + ", ".join(f"{labels[k]}={v}" for k, v in counts.items()) + "."
+    )
+    return {"traces": traces, "layout": layout, "note": note}
+
+
+def conflict_browser_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    title = "Method conflict browser"
+    recs = _concordance_rank1_records(rows)
+    if not recs:
+        return _empty_payload(title, "No concordance rows are available for the conflict browser.")
+    filtered = []
+    for r in recs:
+        v2 = r["v2"]
+        if r["category"] != "consensus" or _truthy_flag(v2.get("source_conflict")) or _truthy_flag(v2.get("c2m0080120d_avalanche_vs_sc_conflict")):
+            filtered.append(r)
+    filtered.sort(key=lambda r: (
+        0 if _truthy_flag(r["v2"].get("c2m0080120d_avalanche_vs_sc_conflict")) else 1,
+        str(r["v2"].get("device_type") or ""),
+        str(r["target"]),
+    ))
+    filtered = filtered[:160]
+    cols = {
+        "Target": [], "Device": [], "Category": [], "v2 source": [], "v1 source": [],
+        "v1 rank": [], "v2 rank": [], "Claim": [], "Truth": [], "Blockers": [], "Conflict": [],
+    }
+    for r in filtered:
+        v2 = r["v2"]; v1 = r["v1"] or {}
+        cols["Target"].append(_v2_key_tail(str(r["target"]), 34))
+        cols["Device"].append(_v2_clean(v2.get("device_type")))
+        cols["Category"].append(r["category"])
+        cols["v2 source"].append(_v2_clean(v2.get("candidate_source")))
+        cols["v1 source"].append(_v2_clean(v1.get("candidate_source")) or _v2_clean(v2.get("v1_signature_pick_source")))
+        cols["v1 rank"].append(_v2_clean(v2.get("v1_rank")))
+        cols["v2 rank"].append(_v2_clean(v2.get("v2_rank")))
+        cols["Claim"].append(_v2_clean(v2.get("proxy_claim_status")))
+        cols["Truth"].append(_v2_clean(v2.get("truth_validation_status")))
+        cols["Blockers"].append(_v2_clean(v2.get("energy_v2_blockers")) or "(none)")
+        cols["Conflict"].append(_v2_clean(v2.get("c2m0080120d_avalanche_vs_sc_conflict")) or _v2_clean(v2.get("source_conflict")))
+    return _table_payload(title, list(cols.items()),
+                          "Rows where the v1 signature-best and v2 energy-best methods disagree or flag a source conflict. C2M0080120D avalanche-vs-SC conflicts sort first.",
+                          height=max(620, 30 * len(filtered) + 150))
+
+
+def curation_queue_payload(v2_rows: pd.DataFrame, concordance_rows: pd.DataFrame) -> dict[str, Any]:
+    title = "Decision-safe curation queue"
+    rank1 = _rank1(v2_rows, "mechanistic_energy_candidate_rank")
+    if rank1.empty:
+        return _empty_payload(title, "No v2 rank-1 rows are exported for the curation queue.")
+    status = rank1.get("proxy_claim_status", pd.Series("", index=rank1.index)).fillna("").astype(str)
+    truth = rank1.get("truth_validation_status", pd.Series("no_curated_truth", index=rank1.index)).fillna("no_curated_truth").astype(str)
+    queue = rank1[status.isin(["validation_candidate", "curation_candidate"]) | truth.eq("no_curated_truth")].copy()
+    if queue.empty:
+        return _empty_payload(title, "No rank-1 rows currently require curation.", disabled=False)
+    queue = queue.sort_values(["proxy_claim_status", "device_type", "target_stress_record_key"], na_position="last").head(200)
+    cols = {
+        "Target": [_v2_key_tail(_v2_clean(v), 34) for v in queue.get("target_stress_record_key", pd.Series(index=queue.index))],
+        "Device": queue.get("device_type", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
+        "Source": queue.get("candidate_source", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
+        "Claim": queue.get("proxy_claim_status", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
+        "Truth": queue.get("truth_validation_status", pd.Series(index=queue.index)).fillna("no_curated_truth").astype(str).tolist(),
+        "Terminal overlap": queue.get("terminal_energy_overlap_class", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
+        "Kosier severity": queue.get("critical_severity_overlap_class_kosier_context", pd.Series(index=queue.index)).fillna("").astype(str).tolist(),
+        "Boundary usable": queue.get("candidate_failure_fraction_gate_usable", pd.Series(False, index=queue.index)).fillna(False).astype(str).tolist(),
+        "Blockers": queue.get("energy_v2_blockers", pd.Series(index=queue.index)).fillna("(none)").astype(str).tolist(),
+    }
+    return _table_payload(title, list(cols.items()),
+                          f"Top {len(queue)} rank-1 rows needing human truth curation or fail-closed claim review. Truth-label overlay hooks use the same status fields.",
+                          height=max(640, 26 * len(queue) + 150))
+
+
+def reciprocal_enrichment_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    title = "Reciprocal method enrichment"
+    recs = _concordance_rank1_records(rows)
+    if not recs or "v2_pick_dssig_percentile" not in getattr(rows, "columns", []):
+        return _empty_payload(title, "No enrichment columns are exported for reciprocal enrichment.")
+    x = []; y = []; colors = []; labels = []
+    for r in recs:
+        v2 = r["v2"]; v1 = r["v1"]
+        pct = finite_number(v2.get("v2_pick_dssig_percentile"))
+        if pct is None or v1 is None:
+            continue
+        v1_v2_rank = finite_number(v1.get("v2_rank"))
+        max_rank = finite_number(v2.get("energy_rank")) or 10.0
+        if v1_v2_rank is None:
+            continue
+        x.append(pct)
+        y.append(100.0 * v1_v2_rank / max(max_rank, 1.0))
+        scope = _v2_clean(v2.get("match_scope")) or "unknown"
+        colors.append("#24292f" if scope == "cross_device" else DEEMPHASIS_GRAY)
+        labels.append(scope)
+    if not x:
+        return _empty_payload(title, "No reciprocal enrichment rows can be computed from the exported top-N concordance join.")
+    trace = {"type": "scatter", "mode": "markers", "x": x, "y": y,
+             "marker": {"color": colors, "size": 7, "opacity": 0.78},
+             "customdata": labels,
+             "hovertemplate": "v2 pick in v1 ordering %{x:.1f} percentile<br>v1 pick in exported v2 top-N %{y:.1f} percentile<br>%{customdata}<extra></extra>"}
+    layout = common_cartesian_layout(title)
+    layout.update({
+        "xaxis": {"title": {"text": "v2 pick percentile in v1 signature ordering"}, "range": [0, 100]},
+        "yaxis": {"title": {"text": "v1 pick percentile in exported v2 ordering"}, "range": [0, 100]},
+        "shapes": [{"type": "line", "xref": "x", "yref": "y", "x0": 10, "x1": 10, "y0": 0, "y1": 100,
+                    "line": {"color": "#8c959f", "dash": "dash"}},
+                   {"type": "line", "xref": "x", "yref": "y", "x0": 0, "x1": 100, "y0": 10, "y1": 10,
+                    "line": {"color": "#8c959f", "dash": "dash"}}],
+    })
+    return {"traces": [trace], "layout": layout,
+            "note": "Mirror enrichment computed from the exported concordance top-N join. X is schema/029's v2-pick percentile in v1 ordering; Y is the v1 pick's location inside the exported v2 ordering when present."}
+
+
+def v3_agreement_payload(v3_rows: pd.DataFrame, concordance_rows: pd.DataFrame) -> dict[str, Any]:
+    title = "v3 rank-1 agreement with v1 and v2"
+    v3 = _rank1(v3_rows, "combined_rank")
+    recs = _concordance_rank1_records(concordance_rows)
+    if v3.empty or not recs:
+        return _empty_payload(title, "v3 and concordance exports are both required for the v3 agreement bar.")
+    by_target = {str(r["target"]): r for r in recs}
+    counts = {"matches both": 0, "matches v2 only": 0, "matches v1 only": 0, "matches neither": 0}
+    for row in v3.to_dict("records"):
+        key = str(row.get("target_stress_record_key"))
+        rec = by_target.get(key)
+        if rec is None:
+            continue
+        v3_key = _v2_clean(row.get("candidate_stress_record_key"))
+        v2_key = _v2_clean(rec["v2"].get("candidate_stress_record_key"))
+        v1_key = _v2_clean((rec["v1"] or {}).get("candidate_stress_record_key"))
+        match_v2 = v3_key and v3_key == v2_key
+        match_v1 = v3_key and v1_key and v3_key == v1_key
+        if match_v1 and match_v2:
+            counts["matches both"] += 1
+        elif match_v2:
+            counts["matches v2 only"] += 1
+        elif match_v1:
+            counts["matches v1 only"] += 1
+        else:
+            counts["matches neither"] += 1
+    labels = list(counts.keys())
+    values = [counts[k] for k in labels]
+    layout = common_cartesian_layout(title)
+    layout.update({"xaxis": {"title": {"text": "Agreement class"}},
+                   "yaxis": {"title": {"text": "v3 rank-1 targets"}, "gridcolor": "#d8dee4"}})
+    return {"traces": [{"type": "bar", "x": labels, "y": values,
+                         "marker": {"color": ["#1a9850", "#4575b4", "#e6731a", "#8c959f"]}}],
+            "layout": layout,
+            "note": "v3 is screening-only. This bar asks whether the combined vector reproduces v1, v2, both, or neither before inspecting component shares."}
 
 def plotly_script_tag() -> str:
     if PLOTLY_ASSET.exists():
@@ -2505,6 +3208,23 @@ header p { margin: 0; color: #57606a; font-size: 14px; }
   color: #0969da;
   border-color: #8c959f;
 }
+.tab[disabled] {
+  cursor: not-allowed;
+  opacity: 0.46;
+  color: #6e7781;
+}
+.diagnostics {
+  padding: 8px 16px 12px;
+  border-top: 1px solid #d8dee4;
+  background: #ffffff;
+  color: #6e7781;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.diagnostics:empty { display: none; }
+.subviews { padding-top: 8px; }
+.subviews[hidden] { display: none !important; }
+.subtab { border-bottom: 1px solid #afb8c1; border-radius: 6px; padding: 6px 10px; }
 .panel {
   margin: 0 16px 16px;
   background: #ffffff;
@@ -2570,68 +3290,96 @@ __PLOTLY_SCRIPT__
 <body>
 <header>
   <h1>APS interactive damage-signature and energy viewer</h1>
-  <p>Nine views of the same stress data: independent source records, ranked
-  pairwise deltas, two energy-context scenes, a per-device per-event energy
-  comparison against Kosier SELC/SEB thresholds, three v2 mechanistic views
-  (per-target severity-interval overlap, the energy-equivalence parity scatter,
-  and the overlap-class summary), and a 3D concordance scene comparing the v1
-  damage-signature proxy against the v2 energy proxy.</p>
+  <p>Post-separation readiness and curation viewer: overview funnel, v2 energy
+  readiness, method enrichment, v3 explainability, curation worklist, archived
+  signature-space geometry, and irradiation energy context.</p>
 </header>
-<div class="controls" role="tablist" aria-label="Plot views">
-  <button id="source-tab" class="tab active" role="tab" aria-selected="true"
-    data-view="source">Individual source records</button>
-  <button id="delta-tab" class="tab" role="tab" aria-selected="false"
-    data-view="delta">Delta comparisons</button>
+<div class="controls" role="tablist" aria-label="Viewer sections">
+  <button id="overview-tab" class="tab active" role="tab" aria-selected="true"
+    data-view="overview">Overview</button>
+  <button id="v2-tab" class="tab" role="tab" aria-selected="false"
+    data-view="v2summary">v2 readiness</button>
+  <button id="method-tab" class="tab" role="tab" aria-selected="false"
+    data-view="agreement">Method agreement</button>
+  <button id="v3-tab" class="tab" role="tab" aria-selected="false"
+    data-view="v3">v3 explainability</button>
+  <button id="curation-tab" class="tab" role="tab" aria-selected="false"
+    data-view="curation">Curation queue</button>
+  <button id="signature-tab" class="tab" role="tab" aria-selected="false"
+    data-view="source">Signature space</button>
   <button id="energy-tab" class="tab" role="tab" aria-selected="false"
     data-view="energy">Energy context</button>
-  <button id="energyDelta-tab" class="tab" role="tab" aria-selected="false"
-    data-view="energyDelta">Proxy energy context</button>
-  <button id="energySums-tab" class="tab" role="tab" aria-selected="false"
-    data-view="energySums">Energy by device</button>
-  <button id="v2overlap-tab" class="tab" role="tab" aria-selected="false"
-    data-view="v2overlap">v2 severity overlap</button>
-  <button id="v2parity-tab" class="tab" role="tab" aria-selected="false"
-    data-view="v2parity">v2 energy equivalence</button>
-  <button id="v2summary-tab" class="tab" role="tab" aria-selected="false"
-    data-view="v2summary">v2 overlap summary</button>
-  <button id="concordance-tab" class="tab" role="tab" aria-selected="false"
-    data-view="concordance">v1↔v2 concordance (3D)</button>
+</div>
+<div class="controls subviews" aria-label="Subview controls">
+  <button class="tab subtab" data-subview="v2summary">summary</button>
+  <button class="tab subtab" data-subview="v2parity">parity</button>
+  <button class="tab subtab" data-subview="boundary">boundary coverage</button>
+  <button class="tab subtab" data-subview="v2overlap">intervals</button>
+  <button class="tab subtab" data-subview="agreement">agreement matrix</button>
+  <button class="tab subtab" data-subview="concordanceEcdf">enrichment ECDF</button>
+  <button class="tab subtab" data-subview="reciprocal">reciprocal enrichment</button>
+  <button class="tab subtab" data-subview="conflictBrowser">conflict browser</button>
+  <button class="tab subtab" data-subview="concordance">3D diagnostics</button>
+  <button class="tab subtab" data-subview="v3">component shares</button>
+  <button class="tab subtab" data-subview="v3agreement">v3 agreement</button>
+  <button class="tab subtab" data-subview="source">sources 3D</button>
+  <button class="tab subtab" data-subview="delta">delta geometry</button>
+  <button class="tab subtab" data-subview="evidenceSummary">evidence summary</button>
+  <button class="tab subtab" data-subview="energy">depletion 2D</button>
+  <button class="tab subtab" data-subview="energySums">energy by device</button>
 </div>
 <div class="help">
-  For 3D scenes, drag to rotate and use the wheel or pinch to zoom. Hover for
-  record metadata, energy-chain values, and Kosier comparison ratios. The camera
-  icon exports the current view; the home icon resets the camera where available.
+  Empty or data-starved panels are disabled with an explicit reason. For 3D
+  archive/diagnostic scenes, drag to rotate and use the wheel or pinch to zoom.
 </div>
 <div class="filterbar">
   <label for="device-filter">Device filter:</label>
   <select id="device-filter" aria-label="Filter all views by device">
     <option value="__all__">All devices</option>
   </select>
-  <span>applies to every tab; the two pair tabs key on the irradiation (target)
-  device. Tabs that can only render one device at a time say so in the chart
-  title and the note below the chart.</span>
+  <span>applies to views that expose per-device traces; pair views key on the
+  irradiation target device.</span>
 </div>
 <main class="panel">
-  <div id="source-plot" class="plot" role="tabpanel"></div>
-  <div id="delta-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="energy-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="energyDelta-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="energySums-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="v2overlap-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="v2parity-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="overview-plot" class="plot" role="tabpanel"></div>
   <div id="v2summary-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v2parity-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="boundary-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v2overlap-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="agreement-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="concordanceEcdf-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="reciprocal-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="conflictBrowser-plot" class="plot" role="tabpanel" hidden></div>
   <div id="concordance-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v3-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="v3agreement-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="curation-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="source-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="delta-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="evidenceSummary-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="energy-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="energySums-plot" class="plot" role="tabpanel" hidden></div>
   <div id="plot-note" class="note"></div>
+  <div id="plot-diagnostics" class="diagnostics"></div>
 </main>
+<script id="overview-payload" type="application/json">__OVERVIEW_PAYLOAD__</script>
+<script id="v2summary-payload" type="application/json">__V2_SUMMARY_PAYLOAD__</script>
+<script id="v2parity-payload" type="application/json">__V2_PARITY_PAYLOAD__</script>
+<script id="boundary-payload" type="application/json">__BOUNDARY_PAYLOAD__</script>
+<script id="v2overlap-payload" type="application/json">__V2_PAYLOAD__</script>
+<script id="agreement-payload" type="application/json">__AGREEMENT_PAYLOAD__</script>
+<script id="concordanceEcdf-payload" type="application/json">__CONCORDANCE_ECDF_PAYLOAD__</script>
+<script id="reciprocal-payload" type="application/json">__RECIPROCAL_PAYLOAD__</script>
+<script id="conflictBrowser-payload" type="application/json">__CONFLICT_BROWSER_PAYLOAD__</script>
+<script id="concordance-payload" type="application/json">__CONCORDANCE_PAYLOAD__</script>
+<script id="v3-payload" type="application/json">__V3_PAYLOAD__</script>
+<script id="v3agreement-payload" type="application/json">__V3_AGREEMENT_PAYLOAD__</script>
+<script id="curation-payload" type="application/json">__CURATION_PAYLOAD__</script>
 <script id="source-payload" type="application/json">__SOURCE_PAYLOAD__</script>
 <script id="delta-payload" type="application/json">__DELTA_PAYLOAD__</script>
+<script id="evidenceSummary-payload" type="application/json">__EVIDENCE_SUMMARY_PAYLOAD__</script>
 <script id="energy-payload" type="application/json">__ENERGY_PAYLOAD__</script>
-<script id="energy-delta-payload" type="application/json">__ENERGY_DELTA_PAYLOAD__</script>
 <script id="energy-sums-payload" type="application/json">__ENERGY_SUMS_PAYLOAD__</script>
-<script id="v2overlap-payload" type="application/json">__V2_PAYLOAD__</script>
-<script id="v2parity-payload" type="application/json">__V2_PARITY_PAYLOAD__</script>
-<script id="v2summary-payload" type="application/json">__V2_SUMMARY_PAYLOAD__</script>
-<script id="concordance-payload" type="application/json">__CONCORDANCE_PAYLOAD__</script>
 <script id="device-options" type="application/json">__DEVICE_OPTIONS__</script>
 <script>
 (function () {
@@ -2642,36 +3390,48 @@ __PLOTLY_SCRIPT__
     return;
   }
 
-  const VIEWS = ["source", "delta", "energy", "energyDelta", "energySums",
-    "v2overlap", "v2parity", "v2summary", "concordance"];
+  const VIEWS = ["overview", "v2summary", "v2parity", "boundary", "v2overlap",
+    "agreement", "concordanceEcdf", "reciprocal", "conflictBrowser", "concordance",
+    "v3", "v3agreement", "curation", "source", "delta", "evidenceSummary",
+    "energy", "energySums"];
+  const MAIN_VIEWS = ["overview", "v2summary", "agreement", "v3", "curation",
+    "source", "energy"];
+  const SUBVIEW_PARENT = {
+    v2summary: "v2summary", v2parity: "v2summary", boundary: "v2summary", v2overlap: "v2summary",
+    agreement: "agreement", concordanceEcdf: "agreement", reciprocal: "agreement",
+    conflictBrowser: "agreement", concordance: "agreement",
+    v3: "v3", v3agreement: "v3",
+    source: "source", delta: "source", evidenceSummary: "source",
+    energy: "energy", energySums: "energy"
+  };
+  const SECTION_CHILDREN = {};
+  VIEWS.forEach(function (name) {
+    const parent = SUBVIEW_PARENT[name] || name;
+    SECTION_CHILDREN[parent] = SECTION_CHILDREN[parent] || [];
+    SECTION_CHILDREN[parent].push(name);
+  });
   const payloads = {
+    overview: JSON.parse(document.getElementById("overview-payload").textContent),
+    v2summary: JSON.parse(document.getElementById("v2summary-payload").textContent),
+    v2parity: JSON.parse(document.getElementById("v2parity-payload").textContent),
+    boundary: JSON.parse(document.getElementById("boundary-payload").textContent),
+    v2overlap: JSON.parse(document.getElementById("v2overlap-payload").textContent),
+    agreement: JSON.parse(document.getElementById("agreement-payload").textContent),
+    concordanceEcdf: JSON.parse(document.getElementById("concordanceEcdf-payload").textContent),
+    reciprocal: JSON.parse(document.getElementById("reciprocal-payload").textContent),
+    conflictBrowser: JSON.parse(document.getElementById("conflictBrowser-payload").textContent),
+    concordance: JSON.parse(document.getElementById("concordance-payload").textContent),
+    v3: JSON.parse(document.getElementById("v3-payload").textContent),
+    v3agreement: JSON.parse(document.getElementById("v3agreement-payload").textContent),
+    curation: JSON.parse(document.getElementById("curation-payload").textContent),
     source: JSON.parse(document.getElementById("source-payload").textContent),
     delta: JSON.parse(document.getElementById("delta-payload").textContent),
+    evidenceSummary: JSON.parse(document.getElementById("evidenceSummary-payload").textContent),
     energy: JSON.parse(document.getElementById("energy-payload").textContent),
-    energyDelta: JSON.parse(
-      document.getElementById("energy-delta-payload").textContent
-    ),
-    energySums: JSON.parse(
-      document.getElementById("energy-sums-payload").textContent
-    ),
-    v2overlap: JSON.parse(
-      document.getElementById("v2overlap-payload").textContent
-    ),
-    v2parity: JSON.parse(
-      document.getElementById("v2parity-payload").textContent
-    ),
-    v2summary: JSON.parse(
-      document.getElementById("v2summary-payload").textContent
-    ),
-    concordance: JSON.parse(
-      document.getElementById("concordance-payload").textContent
-    )
+    energySums: JSON.parse(document.getElementById("energy-sums-payload").textContent)
   };
-  const rendered = {
-    source: false, delta: false, energy: false, energyDelta: false,
-    energySums: false, v2overlap: false, v2parity: false, v2summary: false,
-    concordance: false
-  };
+  const rendered = {};
+  VIEWS.forEach(function (name) { rendered[name] = false; });
   const config = {
     responsive: true,
     scrollZoom: true,
@@ -2711,19 +3471,79 @@ __PLOTLY_SCRIPT__
     return null;
   }
 
+  function disabledReason(view) {
+    const payload = payloads[view];
+    if (!payload) {
+      return "payload missing";
+    }
+    if (payload.disabledReason) {
+      return payload.disabledReason;
+    }
+    if (!payload.traces || payload.traces.length === 0) {
+      return payload.note || "No comparable rows for this view yet.";
+    }
+    return "";
+  }
+
+  function isDisabled(view) {
+    return Boolean(disabledReason(view));
+  }
+
+  function firstEnabled(parent) {
+    const children = SECTION_CHILDREN[parent] || [parent];
+    for (let i = 0; i < children.length; i += 1) {
+      if (!isDisabled(children[i])) {
+        return children[i];
+      }
+    }
+    return parent === "overview" ? "overview" : firstEnabled("overview");
+  }
+
   function noteFor(view) {
     const payload = payloads[view];
     if (!payload) {
       return "";
     }
+    const reason = disabledReason(view);
+    if (reason) {
+      return reason;
+    }
     const f = payload.filter || {};
     const fb = fallbackDevice(f);
     if (fb && f.devices && f.devices.length > 1) {
-      return "Per-device view: showing " + fb + " (first of " +
+      return "per-device view: showing " + fb + " (first of " +
         f.devices.length + " devices) because this tab cannot overlay " +
         "devices; pick a device above to switch. " + (payload.note || "");
     }
     return payload.note || "";
+  }
+
+  function diagnosticsFor(parent) {
+    const children = SECTION_CHILDREN[parent] || [];
+    const disabled = children.filter(function (name) { return isDisabled(name); });
+    if (disabled.length === 0) {
+      return "";
+    }
+    return "Disabled views: " + disabled.map(function (name) {
+      return name + " (" + disabledReason(name) + ")";
+    }).join("; ");
+  }
+
+  function refreshDisabledButtons() {
+    document.querySelectorAll(".tab[data-view]").forEach(function (button) {
+      const parent = button.dataset.view;
+      const disabled = (SECTION_CHILDREN[parent] || [parent]).every(function (name) {
+        return isDisabled(name);
+      });
+      button.disabled = disabled;
+      button.title = disabled ? diagnosticsFor(parent) : "";
+    });
+    document.querySelectorAll(".subtab").forEach(function (button) {
+      const view = button.dataset.subview;
+      const reason = disabledReason(view);
+      button.disabled = Boolean(reason);
+      button.title = reason || "";
+    });
   }
 
   function effectiveDevice(f) {
@@ -2821,8 +3641,6 @@ __PLOTLY_SCRIPT__
     if (title) {
       update["title.text"] = title;
     }
-    // Per-device axis windows (the parity tab): without them one device's
-    // points sit in a corner of the global range.
     if (f.ranges || f.rangeAll) {
       applyAxisRanges(update, selectedAxisRange(f, eff));
     }
@@ -2850,10 +3668,11 @@ __PLOTLY_SCRIPT__
       return;
     }
     const payload = payloads[view];
-    if (!payload.traces || payload.traces.length === 0) {
+    const reason = disabledReason(view);
+    if (reason) {
       node.innerHTML =
         '<div class="error" style="border-color:#9a6700;background:#fff8c5;' +
-        'color:#7a5c00">No comparable rows for this view yet.</div>';
+        'color:#7a5c00">' + reason + '</div>';
     } else {
       Plotly.newPlot(node, payload.traces, layoutWithCurrentRange(payload), config);
       installFocusedReset(node, view);
@@ -2864,26 +3683,60 @@ __PLOTLY_SCRIPT__
 
   function viewFromHash() {
     const key = (window.location.hash || "").replace("#", "");
-    return VIEWS.indexOf(key) >= 0 ? key : "source";
+    return VIEWS.indexOf(key) >= 0 ? key : "overview";
   }
 
-  function show(view) {
-    document.querySelectorAll(".tab").forEach(function (button) {
-      const active = button.dataset.view === view;
+  function show(requestedView) {
+    const requestedParent = SUBVIEW_PARENT[requestedView] || requestedView;
+    let view = requestedView;
+    if (isDisabled(view)) {
+      view = firstEnabled(requestedParent);
+    }
+    const parent = SUBVIEW_PARENT[view] || view;
+    document.querySelectorAll(".tab[data-view]").forEach(function (button) {
+      const active = button.dataset.view === parent;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
+    document.querySelectorAll(".subtab").forEach(function (button) {
+      const child = button.dataset.subview;
+      const relevant = (SECTION_CHILDREN[parent] || []).indexOf(child) >= 0
+        && parent !== "overview" && parent !== "curation";
+      button.hidden = !relevant;
+      button.classList.toggle("active", child === view);
+    });
+    const subviews = document.querySelector(".subviews");
+    subviews.hidden = (SECTION_CHILDREN[parent] || []).length <= 1;
     VIEWS.forEach(function (name) {
       document.getElementById(name + "-plot").hidden = name !== view;
     });
     currentView = view;
     document.getElementById("plot-note").textContent = noteFor(view);
+    document.getElementById("plot-diagnostics").textContent = diagnosticsFor(parent);
     render(view);
   }
 
-  document.querySelectorAll(".tab").forEach(function (button) {
+  refreshDisabledButtons();
+
+  document.querySelectorAll(".tab[data-view]").forEach(function (button) {
     button.addEventListener("click", function () {
-      const view = button.dataset.view;
+      if (button.disabled) {
+        return;
+      }
+      const view = firstEnabled(button.dataset.view);
+      if (window.location.hash !== "#" + view) {
+        window.location.hash = view;
+      } else {
+        show(view);
+      }
+    });
+  });
+  document.querySelectorAll(".subtab").forEach(function (button) {
+    button.addEventListener("click", function () {
+      if (button.disabled) {
+        return;
+      }
+      const view = button.dataset.subview;
       if (window.location.hash !== "#" + view) {
         window.location.hash = view;
       } else {
@@ -2916,70 +3769,110 @@ def main() -> None:
     v2_records = pd.read_csv(V2_CSV) if V2_CSV.exists() else pd.DataFrame()
     source_payload = source_plot_payload(source_records)
     delta_payload = delta_plot_payload(delta_comparisons)
-    energy_payload = energy_context_plot_payload(source_records)
-    energy_delta_payload = energy_delta_plot_payload(delta_comparisons)
+    energy_payload = energy_context_2d_payload(source_records)
     energy_sums_payload = energy_balance_plot_payload(source_records)
     concordance_records = (
         pd.read_csv(CONCORDANCE_CSV) if CONCORDANCE_CSV.exists() else pd.DataFrame()
     )
+    v3_records = pd.read_csv(V3_CSV) if V3_CSV.exists() else pd.DataFrame()
+    overview_payload_data = overview_payload(
+        source_records, delta_comparisons, v2_records, concordance_records, v3_records
+    )
     v2_payload = v2_interval_overlap_plot_payload(v2_records)
     v2_parity_payload = v2_severity_parity_plot_payload(v2_records)
     v2_summary_payload = v2_overlap_summary_plot_payload(v2_records)
+    boundary_payload = boundary_coverage_payload(v2_records)
+    agreement_payload = agreement_matrix_payload(concordance_records)
     concordance_payload = concordance_3d_plot_payload(concordance_records)
+    concordance_ecdf_payload = concordance_enrichment_ecdf_payload(concordance_records)
+    reciprocal_payload = reciprocal_enrichment_payload(concordance_records)
+    conflict_payload = conflict_browser_payload(concordance_records)
+    v3_payload = v3_vector_explorer_payload(v3_records)
+    v3_agreement = v3_agreement_payload(v3_records, concordance_records)
+    curation_payload_data = curation_queue_payload(v2_records, concordance_records)
+    evidence_summary_payload = evidence_quality_summary_payload(delta_comparisons)
 
     # Union of per-view device options, in tab order, deduped, for the one
     # global device filter that drives every tab.
-    device_options: list[str] = []
-    for payload in (
-        source_payload,
-        energy_payload,
-        delta_payload,
-        energy_delta_payload,
-        energy_sums_payload,
-        v2_payload,
-        v2_parity_payload,
+    all_payloads = (
+        overview_payload_data,
         v2_summary_payload,
+        v2_parity_payload,
+        boundary_payload,
+        v2_payload,
+        agreement_payload,
+        concordance_ecdf_payload,
+        reciprocal_payload,
+        conflict_payload,
         concordance_payload,
-    ):
+        v3_payload,
+        v3_agreement,
+        curation_payload_data,
+        source_payload,
+        delta_payload,
+        evidence_summary_payload,
+        energy_payload,
+        energy_sums_payload,
+    )
+    device_options: list[str] = []
+    for payload in all_payloads:
         for dev in payload.get("filter", {}).get("devices", []):
             if dev not in device_options:
                 device_options.append(dev)
 
     html = (
         HTML_TEMPLATE.replace("__PLOTLY_SCRIPT__", plotly_script_tag())
+        .replace("__OVERVIEW_PAYLOAD__", json_for_html(overview_payload_data))
+        .replace("__V2_SUMMARY_PAYLOAD__", json_for_html(v2_summary_payload))
+        .replace("__V2_PARITY_PAYLOAD__", json_for_html(v2_parity_payload))
+        .replace("__BOUNDARY_PAYLOAD__", json_for_html(boundary_payload))
+        .replace("__V2_PAYLOAD__", json_for_html(v2_payload))
+        .replace("__AGREEMENT_PAYLOAD__", json_for_html(agreement_payload))
+        .replace("__CONCORDANCE_ECDF_PAYLOAD__", json_for_html(concordance_ecdf_payload))
+        .replace("__RECIPROCAL_PAYLOAD__", json_for_html(reciprocal_payload))
+        .replace("__CONFLICT_BROWSER_PAYLOAD__", json_for_html(conflict_payload))
+        .replace("__CONCORDANCE_PAYLOAD__", json_for_html(concordance_payload))
+        .replace("__V3_PAYLOAD__", json_for_html(v3_payload))
+        .replace("__V3_AGREEMENT_PAYLOAD__", json_for_html(v3_agreement))
+        .replace("__CURATION_PAYLOAD__", json_for_html(curation_payload_data))
         .replace("__SOURCE_PAYLOAD__", json_for_html(source_payload))
         .replace("__DELTA_PAYLOAD__", json_for_html(delta_payload))
+        .replace("__EVIDENCE_SUMMARY_PAYLOAD__", json_for_html(evidence_summary_payload))
         .replace("__ENERGY_PAYLOAD__", json_for_html(energy_payload))
-        .replace("__ENERGY_DELTA_PAYLOAD__", json_for_html(energy_delta_payload))
         .replace("__ENERGY_SUMS_PAYLOAD__", json_for_html(energy_sums_payload))
-        .replace("__V2_PAYLOAD__", json_for_html(v2_payload))
-        .replace("__V2_PARITY_PAYLOAD__", json_for_html(v2_parity_payload))
-        .replace("__V2_SUMMARY_PAYLOAD__", json_for_html(v2_summary_payload))
-        .replace("__CONCORDANCE_PAYLOAD__", json_for_html(concordance_payload))
         .replace("__DEVICE_OPTIONS__", json_for_html(device_options))
     )
     OUTPUT_HTML.write_text(html)
     size_mb = OUTPUT_HTML.stat().st_size / (1024 * 1024)
 
     def count_points(payload: dict[str, Any]) -> int:
-        return sum(
-            len(trace.get("x", []))
-            for trace in payload["traces"]
-            if trace.get("type") in {"scatter3d", "scatter", "bar"}
-        )
+        total = 0
+        for trace in payload["traces"]:
+            if trace.get("type") in {"scatter3d", "scatter", "bar"}:
+                total += len(trace.get("x", []))
+            elif trace.get("type") == "table":
+                cells = trace.get("cells", {}).get("values", [])
+                total += len(cells[0]) if cells else 0
+        return total
 
     print(f"Wrote {OUTPUT_HTML} ({size_mb:.2f} MiB)")
     print(
         "Views: "
+        f"{count_points(overview_payload_data):,} overview; "
+        f"{count_points(v2_summary_payload):,} v2 summary; "
+        f"{count_points(v2_parity_payload):,} v2 parity; "
+        f"{count_points(boundary_payload):,} boundary; "
+        f"{count_points(agreement_payload):,} agreement; "
+        f"{count_points(concordance_ecdf_payload):,} ECDF; "
+        f"{count_points(conflict_payload):,} conflicts; "
+        f"{count_points(v3_payload):,} v3 components; "
+        f"{count_points(v3_agreement):,} v3 agreement; "
+        f"{count_points(curation_payload_data):,} curation rows; "
         f"{count_points(source_payload):,} source; "
         f"{count_points(delta_payload):,} delta; "
-        f"{count_points(energy_payload):,} energy-context; "
-        f"{count_points(energy_delta_payload):,} proxy-energy-context; "
-        f"{count_points(energy_sums_payload):,} per-device energy bars; "
-        f"{count_points(v2_payload):,} v2 severity-interval points; "
-        f"{count_points(v2_parity_payload):,} v2 parity points; "
-        f"{count_points(v2_summary_payload):,} v2 summary bars; "
-        f"{count_points(concordance_payload):,} concordance points"
+        f"{count_points(evidence_summary_payload):,} evidence; "
+        f"{count_points(energy_payload):,} energy; "
+        f"{count_points(energy_sums_payload):,} energy bars"
     )
 
 

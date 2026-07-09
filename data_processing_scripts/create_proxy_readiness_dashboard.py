@@ -24,12 +24,14 @@ from superset_api import (
     get_session,
     refresh_dataset_columns,
 )
+from proxy_viz_palette import CANDIDATE_COLORS
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 SCHEMA_PATH = REPO_ROOT / "schema" / "025_proxy_readiness_waveforms.sql"
 # Applied right after 025 because it depends on stress_test_context_view.
 MECH_ENERGY_SCHEMA_PATH = REPO_ROOT / "schema" / "028_mechanistic_energy_proxy.sql"
+VIZ_SUPPORT_SCHEMA_PATH = REPO_ROOT / "schema" / "029_proxy_viz_support.sql"
 PIPELINE_SCHEMAS = {
     "022_irradiation_single_events.sql",
     "027_radiation_stress_dose.sql",
@@ -49,59 +51,12 @@ DATASET_TABLES = {
     "candidate_summary": "stress_proxy_candidate_summary_view",
     "experiment_plan": "stress_proxy_experiment_plan_view",
     "candidates_v2": "stress_proxy_candidate_energy_v2",
+    "candidates_v3": "stress_proxy_candidate_combined_v3",
+    "combined_settings": "stress_proxy_combined_ranker_settings",
+    "concordance_enrichment": "stress_proxy_concordance_enrichment_view",
+    "candidate_boundary": "stress_candidate_destruction_boundary_energy_view",
 }
 
-CANDIDATE_COLORS = {
-    "measured_damage_candidate": "#1f77b4",
-    "predicted_damage_candidate": "#2ca02c",
-    "device_run_measured_candidate": "#17becf",
-    "weak_measured_candidate": "#bcbd22",
-    "analog_questionable": "#8c6d31",
-    "waveform_only_candidate": "#ff7f0e",
-    "cross_device_screening_only": "#9edae5",
-    "inspect_manually": "#9467bd",
-    "missing_damage_context": "#8c564b",
-    "missing_damage_signature_overlap": "#6b6ecf",
-    "damage_signature_mismatch": "#d62728",
-    "energy_out_of_range": "#7f7f7f",
-    "sc": "#4c78a8",
-    "avalanche": "#f58518",
-    "irradiation": "#54a24b",
-    "robustness": "#d62728",
-    "reliability": "#1f77b4",
-    "radiation": "#54a24b",
-    "unknown": "#9d755d",
-    "SEB": "#54a24b",
-    "SELCI": "#e45756",
-    "SELCII": "#72b7b2",
-    "MIXED": "#b279a2",
-    "UNKNOWN": "#9d755d",
-    "energy_comparable": "#1f77b4",
-    "energy_censored_damage_signature_only": "#9467bd",
-    "thermal_runaway_pair": "#2ca02c",
-    "thermal_runaway_pair_secondary": "#17becf",
-    "gate_oxide_pair_repetitive_only": "#bcbd22",
-    "cumulative_defect_no_electrical_analog": "#8c6d31",
-    # Fixed LET bands (MeV*cm2/mg) on a heat ramp: hotter = higher LET.
-    # New beams fall into an existing band, so this list never grows.
-    "LET 00-05": "#fec44f",
-    "LET 05-15": "#fe9929",
-    "LET 15-25": "#ec7014",
-    "LET 25-50": "#cc4c02",
-    "LET 50-80": "#993404",
-    "LET 80+": "#662506",
-    "LET n/a": "#969696",
-    "validated": "#2ca02c",
-    "validation_candidate": "#1f77b4",
-    "curation_candidate": "#ff7f0e",
-    "screening_only": "#8c959f",
-    "blocked": "#d62728",
-    "no_curated_truth": "#8c959f",
-    "validated_by_curated_measured_post_iv": "#2ca02c",
-    "curated_equivalent_non_measured": "#17becf",
-    "curated_not_equivalent": "#d62728",
-    "curated_uncertain": "#ff7f0e",
-}
 
 FIGURE1B_LANDSCAPE_DESCRIPTION = (
     "Recreates Kozak et al. IEEE TPEL 2023 Figure 1(b) with database "
@@ -324,17 +279,31 @@ DEPLETION_RATIO_REFERENCE_LINE = [
 DEPLETION_X_BOUNDS = [0.0, 1.0]
 
 
-TAB_READINESS = "Readiness & Actions"
-TAB_CANDIDATE = "Candidate Triage"
-TAB_MECHANISTIC = "v2 / Mechanistic"
-TAB_DIAGNOSTICS = "Method Diagnostics"
+TAB_READINESS = "Verdict & Actions"
+TAB_CANDIDATE = "v1 · Waveform ranker"
+TAB_MECHANISTIC = "v2 · Energy ranker"
+TAB_V3 = "v3 · Combined vector"
+TAB_CONCORDANCE = "Concordance & Curation"
+TAB_PHYSICS = "Physics Context"
 TAB_RAW = "Raw / QA"
-TAB_ORDER = [TAB_READINESS, TAB_CANDIDATE, TAB_MECHANISTIC, TAB_DIAGNOSTICS, TAB_RAW]
+# Legacy chart definitions below still use this name; it now routes to Physics.
+TAB_DIAGNOSTICS = TAB_PHYSICS
+TAB_ORDER = [
+    TAB_READINESS,
+    TAB_CANDIDATE,
+    TAB_MECHANISTIC,
+    TAB_V3,
+    TAB_CONCORDANCE,
+    TAB_PHYSICS,
+    TAB_RAW,
+]
 TAB_IDS = {
     TAB_READINESS: "TAB-proxy-readiness",
     TAB_CANDIDATE: "TAB-proxy-candidate",
     TAB_MECHANISTIC: "TAB-proxy-mechanistic",
-    TAB_DIAGNOSTICS: "TAB-proxy-diagnostics",
+    TAB_V3: "TAB-proxy-v3",
+    TAB_CONCORDANCE: "TAB-proxy-concordance",
+    TAB_PHYSICS: "TAB-proxy-physics",
     TAB_RAW: "TAB-proxy-raw",
 }
 MARKDOWN_PANELS = [
@@ -373,7 +342,7 @@ MARKDOWN_PANELS = [
         "height": 6,
     },
     {
-        "tab": TAB_DIAGNOSTICS,
+        "tab": TAB_PHYSICS,
         "code": (
             "### Irradiation energy chain\n\n"
             "Ionizing deposited energy estimates the radiation **trigger**. "
@@ -388,7 +357,7 @@ MARKDOWN_PANELS = [
         "height": 6,
     },
     {
-        "tab": TAB_DIAGNOSTICS,
+        "tab": TAB_PHYSICS,
         "code": (
             "[Open the interactive damage-signature and energy viewer]"
             "(https://rawdata.aps.ee.ethz.ch/data/www/tools/"
@@ -397,19 +366,30 @@ MARKDOWN_PANELS = [
         "width": 12,
         "height": 3,
     },
+    {
+        "tab": TAB_V3,
+        "code": (
+            "### v3 vector explorer\n\n"
+            "The dashboard keeps the rank-1 table and uncalibrated weights here. "
+            "Use the interactive viewer's v3 vector explorer for the stacked "
+            "component-share breakdown before judging the screening weights."
+        ),
+        "width": 12,
+        "height": 4,
+    },
 ]
 DECISION_STATUS_SQL = (
     "candidate_status IN ("
     "'measured_damage_candidate', 'predicted_damage_candidate', "
     "'device_run_measured_candidate', 'weak_measured_candidate', "
     "'analog_questionable', 'inspect_manually', 'damage_signature_mismatch', "
-    "'energy_out_of_range', 'missing_damage_context')"
+    "'missing_damage_context')"
 )
 ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION = (
     "Top-ranked proxy per energy-comparable target, restricted to "
     "decision-driving statuses and genuine failure modes (measured / "
     "predicted / device-run / weak damage, analog-questionable, "
-    "inspect-manually, damage-signature-mismatch, energy-out-of-range, "
+    "inspect-manually, damage-signature-mismatch, "
     "missing-damage-context). Only the cross-device and waveform-only "
     "screening cloud is excluded; see the all-status diagnostic on Method "
     "Diagnostics. Reference thresholds: damage signature mismatch cut-off = 2.50 "
@@ -466,6 +446,7 @@ def apply_proxy_schema() -> None:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_PATH.read_text())
             cur.execute(MECH_ENERGY_SCHEMA_PATH.read_text())
+            cur.execute(VIZ_SUPPORT_SCHEMA_PATH.read_text())
         conn.commit()
 
 
@@ -801,6 +782,8 @@ def select_filter(filter_id: str, name: str, targets, scoped_chart_ids,
 def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
     candidate_ids = chart_groups["candidate"]
     candidate_v2_ids = chart_groups.get("candidate_v2", [])
+    candidate_v3_ids = chart_groups.get("candidate_v3", [])
+    concordance_ids = chart_groups.get("concordance", [])
     context_ids = chart_groups["context"]
     readiness_ids = chart_groups["readiness"]
     planning_ids = chart_groups["planning"]
@@ -809,11 +792,15 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
 
     cand = dataset_ids["candidates"]
     cand_v2 = dataset_ids["candidates_v2"]
+    cand_v3 = dataset_ids["candidates_v3"]
+    conc = dataset_ids["concordance_enrichment"]
     ctx = dataset_ids["context"]
     tab_readiness = TAB_IDS[TAB_READINESS]
     tab_candidate = TAB_IDS[TAB_CANDIDATE]
     tab_mechanistic = TAB_IDS[TAB_MECHANISTIC]
-    tab_diag = TAB_IDS[TAB_DIAGNOSTICS]
+    tab_v3 = TAB_IDS[TAB_V3]
+    tab_concordance = TAB_IDS[TAB_CONCORDANCE]
+    tab_diag = TAB_IDS[TAB_PHYSICS]
 
     device_filter_id = "NATIVE_FILTER-proxy-device"
 
@@ -829,6 +816,20 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
             fid, label, [(cand_v2, column)], candidate_v2_ids, all_ids,
             parent_ids=[device_filter_id],
             tabs_in_scope=[tab_mechanistic],
+        )
+
+    def candidate_v3_filter(fid, label, column):
+        return select_filter(
+            fid, label, [(cand_v3, column)], candidate_v3_ids, all_ids,
+            parent_ids=[device_filter_id],
+            tabs_in_scope=[tab_v3],
+        )
+
+    def concordance_filter(fid, label, column):
+        return select_filter(
+            fid, label, [(conc, column)], concordance_ids, all_ids,
+            parent_ids=[device_filter_id],
+            tabs_in_scope=[tab_concordance],
         )
 
     def context_filter(fid, label, column):
@@ -848,11 +849,16 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
                 (dataset_ids["readiness"], "device_type"),
                 (dataset_ids["experiment_plan"], "measurement_device_type"),
                 (dataset_ids["destruction_boundary"], "device_type"),
+                (cand_v3, "device_type"),
+                (conc, "device_type"),
             ],
-            candidate_ids + candidate_v2_ids + context_ids + readiness_ids
-            + planning_ids + device_only_ids,
+            candidate_ids + candidate_v2_ids + candidate_v3_ids + concordance_ids
+            + context_ids + readiness_ids + planning_ids + device_only_ids,
             all_ids,
-            tabs_in_scope=[tab_readiness, tab_candidate, tab_mechanistic, tab_diag],
+            tabs_in_scope=[
+                tab_readiness, tab_candidate, tab_mechanistic, tab_v3,
+                tab_concordance, tab_diag,
+            ],
         ),
         candidate_filter(
             "NATIVE_FILTER-proxy-target-event", "Target Event", "target_event_type"
@@ -913,6 +919,27 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
         candidate_v2_filter(
             "NATIVE_FILTER-proxy-v2-source", "v2 Candidate Source",
             "candidate_source"
+        ),
+        candidate_v3_filter(
+            "NATIVE_FILTER-proxy-v3-event", "v3 Target Event", "target_event_type"
+        ),
+        candidate_v3_filter(
+            "NATIVE_FILTER-proxy-v3-source", "v3 Candidate Source", "candidate_source"
+        ),
+        candidate_v3_filter(
+            "NATIVE_FILTER-proxy-v3-scope", "v3 Match Scope", "match_scope"
+        ),
+        concordance_filter(
+            "NATIVE_FILTER-proxy-concordance-event", "Concordance Target Event",
+            "target_event_type"
+        ),
+        concordance_filter(
+            "NATIVE_FILTER-proxy-concordance-scope", "Concordance Scope",
+            "v2_match_scope"
+        ),
+        concordance_filter(
+            "NATIVE_FILTER-proxy-concordance-source", "Concordance v2 Source",
+            "v2_pick_source"
         ),
         context_filter("NATIVE_FILTER-proxy-context-source", "Context Source", "source"),
         context_filter(
@@ -1381,8 +1408,76 @@ def build_chart_defs(dataset_ids):
         "energy_v2_notes",
     ]
     v2_rank1_filter = sql_filter("mechanistic_energy_candidate_rank = 1")
+    v3_rank1_filter = sql_filter("combined_rank = 1")
 
-    return [
+    v3_cols = [
+        "target_stress_record_key",
+        "candidate_stress_record_key",
+        "device_type",
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+        "waveform_rank",
+        "energy_rank",
+        "combined_rank",
+        "combined_vector_distance",
+        "signature_axis_distance",
+        "duration_log_delta",
+        "log_energy_delta_dex",
+        "candidate_failure_fraction_overlap_class",
+        "terminal_energy_overlap_class",
+        "failure_fraction_log_delta",
+        "best_damage_distance",
+        "damage_signature_coverage_gap",
+        "regime_match_class",
+        "path_penalty",
+        "proxy_claim_status",
+        "proxy_claim_basis",
+        "mechanistic_energy_candidate_status",
+        "truth_validation_status",
+        "energy_v2_blockers",
+        "energy_v2_notes",
+    ]
+    combined_setting_cols = [
+        "setting_name", "description", "signature_axis_weight",
+        "duration_weight", "log_energy_weight", "failure_fraction_weight",
+        "post_iv_damage_weight", "regime_path_weight", "coverage_gap_weight",
+    ]
+    concordance_cols = [
+        "conflict_priority",
+        "same_device_source_conflict",
+        "c2m0080120d_avalanche_vs_sc_conflict",
+        "source_conflict",
+        "target_stress_record_key",
+        "device_type",
+        "target_event_type",
+        "v2_match_scope",
+        "v2_pick_source",
+        "v2_pick_key",
+        "v2_candidate_status",
+        "v2_proxy_claim_status",
+        "v1_signature_pick_source",
+        "v1_signature_pick_key",
+        "v1_signature_proxy_claim_status",
+        "v1_signature_claim_quality",
+        "v2_pick_dssig_rank",
+        "dssig_pool_size",
+        "v2_pick_dssig_percentile",
+        "enrichment_band",
+        "candidate_failure_fraction_overlap_class",
+        "terminal_energy_overlap_class",
+        "truth_validation_status",
+    ]
+    candidate_boundary_cols = [
+        "boundary_scope", "device_type", "voltage_class", "source",
+        "test_timescale_class", "survived_count", "destructive_count",
+        "unknown_outcome_count", "record_count", "boundary_low_j",
+        "boundary_high_j", "boundary_inverted", "boundary_energy_basis",
+        "boundary_energy_basis_family", "boundary_blockers", "boundary_notes",
+        "boundary_usable",
+    ]
+
+    defs = [
         (
             "Proxy Readiness - Gate Zero Candidate Families KPI",
             dataset_ids["gate_zero"],
@@ -2167,6 +2262,268 @@ def build_chart_defs(dataset_ids):
             "candidate_v2",
         ),
     ]
+
+    killed = {
+        "Proxy Readiness - Next Measurements (Top 3)",
+        "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Damage Signature Mismatch",
+        "Proxy Readiness - Candidate Pairs: Energy vs Damage Signature (All Statuses, Diagnostic)",
+        "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch",
+        "Proxy Readiness - Irradiation Depletion Stored Energy vs Blocking Bias",
+        "Proxy Readiness - Irradiation Depletion Ratio to SELC vs Blocking Bias",
+        "Proxy Readiness - Irradiation LET-Based Ionizing Deposited Energy vs Blocking Bias",
+        "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
+    }
+    moved_tabs = {
+        "Proxy Readiness - Decision-Safe Curation Queue": TAB_CONCORDANCE,
+        "Proxy Readiness - v2 Claim Review Queue": TAB_CONCORDANCE,
+    }
+    renamed = {
+        "Proxy Readiness - Candidate Summary": "Proxy Readiness - v1 Waveform Candidate Summary",
+        "Proxy Readiness - Best Proxy Candidates": "Proxy Readiness - Best v1 Waveform Candidates",
+        "Proxy Readiness - Irradiation Depletion Ratio to SEB vs Blocking Bias":
+            "Proxy Readiness - Irradiation Depletion Threshold Ratio vs Blocking Bias",
+    }
+    out = []
+    for item in defs:
+        name, ds_id, viz_type, params, width, height, tab, group = item
+        if name in killed:
+            continue
+        original_name = name
+        if original_name == "Proxy Readiness - Best Proxy Candidates":
+            cols = list(params.get("all_columns", []))
+            replacements = {
+                "candidate_rank": "waveform_rank",
+                "waveform_distance": "waveform_only_distance",
+                "damage_signature_distance": "signature_axis_distance",
+            }
+            params["all_columns"] = [replacements.get(c, c) for c in cols]
+            params["order_by_cols"] = [
+                json.dumps(["waveform_rank", True]),
+                json.dumps(["signature_axis_distance", True]),
+            ]
+            params["adhoc_filters"] = [sql_filter("waveform_rank = 1")]
+        elif original_name == "Proxy Readiness - Damage Signature Distance by Evidence Class":
+            params["metrics"] = [metric(
+                "signature_axis_distance",
+                "AVG(signature_axis_distance)",
+            )]
+            params["adhoc_filters"] = [
+                sql_filter("damage_signature_evidence_tier IS NOT NULL AND signature_axis_distance IS NOT NULL"),
+                top_rank_filter,
+            ]
+            params["y_axis_title"] = "signature_axis_distance (energy-free)"
+            params["_description"] = (
+                "Distribution by evidence tier using signature_axis_distance, "
+                "the prior-free and energy-free v1 comparator. Superset renders "
+                "this as a jittered scatter surrogate for the planned strip/box form."
+            )
+        elif original_name == "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance":
+            params["x_axis"] = "waveform_only_distance"
+            params["adhoc_filters"] = [
+                sql_filter("waveform_only_distance IS NOT NULL AND best_damage_distance IS NOT NULL"),
+                top_rank_filter,
+            ]
+            params["x_axis_title"] = "waveform_only_distance"
+            params["y_axis_title"] = "best_damage_distance"
+        name = renamed.get(name, name)
+        if original_name == "Proxy Readiness - Damage Signature Distance by Evidence Class":
+            name = "Proxy Readiness - Signature Axis Distance by Evidence Class"
+        tab = moved_tabs.get(item[0], tab)
+        out.append((name, ds_id, viz_type, params, width, height, tab, group))
+
+    out.extend([
+        (
+            "Proxy Readiness - v1 Targets Ranked",
+            dataset_ids["candidates"],
+            "big_number_total",
+            big_number_params(
+                "v1 ranked targets",
+                "COUNT(DISTINCT CASE WHEN candidate_rank = 1 THEN target_stress_record_key END)",
+                "waveform_rank population; includes energy-censored targets",
+                number_format=",d",
+            ),
+            3, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - v2 Targets Ranked",
+            dataset_ids["candidates_v2"],
+            "big_number_total",
+            big_number_params(
+                "v2 ranked targets",
+                "COUNT(DISTINCT CASE WHEN mechanistic_energy_candidate_rank = 1 THEN target_stress_record_key END)",
+                "energy-rankable targets; censored targets are v1-only",
+                number_format=",d",
+            ),
+            3, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - v3 Targets Ranked",
+            dataset_ids["candidates_v3"],
+            "big_number_total",
+            big_number_params(
+                "v3 ranked targets",
+                "COUNT(DISTINCT CASE WHEN combined_rank = 1 THEN target_stress_record_key END)",
+                "combined vector over v2 top-10 pool",
+                number_format=",d",
+            ),
+            3, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - Concordance Median Enrichment Percentile",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "median enrichment percentile",
+                "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY v2_pick_dssig_percentile)",
+                "v2 pick location in v1 signature ordering; lower is better",
+                number_format=".1f",
+            ),
+            3, 16, TAB_READINESS, "concordance",
+        ),
+        (
+            "Proxy Readiness - Curation Queue Depth",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "curation queue depth",
+                "COUNT(*) FILTER (WHERE source_conflict OR v2_proxy_claim_status IN ('validation_candidate', 'curation_candidate'))",
+                "targets needing truth-label adjudication or conflict review",
+                number_format=",d",
+            ),
+            3, 16, TAB_READINESS, "concordance",
+        ),
+        (
+            "Proxy Readiness - v2 Boundary Coverage",
+            dataset_ids["candidates_v2"],
+            "big_number_total",
+            big_number_params(
+                "usable own-boundary coverage",
+                "100.0 * COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1 AND candidate_failure_fraction_gate_usable) / NULLIF(COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1), 0)",
+                "failure-fraction axis is a data-gap tracker until this rises",
+                number_format=".1f",
+            ),
+            4, 16, TAB_MECHANISTIC, "candidate_v2",
+        ),
+        (
+            "Proxy Readiness - Candidate Destruction Boundary Data Gaps",
+            dataset_ids["candidate_boundary"],
+            "table",
+            table_params(
+                candidate_boundary_cols,
+                row_limit=500,
+                order_by=[["boundary_usable", False], ["unknown_outcome_count", False]],
+                description="Candidate-side destruction-boundary rollup that decides when the v2 failure-fraction axis is usable.",
+            ),
+            12, 44, TAB_MECHANISTIC, None,
+        ),
+        (
+            "Proxy Readiness - v3 Rank-1 Combined Candidate",
+            dataset_ids["candidates_v3"],
+            "table",
+            table_params(
+                v3_cols, row_limit=819,
+                order_by=[["combined_vector_distance", True]],
+                filters=[v3_rank1_filter],
+                description="v3 combined-vector rank-1 picks. Screening-only and uncalibrated; weights are visible in the settings panel.",
+            ),
+            12, 52, TAB_V3, "candidate_v3",
+        ),
+        (
+            "Proxy Readiness - v3 Combined Ranker Weights",
+            dataset_ids["combined_settings"],
+            "table",
+            table_params(
+                combined_setting_cols, row_limit=10,
+                description="UNCALIBRATED / screening-only weights used by stress_proxy_candidate_combined_v3.",
+            ),
+            12, 22, TAB_V3, None,
+        ),
+        (
+            "Proxy Readiness - v3 Candidate Pool (Top 10)",
+            dataset_ids["candidates_v3"],
+            "table",
+            table_params(
+                v3_cols, row_limit=2500,
+                order_by=[["target_stress_record_key", True], ["combined_rank", True]],
+            ),
+            12, 56, TAB_RAW, None,
+        ),
+        (
+            "Proxy Readiness - Concordance Best-Decile Share",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "best decile share",
+                "100.0 * COUNT(*) FILTER (WHERE v2_pick_dssig_percentile <= 10.0) / NULLIF(COUNT(*), 0)",
+                "v2 picks in top 10% of v1 prior-free signature ordering",
+                number_format=".1f",
+            ),
+            3, 16, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            "Proxy Readiness - Concordance Strict Rank-1 Agreement",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "strict rank-1 agreement",
+                "100.0 * COUNT(*) FILTER (WHERE prior_free_signature_rank1_agreement) / NULLIF(COUNT(*), 0)",
+                "expected lower bound after v1/v2 separation",
+                number_format=".1f",
+            ),
+            3, 16, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            "Proxy Readiness - Concordance Energy-Blended Control Agreement",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "energy-blended control",
+                "100.0 * COUNT(*) FILTER (WHERE energy_blended_control_agreement) / NULLIF(COUNT(*), 0)",
+                "circularity gauge; compare against enrichment",
+                number_format=".1f",
+            ),
+            3, 16, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            "Proxy Readiness - Truth-Label Coverage",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "curated truth labels",
+                "COUNT(*) FILTER (WHERE truth_validation_status IS DISTINCT FROM 'no_curated_truth')",
+                "fail-closed coverage for v1/v2/v3 curation",
+                number_format=",d",
+            ),
+            3, 16, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            "Proxy Readiness - Enrichment Distribution by Decile",
+            dataset_ids["concordance_enrichment"],
+            "echarts_timeseries_bar",
+            bar_params(
+                "v2_pick_dssig_decile",
+                "v2-pick decile in v1 signature ordering",
+                "rank-1 targets",
+                groupby=["v2_match_scope"],
+                metric_label="targets",
+                description="Post-separation enrichment histogram: low deciles mean v2 energy picks concentrate near v1's energy-free signature-best ordering.",
+            ),
+            12, 38, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            "Proxy Readiness - Method Conflict Browser",
+            dataset_ids["concordance_enrichment"],
+            "table",
+            table_params(
+                concordance_cols, row_limit=1000,
+                order_by=[["conflict_priority", True], ["target_stress_record_key", True]],
+                filters=[sql_filter("source_conflict")],
+                description="Targets where v1 signature-best source differs from the v2 pick source; C2M0080120D avalanche-vs-SC rows sort first.",
+            ),
+            12, 56, TAB_CONCORDANCE, "concordance",
+        ),
+    ])
+    return out
 
 
 def create_dashboard() -> int | None:

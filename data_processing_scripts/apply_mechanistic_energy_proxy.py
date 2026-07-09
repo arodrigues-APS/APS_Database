@@ -36,6 +36,7 @@ SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema"
 SCHEMA_PATHS = (
     SCHEMA_DIR / "025_proxy_readiness_waveforms.sql",
     SCHEMA_DIR / "028_mechanistic_energy_proxy.sql",
+    SCHEMA_DIR / "029_proxy_viz_support.sql",
 )
 
 
@@ -64,6 +65,9 @@ REQUIRED_OBJECTS = (
     "stress_candidate_destruction_boundary_energy_view",
     "stress_regime_compatibility",
     "stress_proxy_candidate_energy_v2",
+    "stress_proxy_combined_ranker_settings",
+    "stress_proxy_candidate_combined_v3",
+    "stress_proxy_concordance_enrichment_view",
     "proxy_truth_labels",
 )
 
@@ -191,6 +195,12 @@ def validate(conn) -> bool:
             """
         )
         _print_rows("v2 rank-1 status distribution (Phase 3):", cur.fetchall())
+        print(
+            "  Note: compare this rank-1 status distribution before/after the "
+            "ceiling fix; MIXED/unknown targets should cap again, while "
+            "measured/waveform v2 statuses become reachable when evidence exists."
+        )
+
 
         # Is the cross-device dominance a coverage gap (targets with no
         # same-device electrical candidate) rather than a ranking artifact?
@@ -295,6 +305,157 @@ def validate(conn) -> bool:
             """
         )
         _print_rows("Candidate destruction-boundary cells:", cur.fetchall())
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS v2_rows,
+                COUNT(*) FILTER (WHERE candidate_failure_fraction_gate_usable)
+                    AS usable_boundary_rows,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE candidate_failure_fraction_gate_usable)
+                    / NULLIF(COUNT(*), 0),
+                    1
+                ) AS pct_usable_boundary_rows,
+                COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1)
+                    AS rank1_rows,
+                COUNT(*) FILTER (
+                    WHERE mechanistic_energy_candidate_rank = 1
+                      AND candidate_failure_fraction_gate_usable
+                ) AS rank1_usable_boundary_rows,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (
+                        WHERE mechanistic_energy_candidate_rank = 1
+                          AND candidate_failure_fraction_gate_usable
+                    ) / NULLIF(
+                        COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1),
+                        0
+                    ),
+                    1
+                ) AS pct_rank1_usable_boundary_rows
+            FROM stress_proxy_candidate_energy_v2
+            """
+        )
+        _print_rows("v2 row-level own-threshold boundary coverage:", cur.fetchall())
+
+        cur.execute(
+            """
+            SELECT
+                candidate_mechanistic_regime,
+                COUNT(*) AS rows,
+                COUNT(*) FILTER (WHERE candidate_failure_fraction_gate_usable)
+                    AS usable_boundary_rows,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE candidate_failure_fraction_gate_usable)
+                    / NULLIF(COUNT(*), 0),
+                    1
+                ) AS pct_usable,
+                COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1)
+                    AS rank1_rows,
+                COUNT(*) FILTER (
+                    WHERE mechanistic_energy_candidate_rank = 1
+                      AND candidate_failure_fraction_gate_usable
+                ) AS rank1_usable_rows,
+                ROUND(
+                    100.0 * COUNT(*) FILTER (
+                        WHERE mechanistic_energy_candidate_rank = 1
+                          AND candidate_failure_fraction_gate_usable
+                    ) / NULLIF(
+                        COUNT(*) FILTER (WHERE mechanistic_energy_candidate_rank = 1),
+                        0
+                    ),
+                    1
+                ) AS pct_rank1_usable
+            FROM stress_proxy_candidate_energy_v2
+            GROUP BY candidate_mechanistic_regime
+            ORDER BY rows DESC
+            """
+        )
+        _print_rows("v2 boundary coverage by candidate regime:", cur.fetchall())
+
+        regression_checks = []
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unflagged_avalanche_rank1
+            FROM stress_proxy_candidate_energy_v2
+            WHERE mechanistic_energy_candidate_rank = 1
+              AND target_mechanistic_regime = 'selci_gate_coupled'
+              AND candidate_source = 'avalanche'
+              AND mechanistic_energy_candidate_status
+                  IS DISTINCT FROM 'mechanistic_regime_mismatch'
+            """
+        )
+        row = cur.fetchone()
+        regression_checks.append({
+            "name": "selci_no_unflagged_avalanche_rank1",
+            "passed": (row["unflagged_avalanche_rank1"] or 0) == 0,
+            **row,
+        })
+        cur.execute(
+            """
+            SELECT COUNT(*) AS avalanche_rank1_with_same_device_sc
+            FROM stress_proxy_candidate_energy_v2 v2
+            WHERE v2.mechanistic_energy_candidate_rank = 1
+              AND v2.target_mechanistic_regime = 'proton_low_collapse_seb'
+              AND v2.candidate_source = 'avalanche'
+              AND EXISTS (
+                  SELECT 1
+                  FROM stress_proxy_candidate_ranked_view alt
+                  WHERE alt.target_stress_record_key = v2.target_stress_record_key
+                    AND alt.candidate_source = 'sc'
+                    AND alt.match_scope = 'same_device'
+              )
+            """
+        )
+        row = cur.fetchone()
+        regression_checks.append({
+            "name": "proton_seb_sc_preferred_when_available",
+            "passed": (row["avalanche_rank1_with_same_device_sc"] or 0) == 0,
+            **row,
+        })
+        cur.execute(
+            """
+            SELECT COUNT(*) AS localization_blocked_rows
+            FROM stress_proxy_candidate_energy_v2
+            WHERE mechanistic_energy_candidate_rank = 1
+              AND EXISTS (
+                  SELECT 1 FROM unnest(COALESCE(energy_v2_blockers, ARRAY[]::text[])) b
+                  WHERE b LIKE 'localization%'
+              )
+            """
+        )
+        row = cur.fetchone()
+        regression_checks.append({
+            "name": "localization_never_blocks",
+            "passed": (row["localization_blocked_rows"] or 0) == 0,
+            **row,
+        })
+        cur.execute(
+            """
+            SELECT COUNT(*) AS first_order_measured_capped
+            FROM stress_proxy_candidate_energy_v2
+            WHERE regime_match_class IN ('first_order_analog', 'secondary_analog')
+              AND measured_comparability_status IN ('strong', 'usable')
+              AND mechanistic_energy_candidate_status = 'mechanistic_analog_questionable'
+            """
+        )
+        row = cur.fetchone()
+        regression_checks.append({
+            "name": "first_order_measured_not_capped",
+            "passed": (row["first_order_measured_capped"] or 0) == 0,
+            **row,
+        })
+        # Each check carries its own detail column, so render per-row instead
+        # of _print_rows (which assumes homogeneous keys across rows).
+        print("\nv2 regression checks (all must pass):")
+        for chk in regression_checks:
+            detail = ", ".join(
+                f"{k}={v}" for k, v in chk.items() if k not in ("name", "passed")
+            )
+            print(f"  {'PASS' if chk['passed'] else 'FAIL'} {chk['name']} ({detail})")
+        if any(not r["passed"] for r in regression_checks):
+            ok = False
+            print("  FAIL: one or more v2 regression checks failed")
 
         # Phase 4: curated truth-label coverage.  These are the human-labeled
         # pairs the v2 calibrator scores against.  An empty table is the

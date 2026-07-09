@@ -43,6 +43,10 @@ COLUMNS = [
     "candidate_mechanistic_regime",
     "regime_match_class",
     "candidate_rank_v1",
+    "waveform_rank",
+    "waveform_rankable",
+    "energy_rankable",
+    "candidate_energy_missing",
     "candidate_status_v1",
     "proxy_claim_status_v1",
     "proxy_claim_basis_v1",
@@ -53,6 +57,7 @@ COLUMNS = [
     "target_energy_comparability_class",
     "candidate_energy_comparability_class",
     "mechanistic_energy_candidate_rank",
+    "energy_rank",
     "mechanistic_energy_candidate_status",
     "proxy_claim_status",
     "proxy_claim_basis",
@@ -110,9 +115,9 @@ def export(conn, out_path: Path = OUTPUT_CSV, top_n: int = 3) -> Path:
         cur.execute(
             f"SELECT {', '.join(COLUMNS)} "
             "FROM stress_proxy_candidate_energy_v2 "
-            "WHERE mechanistic_energy_candidate_rank <= %s "
+            "WHERE energy_rank <= %s "
             "ORDER BY device_type, target_stress_record_key, "
-            "mechanistic_energy_candidate_rank",
+            "energy_rank",
             (top_n,),
         )
         rows = [dict(r) for r in cur.fetchall()]

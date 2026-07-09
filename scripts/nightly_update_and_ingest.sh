@@ -161,6 +161,14 @@ run_py() {
   "${PYTHON}" "$@"
 }
 
+run_py_optional() {
+  log "Running optional $*"
+  if ! "${PYTHON}" "$@"; then
+    log "WARNING: optional Python step failed: $*"
+    return 1
+  fi
+}
+
 preflight_irradiation_seed_source() {
   local head
   local dirty
@@ -264,6 +272,16 @@ run_py ml_post_iv_physical_prediction.py \
 run_py create_iv_physical_prediction_dashboard.py
 run_py ml_sc_irrad_equivalence.py --rebuild
 run_py create_proxy_readiness_dashboard.py
+# The self-contained interactive viewer is an exported artifact, not a core
+# ingest dependency. Keep it fresh when possible, but do not abort nightly
+# ingestion if a viewer-only export/regeneration step fails.
+run_py_optional apply_mechanistic_energy_proxy.py || true
+run_py_optional plot_source_damage_signature_3d.py || true
+run_py_optional plot_damage_signature_delta_3d.py || true
+run_py_optional export_proxy_candidate_energy_v2_csv.py || true
+run_py_optional export_proxy_method_concordance_csv.py || true
+run_py_optional export_proxy_candidate_combined_v3_csv.py || true
+run_py_optional create_interactive_damage_signature_viewer.py || true
 run_py create_sc_irrad_dashboard.py
 run_py create_sc_irrad_prediction_dashboard.py
 

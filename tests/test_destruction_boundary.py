@@ -15,6 +15,7 @@ import unittest
 from data_processing_scripts.mechanistic_energy_proxy import (
     BOUNDARY_MIN_DESTRUCTIVE_COUNT,
     BOUNDARY_MIN_SURVIVED_COUNT,
+    BOUNDARY_UNKNOWN_OUTCOME_NOTE,
     REPETITIVE_CANDIDATE_REGIMES,
     WU_2024_AVALANCHE_FAILURE_TJ_BAND_K,
     WU_2024_SIC_INTRINSIC_LIMIT_K,
@@ -22,6 +23,7 @@ from data_processing_scripts.mechanistic_energy_proxy import (
     candidate_failure_fraction,
     destruction_boundary_interval,
     energy_basis_family,
+    survived_evidence,
 )
 
 
@@ -92,6 +94,37 @@ class BoundaryIntervalTests(unittest.TestCase):
         self.assertEqual((b["low_j"], b["high_j"]), (2.0, 2.0))
         self.assertFalse(b["inverted"])
         self.assertTrue(b["usable"])
+
+    def test_unknown_outcome_count_is_visible_note_not_bracket_side(self):
+        b = _boundary(max_survived=1.0, min_destructive=4.0,
+                      survived=1, destructive=3, unknown_outcome_count=2)
+        self.assertEqual((b["low_j"], b["high_j"]), (1.0, 4.0))
+        self.assertIn(BOUNDARY_UNKNOWN_OUTCOME_NOTE, b["notes"])
+        self.assertIn("destruction_boundary_insufficient_survived_count",
+                      b["blockers"])
+        self.assertFalse(b["usable"])
+
+
+class SurvivedEvidenceTests(unittest.TestCase):
+    def test_post_iv_measured_is_survived_evidence(self):
+        self.assertTrue(survived_evidence("post_iv_measured", None))
+
+    def test_nonfail_avalanche_outcome_is_survived_evidence(self):
+        self.assertTrue(survived_evidence("unknown_no_post_iv", "pass"))
+        self.assertTrue(survived_evidence("unknown_no_post_iv", "survived"))
+
+    def test_unknown_and_latent_values_are_not_survived_without_outcome(self):
+        self.assertFalse(survived_evidence("unknown_no_post_iv", None))
+        self.assertFalse(survived_evidence("potentially_reversible_or_latent", None))
+
+    def test_fail_outcome_is_not_survived_evidence(self):
+        self.assertFalse(survived_evidence("unknown_no_post_iv", "FAIL catastrophic"))
+
+    def test_destructive_row_is_never_survived_evidence(self):
+        # Contradictory metadata (catastrophic flag + non-fail outcome string)
+        # must not put one row on BOTH bracket sides.
+        self.assertFalse(survived_evidence("destructive_or_catastrophic", "pass"))
+        self.assertFalse(survived_evidence("destructive_or_catastrophic", None))
 
 
 class FailureFractionTests(unittest.TestCase):

@@ -25,6 +25,7 @@ DECLARE
     obj_kind "char";
 BEGIN
     FOREACH obj_name IN ARRAY ARRAY[
+        'stress_proxy_candidate_combined_v3',
         'stress_proxy_candidate_energy_v2',
         'stress_candidate_destruction_boundary_energy_view',
         'stress_energy_equivalence_features'
@@ -154,6 +155,45 @@ ON CONFLICT (target_stress_record_key, candidate_stress_record_key) DO UPDATE SE
     reviewer = EXCLUDED.reviewer,
     review_date = EXCLUDED.review_date,
     notes = EXCLUDED.notes;
+
+
+CREATE TABLE IF NOT EXISTS stress_proxy_combined_ranker_settings (
+    setting_name text PRIMARY KEY,
+    description text NOT NULL,
+    signature_axis_weight double precision NOT NULL,
+    duration_weight double precision NOT NULL,
+    log_energy_weight double precision NOT NULL,
+    failure_fraction_weight double precision NOT NULL,
+    post_iv_damage_weight double precision NOT NULL,
+    regime_path_weight double precision NOT NULL,
+    coverage_gap_weight double precision NOT NULL,
+    CHECK (signature_axis_weight >= 0.0),
+    CHECK (duration_weight >= 0.0),
+    CHECK (log_energy_weight >= 0.0),
+    CHECK (failure_fraction_weight >= 0.0),
+    CHECK (post_iv_damage_weight >= 0.0),
+    CHECK (regime_path_weight >= 0.0),
+    CHECK (coverage_gap_weight >= 0.0)
+);
+
+INSERT INTO stress_proxy_combined_ranker_settings (
+    setting_name, description, signature_axis_weight, duration_weight,
+    log_energy_weight, failure_fraction_weight, post_iv_damage_weight,
+    regime_path_weight, coverage_gap_weight
+) VALUES (
+    'screening_default',
+    '2026-07-06 screening-only combined vector weights; uncalibrated pending curated truth labels.',
+    1.0, 0.10, 1.0, 1.0, 0.50, 0.25, 0.25
+)
+ON CONFLICT (setting_name) DO UPDATE SET
+    description = EXCLUDED.description,
+    signature_axis_weight = EXCLUDED.signature_axis_weight,
+    duration_weight = EXCLUDED.duration_weight,
+    log_energy_weight = EXCLUDED.log_energy_weight,
+    failure_fraction_weight = EXCLUDED.failure_fraction_weight,
+    post_iv_damage_weight = EXCLUDED.post_iv_damage_weight,
+    regime_path_weight = EXCLUDED.regime_path_weight,
+    coverage_gap_weight = EXCLUDED.coverage_gap_weight;
 
 
 -- Materialized (not a plain view): stress_proxy_candidate_energy_v2 below
@@ -504,7 +544,16 @@ WITH source_rows AS (
         mech_energy_basis_family(s.electrical_terminal_energy_basis)
             AS boundary_energy_basis_family,
         (s.response_reversibility = 'destructive_or_catastrophic')
-            AS destructive
+            AS destructive,
+        -- Positive survival evidence only; a destructive row is never survived
+        -- evidence even when contradictory metadata pairs it with a non-fail
+        -- outcome string (mirrors survived_evidence() in
+        -- mechanistic_energy_proxy.py).
+        (s.response_reversibility <> 'destructive_or_catastrophic'
+         AND (s.response_reversibility = 'post_iv_measured'
+              OR (s.avalanche_outcome IS NOT NULL
+                  AND LOWER(s.avalanche_outcome) NOT LIKE '%fail%')))
+            AS survived
     FROM stress_test_context_view s
     WHERE s.source IN ('sc', 'avalanche')
       AND s.device_type IS NOT NULL
@@ -519,27 +568,24 @@ same_basis_counts AS (
     SELECT
         device_type,
         source,
-        mechanistic_regime,
         test_timescale_class,
         boundary_energy_basis,
         boundary_energy_basis_family,
         COUNT(*) AS basis_rows
     FROM source_rows
-    GROUP BY device_type, source, mechanistic_regime, test_timescale_class,
+    GROUP BY device_type, source, test_timescale_class,
              boundary_energy_basis, boundary_energy_basis_family
 ),
 same_basis AS (
-    SELECT DISTINCT ON (device_type, source, mechanistic_regime,
-                        test_timescale_class)
+    SELECT DISTINCT ON (device_type, source, test_timescale_class)
         device_type,
         source,
-        mechanistic_regime,
         test_timescale_class,
         boundary_energy_basis,
         boundary_energy_basis_family,
         basis_rows
     FROM same_basis_counts
-    ORDER BY device_type, source, mechanistic_regime, test_timescale_class,
+    ORDER BY device_type, source, test_timescale_class,
              basis_rows DESC, boundary_energy_basis
 ),
 same_cells AS (
@@ -548,14 +594,15 @@ same_cells AS (
         r.device_type,
         MIN(r.voltage_class) AS voltage_class,
         r.source,
-        r.mechanistic_regime,
         r.test_timescale_class,
-        MAX(r.boundary_energy_j) FILTER (WHERE NOT r.destructive)
+        MAX(r.boundary_energy_j) FILTER (WHERE r.survived)
             AS max_survived_energy_j,
         MIN(r.boundary_energy_j) FILTER (WHERE r.destructive)
             AS min_destructive_energy_j,
-        COUNT(*) FILTER (WHERE NOT r.destructive) AS survived_count,
+        COUNT(*) FILTER (WHERE r.survived) AS survived_count,
         COUNT(*) FILTER (WHERE r.destructive) AS destructive_count,
+        COUNT(*) FILTER (WHERE NOT r.destructive AND NOT r.survived)
+            AS unknown_outcome_count,
         COUNT(*) AS record_count,
         b.boundary_energy_basis,
         b.boundary_energy_basis_family,
@@ -564,9 +611,9 @@ same_cells AS (
     JOIN same_basis b
       ON b.device_type IS NOT DISTINCT FROM r.device_type
      AND b.source = r.source
-     AND b.mechanistic_regime IS NOT DISTINCT FROM r.mechanistic_regime
      AND b.test_timescale_class IS NOT DISTINCT FROM r.test_timescale_class
-    GROUP BY r.device_type, r.source, r.mechanistic_regime,
+     AND r.boundary_energy_basis_family = b.boundary_energy_basis_family
+    GROUP BY r.device_type, r.source,
              r.test_timescale_class, b.boundary_energy_basis,
              b.boundary_energy_basis_family, b.basis_rows
 ),
@@ -574,42 +621,40 @@ voltage_basis_counts AS (
     SELECT
         voltage_class,
         source,
-        mechanistic_regime,
         test_timescale_class,
         boundary_energy_basis,
         boundary_energy_basis_family,
         COUNT(*) AS basis_rows
     FROM source_rows
     WHERE voltage_class IS NOT NULL
-    GROUP BY voltage_class, source, mechanistic_regime, test_timescale_class,
+    GROUP BY voltage_class, source, test_timescale_class,
              boundary_energy_basis, boundary_energy_basis_family
 ),
 voltage_basis AS (
-    SELECT DISTINCT ON (voltage_class, source, mechanistic_regime,
-                        test_timescale_class)
+    SELECT DISTINCT ON (voltage_class, source, test_timescale_class)
         voltage_class,
         source,
-        mechanistic_regime,
         test_timescale_class,
         boundary_energy_basis,
         boundary_energy_basis_family,
         basis_rows
     FROM voltage_basis_counts
-    ORDER BY voltage_class, source, mechanistic_regime, test_timescale_class,
+    ORDER BY voltage_class, source, test_timescale_class,
              basis_rows DESC, boundary_energy_basis
 ),
 voltage_cells AS (
     SELECT
         r.voltage_class,
         r.source,
-        r.mechanistic_regime,
         r.test_timescale_class,
-        MAX(r.boundary_energy_j) FILTER (WHERE NOT r.destructive)
+        MAX(r.boundary_energy_j) FILTER (WHERE r.survived)
             AS max_survived_energy_j,
         MIN(r.boundary_energy_j) FILTER (WHERE r.destructive)
             AS min_destructive_energy_j,
-        COUNT(*) FILTER (WHERE NOT r.destructive) AS survived_count,
+        COUNT(*) FILTER (WHERE r.survived) AS survived_count,
         COUNT(*) FILTER (WHERE r.destructive) AS destructive_count,
+        COUNT(*) FILTER (WHERE NOT r.destructive AND NOT r.survived)
+            AS unknown_outcome_count,
         COUNT(*) AS record_count,
         b.boundary_energy_basis,
         b.boundary_energy_basis_family,
@@ -618,10 +663,10 @@ voltage_cells AS (
     JOIN voltage_basis b
       ON b.voltage_class IS NOT DISTINCT FROM r.voltage_class
      AND b.source = r.source
-     AND b.mechanistic_regime IS NOT DISTINCT FROM r.mechanistic_regime
      AND b.test_timescale_class IS NOT DISTINCT FROM r.test_timescale_class
+     AND r.boundary_energy_basis_family = b.boundary_energy_basis_family
     WHERE r.voltage_class IS NOT NULL
-    GROUP BY r.voltage_class, r.source, r.mechanistic_regime,
+    GROUP BY r.voltage_class, r.source,
              r.test_timescale_class, b.boundary_energy_basis,
              b.boundary_energy_basis_family, b.basis_rows
 ),
@@ -630,7 +675,6 @@ candidate_groups AS (
         device_type,
         voltage_class,
         source,
-        mechanistic_regime,
         test_timescale_class
     FROM source_rows
 ),
@@ -640,12 +684,12 @@ raw_cells AS (
         device_type,
         voltage_class,
         source,
-        mechanistic_regime,
         test_timescale_class,
         max_survived_energy_j,
         min_destructive_energy_j,
         survived_count,
         destructive_count,
+        unknown_outcome_count,
         record_count,
         boundary_energy_basis,
         boundary_energy_basis_family,
@@ -659,12 +703,12 @@ raw_cells AS (
         cg.device_type,
         vc.voltage_class,
         vc.source,
-        vc.mechanistic_regime,
         vc.test_timescale_class,
         vc.max_survived_energy_j,
         vc.min_destructive_energy_j,
         vc.survived_count,
         vc.destructive_count,
+        vc.unknown_outcome_count,
         vc.record_count,
         vc.boundary_energy_basis,
         vc.boundary_energy_basis_family,
@@ -673,15 +717,17 @@ raw_cells AS (
     JOIN voltage_cells vc
       ON vc.voltage_class IS NOT DISTINCT FROM cg.voltage_class
      AND vc.source = cg.source
-     AND vc.mechanistic_regime IS NOT DISTINCT FROM cg.mechanistic_regime
      AND vc.test_timescale_class IS NOT DISTINCT FROM cg.test_timescale_class
     WHERE NOT EXISTS (
         SELECT 1
         FROM same_cells sc
         WHERE sc.device_type IS NOT DISTINCT FROM cg.device_type
           AND sc.source = cg.source
-          AND sc.mechanistic_regime IS NOT DISTINCT FROM cg.mechanistic_regime
           AND sc.test_timescale_class IS NOT DISTINCT FROM cg.test_timescale_class
+          AND sc.max_survived_energy_j IS NOT NULL
+          AND sc.min_destructive_energy_j IS NOT NULL
+          AND sc.survived_count >= 3
+          AND sc.destructive_count >= 3
     )
 ),
 bounded AS (
@@ -731,7 +777,9 @@ classified AS (
             CASE WHEN b.boundary_inverted
                  THEN 'destruction_boundary_brackets_inverted_unit_spread' END,
             CASE WHEN b.min_destructive_energy_j IS NOT NULL
-                 THEN 'destructive_energy_right_censored_lower_bound' END
+                 THEN 'destructive_energy_right_censored_lower_bound' END,
+            CASE WHEN b.unknown_outcome_count > 0
+                 THEN 'unknown_outcome_rows_excluded_from_bracket' END
         ], NULL)::text[] AS boundary_notes
     FROM bounded b
 )
@@ -740,12 +788,12 @@ SELECT
     device_type,
     voltage_class,
     source,
-    mechanistic_regime,
     test_timescale_class,
     max_survived_energy_j,
     min_destructive_energy_j,
     survived_count,
     destructive_count,
+    unknown_outcome_count,
     record_count,
     boundary_low_j,
     boundary_high_j,
@@ -762,11 +810,11 @@ FROM classified;
 
 CREATE INDEX idx_candidate_destruction_boundary_energy_join
     ON stress_candidate_destruction_boundary_energy_view(
-        device_type, source, mechanistic_regime, test_timescale_class
+        device_type, source, test_timescale_class
     );
 CREATE INDEX idx_candidate_destruction_boundary_energy_voltage
     ON stress_candidate_destruction_boundary_energy_view(
-        voltage_class, source, mechanistic_regime, test_timescale_class
+        voltage_class, source, test_timescale_class
     );
 
 
@@ -825,6 +873,10 @@ WITH paired AS (
         v1.target_ion_species,
         v1.match_scope,
         v1.candidate_rank   AS candidate_rank_v1,
+        v1.waveform_rank,
+        v1.waveform_rankable,
+        v1.energy_rankable,
+        v1.candidate_energy_missing,
         v1.candidate_status AS candidate_status_v1,
         v1.proxy_claim_status AS proxy_claim_status_v1,
         v1.proxy_claim_basis AS proxy_claim_basis_v1,
@@ -836,6 +888,14 @@ WITH paired AS (
         v1.candidate_energy_comparability_class,
         v1.waveform_distance AS waveform_distance_v1,
         v1.combined_screening_distance AS combined_screening_distance_v1,
+        v1.energy_blended_control_distance,
+        v1.collapse_delta,
+        v1.gate_delta,
+        v1.normalized_vds_delta,
+        v1.duration_log_delta,
+        v1.path_penalty,
+        v1.damage_signature_axes_used,
+        v1.damage_signature_coverage_score,
         v1.best_damage_distance,
         v1.damage_evidence_tier,
         v1.measured_comparability_status,
@@ -959,11 +1019,26 @@ WITH paired AS (
         ON tf.stress_record_key = v1.target_stress_record_key
     LEFT JOIN stress_energy_equivalence_features cf
         ON cf.stress_record_key = v1.candidate_stress_record_key
-    LEFT JOIN stress_candidate_destruction_boundary_energy_view cb
-        ON cb.device_type IS NOT DISTINCT FROM v1.candidate_device_type
-       AND cb.source = v1.candidate_source
-       AND cb.mechanistic_regime IS NOT DISTINCT FROM cf.mechanistic_regime
-       AND cb.test_timescale_class IS NOT DISTINCT FROM v1.candidate_timescale_class
+    LEFT JOIN LATERAL (
+        SELECT b.*
+        FROM stress_candidate_destruction_boundary_energy_view b
+        WHERE b.source = v1.candidate_source
+          AND b.test_timescale_class IS NOT DISTINCT FROM v1.candidate_timescale_class
+          AND (
+                (b.boundary_scope = 'same_device'
+                 AND b.device_type IS NOT DISTINCT FROM v1.candidate_device_type)
+             OR (b.boundary_scope = 'voltage_class_fallback'
+                 AND b.voltage_class IS NOT DISTINCT FROM v1.candidate_voltage_class)
+          )
+        ORDER BY
+            CASE
+                WHEN b.boundary_scope = 'same_device' AND b.boundary_usable THEN 0
+                WHEN b.boundary_scope = 'voltage_class_fallback' THEN 1
+                WHEN b.boundary_scope = 'same_device' THEN 2
+                ELSE 3
+            END
+        LIMIT 1
+    ) cb ON TRUE
     LEFT JOIN proxy_truth_labels tl
         ON tl.target_stress_record_key = v1.target_stress_record_key
        AND tl.candidate_stress_record_key = v1.candidate_stress_record_key
@@ -1027,7 +1102,8 @@ classed AS (
         SELECT
             p.*,
             COALESCE(p.regime_match_class, 'analog_questionable') AS regime_match_class_final,
-            COALESCE(p.regime_status_ceiling, 'analog_questionable') AS regime_status_ceiling_final,
+            CASE WHEN p.regime_match_class IS NULL THEN 'analog_questionable'
+                 ELSE p.regime_status_ceiling END AS regime_status_ceiling_final,
             COALESCE(p.regime_preference, 3) AS regime_preference_final,
             -- Legacy context only: candidate bulk-terminal/Kosier denominator.
             mech_overlap_class(
@@ -1082,8 +1158,8 @@ statused AS (
                 THEN 'mechanistic_predicted_candidate'
             WHEN c.cumulative_pair
                 THEN 'mechanistic_cumulative_candidate'
-            WHEN c.waveform_distance_v1 IS NOT NULL
-                THEN 'mechanistic_waveform_candidate'
+            WHEN c.energy_rankable
+                THEN 'mechanistic_energy_screening_only'
             ELSE 'mechanistic_inspect_manually'
         END AS mechanistic_energy_candidate_status
     FROM classed c
@@ -1095,7 +1171,7 @@ finalized AS (
             WHEN 'mechanistic_measured_candidate' THEN 1
             WHEN 'mechanistic_predicted_candidate' THEN 2
             WHEN 'mechanistic_cumulative_candidate' THEN 3
-            WHEN 'mechanistic_waveform_candidate' THEN 4
+            WHEN 'mechanistic_energy_screening_only' THEN 4
             WHEN 'mechanistic_analog_questionable' THEN 5
             WHEN 'mechanistic_cross_device_screening_only' THEN 6
             WHEN 'mechanistic_missing_damage_context' THEN 6
@@ -1110,7 +1186,7 @@ finalized AS (
                 'mechanistic_cumulative_candidate')
                 THEN 'primary_or_cumulative_candidate'
             WHEN s.mechanistic_energy_candidate_status IN (
-                'mechanistic_waveform_candidate', 'mechanistic_analog_questionable')
+                'mechanistic_energy_screening_only', 'mechanistic_analog_questionable')
                 THEN 'weak_or_questionable'
             WHEN s.mechanistic_energy_candidate_status = 'mechanistic_regime_mismatch'
                 THEN 'regime_mismatch_last'
@@ -1156,6 +1232,9 @@ finalized AS (
                 END
             END,
             'timescale_basis_duration_proxy',
+            CASE WHEN UPPER(COALESCE(s.target_event_type, '')) IN ('SELCI', 'SELCII')
+                   AND s.candidate_failure_fraction_gate_usable
+                 THEN 'target_threshold_is_selc_onset_candidate_threshold_is_destruction' END,
             CASE WHEN s.regime_rationale IS NOT NULL THEN 'regime: ' || s.regime_rationale END
         ], NULL)::text[]
         || COALESCE(s.candidate_boundary_notes, ARRAY[]::text[])
@@ -1267,7 +1346,11 @@ ranked2 AS (
             ORDER BY
                 CASE f.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
                 f.mechanistic_energy_status_priority,
-                f.regime_preference_final,
+                CASE f.regime_match_class_final
+                    WHEN 'mechanism_mismatch' THEN 2
+                    WHEN 'analog_questionable' THEN 1
+                    ELSE 0
+                END,
                 CASE f.candidate_failure_fraction_overlap_class
                     WHEN 'strong_overlap' THEN 0
                     WHEN 'partial_overlap' THEN 1
@@ -1275,7 +1358,6 @@ ranked2 AS (
                     WHEN 'far_miss' THEN 3
                     ELSE 4
                 END,
-                f.best_damage_distance ASC NULLS LAST,
                 CASE f.terminal_energy_overlap_class
                     WHEN 'strong_overlap' THEN 0
                     WHEN 'partial_overlap' THEN 1
@@ -1283,10 +1365,28 @@ ranked2 AS (
                     WHEN 'far_miss' THEN 3
                     ELSE 4
                 END,
-                f.candidate_rank_v1 ASC NULLS LAST,
+                CASE
+                    WHEN f.candidate_failure_fraction_point IS NOT NULL
+                     AND f.candidate_failure_fraction_point > 0.0
+                     AND f.target_severity_point_ratio IS NOT NULL
+                     AND f.target_severity_point_ratio > 0.0
+                        THEN ABS(LN(f.candidate_failure_fraction_point)
+                                 - LN(f.target_severity_point_ratio))
+                    ELSE ABS(f.log_energy_delta)
+                END ASC NULLS LAST,
+                CASE f.cumulative_exposure_overlap_class
+                    WHEN 'cumulative_present' THEN 0
+                    WHEN 'not_applicable' THEN 1
+                    WHEN 'cumulative_missing' THEN 2
+                    ELSE 3
+                END,
                 f.candidate_stress_record_key
         ) AS mechanistic_energy_candidate_rank
     FROM claimed f
+    -- Pure v2 denominator: censored/missing-energy targets are intentionally
+    -- excluded from the energy-rank surface rather than retained with a NULL
+    -- energy rank. v1 remains the surface for waveform-only/censored cases.
+    WHERE f.energy_rankable
 )
 SELECT
     target_stress_record_key,
@@ -1301,6 +1401,10 @@ SELECT
     candidate_timescale_class,
     match_scope,
     candidate_rank_v1,
+    waveform_rank,
+    waveform_rankable,
+    energy_rankable,
+    candidate_energy_missing,
     candidate_status_v1,
     proxy_claim_status_v1,
     proxy_claim_basis_v1,
@@ -1312,6 +1416,15 @@ SELECT
     candidate_energy_comparability_class,
     waveform_distance_v1,
     combined_screening_distance_v1,
+    energy_blended_control_distance,
+    best_damage_distance,
+    collapse_delta,
+    gate_delta,
+    normalized_vds_delta,
+    duration_log_delta,
+    path_penalty,
+    damage_signature_axes_used,
+    damage_signature_coverage_score,
     log_energy_delta,
     log_energy_delta_dex,
     signature_axis_distance,
@@ -1330,6 +1443,11 @@ SELECT
     timescale_overlap_class AS power_rate_overlap_class,
     cumulative_exposure_overlap_class,
     damage_evidence_class,
+    -- Post-IV comparability statuses (from v1) exported so the regression
+    -- check first_order_measured_not_capped and the curation exports can read
+    -- them without re-joining the ranked view.
+    measured_comparability_status,
+    prediction_comparability_status,
     measured_sign_mismatch_axis_count,
     prediction_sign_mismatch_axis_count,
     truth_label,
@@ -1364,6 +1482,7 @@ SELECT
     mechanistic_energy_candidate_status,
     mechanistic_energy_status_priority,
     mechanistic_energy_candidate_rank,
+    mechanistic_energy_candidate_rank AS energy_rank,
     energy_v2_blockers,
     energy_v2_notes
 FROM ranked2
@@ -1387,3 +1506,175 @@ CREATE INDEX idx_stress_proxy_candidate_energy_v2_overlap
     ON stress_proxy_candidate_energy_v2(candidate_failure_fraction_overlap_class);
 CREATE INDEX idx_stress_proxy_candidate_energy_v2_source
     ON stress_proxy_candidate_energy_v2(candidate_source);
+
+-- v3 combined screening vector.  This is intentionally not a validation claim:
+-- weights are settings-driven and uncalibrated until curated truth labels are
+-- dense enough to support calibration. The first implementation is deliberately
+-- over v2's energy-rank top-10 materialized surface, so waveform-strong but
+-- energy-weak/missing rows are outside this v3 denominator until a full-pool
+-- v3 refactor is justified.
+CREATE MATERIALIZED VIEW stress_proxy_candidate_combined_v3 AS
+WITH vector_base AS (
+    SELECT
+        v2.*,
+        cfg.setting_name AS combined_ranker_setting_name,
+        cfg.description AS combined_ranker_description,
+        cfg.signature_axis_weight,
+        cfg.duration_weight,
+        cfg.log_energy_weight,
+        cfg.failure_fraction_weight,
+        cfg.post_iv_damage_weight,
+        cfg.regime_path_weight,
+        cfg.coverage_gap_weight,
+        CASE v2.candidate_failure_fraction_overlap_class
+            WHEN 'strong_overlap' THEN 0.0
+            WHEN 'partial_overlap' THEN 1.0
+            WHEN 'near_miss' THEN 2.0
+            WHEN 'far_miss' THEN 3.0
+            ELSE 4.0
+        END AS failure_fraction_overlap_score,
+        CASE v2.terminal_energy_overlap_class
+            WHEN 'strong_overlap' THEN 0.0
+            WHEN 'partial_overlap' THEN 1.0
+            WHEN 'near_miss' THEN 2.0
+            WHEN 'far_miss' THEN 3.0
+            ELSE 4.0
+        END AS terminal_energy_overlap_score,
+        CASE
+            WHEN v2.candidate_failure_fraction_point IS NOT NULL
+             AND v2.candidate_failure_fraction_point > 0.0
+             AND v2.target_severity_point_ratio IS NOT NULL
+             AND v2.target_severity_point_ratio > 0.0
+                THEN ABS(LN(v2.candidate_failure_fraction_point)
+                         - LN(v2.target_severity_point_ratio))
+        END AS failure_fraction_log_delta,
+        GREATEST(0.0, 1.0 - COALESCE(v2.damage_signature_coverage_score, 0.0))
+            AS damage_signature_coverage_gap
+    FROM stress_proxy_candidate_energy_v2 v2
+    CROSS JOIN stress_proxy_combined_ranker_settings cfg
+    WHERE cfg.setting_name = 'screening_default'
+), scored AS (
+    SELECT
+        b.*,
+        SQRT(
+            b.signature_axis_weight * POWER(COALESCE(b.signature_axis_distance, 3.0), 2)
+          + b.duration_weight * POWER(COALESCE(b.duration_log_delta, 1.0), 2)
+          + b.log_energy_weight * POWER(COALESCE(ABS(b.log_energy_delta), 5.0), 2)
+          + b.failure_fraction_weight * POWER(COALESCE(b.failure_fraction_log_delta,
+                                                       b.terminal_energy_overlap_score), 2)
+          + b.post_iv_damage_weight * POWER(COALESCE(b.best_damage_distance, 2.50), 2)
+          + b.regime_path_weight * POWER(COALESCE(b.path_penalty, 0.75), 2)
+          + b.coverage_gap_weight * POWER(b.damage_signature_coverage_gap, 2)
+        ) AS combined_vector_distance
+    FROM vector_base b
+), ranked AS (
+    SELECT
+        s.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY s.target_stress_record_key
+            ORDER BY
+                CASE s.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
+                CASE s.proxy_claim_status
+                    WHEN 'validated' THEN 0
+                    WHEN 'validation_candidate' THEN 1
+                    WHEN 'curation_candidate' THEN 2
+                    WHEN 'screening_only' THEN 3
+                    WHEN 'blocked' THEN 4
+                    ELSE 5
+                END,
+                s.mechanistic_energy_status_priority,
+                CASE s.regime_match_class
+                    WHEN 'mechanism_mismatch' THEN 2
+                    WHEN 'analog_questionable' THEN 1
+                    ELSE 0
+                END,
+                s.combined_vector_distance ASC NULLS LAST,
+                s.energy_rank ASC NULLS LAST,
+                s.waveform_rank ASC NULLS LAST,
+                s.candidate_stress_record_key
+        ) AS combined_rank
+    FROM scored s
+)
+SELECT
+    target_stress_record_key,
+    candidate_stress_record_key,
+    target_source,
+    candidate_source,
+    device_type,
+    target_event_type,
+    target_ion_species,
+    candidate_device_type,
+    candidate_voltage_class,
+    candidate_timescale_class,
+    match_scope,
+    waveform_rank,
+    energy_rank,
+    combined_rank,
+    combined_vector_distance,
+    combined_ranker_setting_name,
+    combined_ranker_description,
+    signature_axis_weight,
+    duration_weight,
+    log_energy_weight,
+    failure_fraction_weight,
+    post_iv_damage_weight,
+    regime_path_weight,
+    coverage_gap_weight,
+    waveform_rankable,
+    energy_rankable,
+    candidate_energy_missing,
+    signature_axis_distance,
+    collapse_delta,
+    gate_delta,
+    normalized_vds_delta,
+    duration_log_delta,
+    log_energy_delta,
+    log_energy_delta_dex,
+    terminal_energy_overlap_class,
+    terminal_energy_overlap_score,
+    target_severity_point_ratio,
+    candidate_failure_fraction_point,
+    failure_fraction_log_delta,
+    candidate_failure_fraction_overlap_class,
+    failure_fraction_overlap_score,
+    best_damage_distance,
+    damage_signature_axes_used,
+    damage_signature_coverage_score,
+    damage_signature_coverage_gap,
+    regime_match_class,
+    regime_status_ceiling,
+    regime_preference,
+    path_penalty,
+    proxy_claim_status,
+    proxy_claim_basis,
+    proxy_claim_blockers,
+    proxy_claim_summary,
+    mechanistic_energy_candidate_status,
+    mechanistic_energy_status_priority,
+    mechanistic_energy_screening_bucket,
+    candidate_rank_v1,
+    mechanistic_energy_candidate_rank,
+    candidate_status_v1,
+    proxy_claim_status_v1,
+    combined_screening_distance_v1,
+    waveform_distance_v1,
+    damage_signature_distance,
+    damage_evidence_class,
+    truth_label,
+    truth_label_basis,
+    truth_validation_status,
+    energy_v2_blockers,
+    energy_v2_notes
+FROM ranked
+WHERE combined_rank <= 10;
+
+CREATE INDEX idx_stress_proxy_candidate_combined_v3_target_rank
+    ON stress_proxy_candidate_combined_v3(target_stress_record_key, combined_rank);
+CREATE INDEX idx_stress_proxy_candidate_combined_v3_rank
+    ON stress_proxy_candidate_combined_v3(combined_rank);
+CREATE INDEX idx_stress_proxy_candidate_combined_v3_device
+    ON stress_proxy_candidate_combined_v3(device_type);
+CREATE INDEX idx_stress_proxy_candidate_combined_v3_status
+    ON stress_proxy_candidate_combined_v3(proxy_claim_status);
+CREATE INDEX idx_stress_proxy_candidate_combined_v3_match_scope
+    ON stress_proxy_candidate_combined_v3(match_scope);

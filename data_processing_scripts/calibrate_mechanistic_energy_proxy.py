@@ -515,6 +515,18 @@ def load_v2_regression_checks(conn) -> list[dict[str, Any]]:
         """)
         loc = dict(cur.fetchone())
 
+        # 4. A seeded first-order/secondary analog row with a NULL ceiling means
+        #    no cap.  Missing rule rows default to analog_questionable, but
+        #    explicit first-order measured evidence must stay reachable.
+        cur.execute("""
+            SELECT COUNT(*) AS first_order_measured_capped
+            FROM stress_proxy_candidate_energy_v2
+            WHERE regime_match_class IN ('first_order_analog', 'secondary_analog')
+              AND measured_comparability_status IN ('strong', 'usable')
+              AND mechanistic_energy_candidate_status = 'mechanistic_analog_questionable'
+        """)
+        first_order = dict(cur.fetchone())
+
     return [
         {
             "name": "selci_no_unflagged_avalanche_rank1",
@@ -530,6 +542,11 @@ def load_v2_regression_checks(conn) -> list[dict[str, Any]]:
             "name": "localization_never_blocks",
             "passed": (loc["localization_blocked_rows"] or 0) == 0,
             **loc,
+        },
+        {
+            "name": "first_order_measured_not_capped",
+            "passed": (first_order["first_order_measured_capped"] or 0) == 0,
+            **first_order,
         },
     ]
 
@@ -576,21 +593,27 @@ def load_truth_label_rows(conn) -> list[dict[str, Any]]:
     """)
 
 
-# Per-target rank-1 pick by each method.  combined_pick = v1's published pick
-# (energy-BLENDED combined distance); dssig_pick = v1's pick ranked by
-# signature_axis_distance ALONE (energy-free and prior-free, the independent
-# comparator); v2_pick = the energy proxy's pick.
+# Per-target rank-1 pick by each method.  rank_pick = v1's published
+# prior+mask pick (candidate_rank = 1); dssig_pick = v1's pick ranked by
+# signature_axis_distance alone (energy-free and prior-free, the headline
+# comparator); energy_blended_pick = the explicit energy_blended_control_distance
+# control that preserves the energy-circularity diagnostic; v2_pick = the
+# energy proxy's pick.
 _CONCORDANCE_PICKS_CTE = """
     WITH ranked AS (
         SELECT
             r.target_stress_record_key AS t,
             r.candidate_stress_record_key AS c,
-            r.candidate_rank AS combined_rank,
+            r.candidate_rank AS rank_pick_rank,
             r.damage_signature_evidence_class AS evidence,
             ROW_NUMBER() OVER (
                 PARTITION BY r.target_stress_record_key
                 ORDER BY r.signature_axis_distance ASC NULLS LAST
             ) AS dssig_rank,
+            ROW_NUMBER() OVER (
+                PARTITION BY r.target_stress_record_key
+                ORDER BY r.energy_blended_control_distance ASC NULLS LAST
+            ) AS energy_blended_rank,
             v2.mechanistic_energy_candidate_rank AS v2_rank,
             v2.match_scope AS scope
         FROM stress_proxy_candidate_ranked_view r
@@ -602,8 +625,9 @@ _CONCORDANCE_PICKS_CTE = """
         SELECT
             t,
             MAX(c) FILTER (WHERE v2_rank = 1) AS v2_pick,
-            MAX(c) FILTER (WHERE combined_rank = 1) AS combined_pick,
+            MAX(c) FILTER (WHERE rank_pick_rank = 1) AS rank_pick,
             MAX(c) FILTER (WHERE dssig_rank = 1) AS dssig_pick,
+            MAX(c) FILTER (WHERE energy_blended_rank = 1) AS energy_blended_pick,
             MAX(scope) FILTER (WHERE v2_rank = 1) AS scope,
             MAX(evidence) FILTER (WHERE v2_rank = 1) AS v2_pick_evidence
         FROM ranked
@@ -620,8 +644,9 @@ def load_concordance(conn) -> dict[str, Any]:
     summary = _fetch(conn, _CONCORDANCE_PICKS_CTE + """
         SELECT
             COUNT(*) AS targets,
-            COUNT(*) FILTER (WHERE v2_pick = combined_pick) AS v2_eq_v1_combined,
-            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS v2_eq_v1_damagesig
+            COUNT(*) FILTER (WHERE v2_pick = rank_pick) AS v2_eq_v1_rank,
+            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS v2_eq_v1_damagesig,
+            COUNT(*) FILTER (WHERE v2_pick = energy_blended_pick) AS v2_eq_v1_energy_blended
         FROM picks
         WHERE v2_pick IS NOT NULL
     """)[0]
@@ -629,8 +654,9 @@ def load_concordance(conn) -> dict[str, Any]:
         SELECT
             scope,
             COUNT(*) AS targets,
-            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS independent_agree,
-            COUNT(*) FILTER (WHERE v2_pick = combined_pick) AS blended_agree
+            COUNT(*) FILTER (WHERE v2_pick = rank_pick) AS rank_agree,
+            COUNT(*) FILTER (WHERE v2_pick = dssig_pick) AS prior_free_agree,
+            COUNT(*) FILTER (WHERE v2_pick = energy_blended_pick) AS energy_blended_agree
         FROM picks
         WHERE v2_pick IS NOT NULL
         GROUP BY scope
@@ -650,44 +676,104 @@ def load_concordance(conn) -> dict[str, Any]:
         GROUP BY v2_pick_evidence
         ORDER BY disagreement_targets DESC
     """)
-    return {"summary": summary, "by_scope": by_scope, "curation_queue": curation_queue}
+    enrichment = _fetch(conn, """
+        SELECT
+            COUNT(*) AS targets,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY v2_pick_dssig_percentile
+            ) AS median_dssig_percentile,
+            COUNT(*) FILTER (WHERE v2_pick_dssig_percentile <= 10.0)
+                AS best_decile_targets,
+            COUNT(*) FILTER (WHERE source_conflict) AS source_conflict_targets,
+            COUNT(*) FILTER (WHERE c2m0080120d_avalanche_vs_sc_conflict)
+                AS c2m0080120d_avalanche_vs_sc_conflicts
+        FROM stress_proxy_concordance_enrichment_view
+        WHERE v2_pick_dssig_percentile IS NOT NULL
+    """)[0]
+    enrichment_by_scope = _fetch(conn, """
+        SELECT
+            v2_match_scope AS scope,
+            COUNT(*) AS targets,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY v2_pick_dssig_percentile
+            ) AS median_dssig_percentile,
+            COUNT(*) FILTER (WHERE v2_pick_dssig_percentile <= 10.0)
+                AS best_decile_targets,
+            COUNT(*) FILTER (WHERE source_conflict) AS source_conflict_targets
+        FROM stress_proxy_concordance_enrichment_view
+        WHERE v2_pick_dssig_percentile IS NOT NULL
+        GROUP BY v2_match_scope
+        ORDER BY targets DESC
+    """)
+    return {
+        "summary": summary,
+        "by_scope": by_scope,
+        "curation_queue": curation_queue,
+        "enrichment": enrichment,
+        "enrichment_by_scope": enrichment_by_scope,
+    }
 
 
 def render_concordance(conc: dict[str, Any]) -> list[str]:
     """Markdown for the cross-method concordance + energy-ablation section."""
     s = conc.get("summary") or {}
     targets = s.get("targets") or 0
-    blended = s.get("v2_eq_v1_combined") or 0
-    independent = s.get("v2_eq_v1_damagesig") or 0
+    rank = s.get("v2_eq_v1_rank") or 0
+    prior_free = s.get("v2_eq_v1_damagesig") or 0
+    energy_blended = s.get("v2_eq_v1_energy_blended") or 0
+    enrichment = conc.get("enrichment") or {}
+    enrichment_targets = enrichment.get("targets") or 0
+    best_decile = enrichment.get("best_decile_targets") or 0
+    median_percentile = enrichment.get("median_dssig_percentile")
+    median_text = "n/a" if median_percentile is None else f"{float(median_percentile):.1f}th percentile"
     out = [
         "## Cross-method concordance (v1 damage-signature vs v2 energy)",
         "",
-        "Rank-1 agreement between the energy proxy and v1, measured two ways. The "
-        "gap is the ablation: v1's *combined* score already contains energy and "
-        "regime-prior terms, so agreement with it is partly circular; agreement "
-        "with v1's *signature-axis-only* ranking is the prior-free, energy-free "
-        "comparator.",
+        "Rank-1 agreement between the energy proxy and v1 is reported three "
+        "ways: the current v1 prior+mask rank, the prior-free signature-axis "
+        "rank (headline), and an explicit energy-blended distance control.",
         "",
         f"- targets compared: {targets}",
-        f"- v2 == v1 **combined** rank-1 (energy-blended, circular): "
-        f"{blended} ({fmt_rate(rate(blended, targets))})",
-        f"- v2 == v1 **signature-axis-only** rank-1 (energy-free, prior-free): "
-        f"{independent} ({fmt_rate(rate(independent, targets))})",
+        f"- v2 == v1 **prior+mask rank-1**: "
+        f"{rank} ({fmt_rate(rate(rank, targets))})",
+        f"- v2 == v1 **prior-free signature-axis rank-1** (headline): "
+        f"{prior_free} ({fmt_rate(rate(prior_free, targets))})",
+        f"- v2 == v1 **energy-blended distance rank-1**: "
+        f"{energy_blended} ({fmt_rate(rate(energy_blended, targets))})",
+        f"- enrichment headline: v2 picks sit at median {median_text} "
+        f"of v1's prior-free signature ordering; "
+        f"{best_decile} ({fmt_rate(rate(best_decile, enrichment_targets))}) "
+        f"are in the best decile",
+        f"- source conflicts flagged for curation: "
+        f"{enrichment.get('source_conflict_targets') or 0}; "
+        f"C2M0080120D avalanche-vs-SC focus rows: "
+        f"{enrichment.get('c2m0080120d_avalanche_vs_sc_conflicts') or 0}",
         "",
-        "If the independent rate is far below the blended rate, the apparent "
-        "agreement was driven by shared energy, not cross-method corroboration.",
+        "The prior-free enrichment statistic is the durable comparator.  Exact "
+        "rank-1 agreement is expected to be low after v1/v2 separation; the "
+        "question is whether v2 picks concentrate near the top of v1's "
+        "energy-free signature ordering.  The energy-blended "
+        "pick is retained as a circularity diagnostic: a large gap between it "
+        "and the headline rate means shared energy terms, not independent "
+        "damage-signature corroboration, are driving agreement.",
         "",
-        "Caveat: after Phase C, the blended rate is expected to move because "
-        "v1 and v2 now consume the same regime-prior table. Re-baseline that "
-        "structural jump instead of reading it as improved corroboration. The "
-        "signature-axis-only rate is the durable prior-free comparator, but "
-        "agreement is still a consistency check, not validation.",
+        "Caveat: this apply re-baselines all three rates because prior "
+        "unification, mask ranking, and energy removal from v1's published rank "
+        "landed together.  Do not compare these rates to the earlier 32.0% / "
+        "13.4% figures; record them as a fresh baseline.",
         "",
         "### Independent agreement by match scope",
         "",
         render_table(
-            ["scope", "targets", "independent_agree", "blended_agree"],
+            ["scope", "targets", "rank_agree", "prior_free_agree", "energy_blended_agree"],
             conc.get("by_scope") or [],
+        ),
+        "",
+        "### Enrichment by match scope",
+        "",
+        render_table(
+            ["scope", "targets", "median_dssig_percentile", "best_decile_targets", "source_conflict_targets"],
+            conc.get("enrichment_by_scope") or [],
         ),
         "",
         "### Disagreement curation queue (energy vs prior-free signature axes)",
@@ -783,9 +869,9 @@ def main() -> int:
     ct = cs.get("targets") or 0
     print(
         "Concordance (v2==v1 rank-1): "
-        f"blended={fmt_rate(rate(cs.get('v2_eq_v1_combined') or 0, ct))}, "
-        f"independent={fmt_rate(rate(cs.get('v2_eq_v1_damagesig') or 0, ct))} "
-        "(gap = shared-energy circularity)"
+        f"prior_mask={fmt_rate(rate(cs.get('v2_eq_v1_rank') or 0, ct))}, "
+        f"prior_free={fmt_rate(rate(cs.get('v2_eq_v1_damagesig') or 0, ct))}, "
+        f"energy_blended={fmt_rate(rate(cs.get('v2_eq_v1_energy_blended') or 0, ct))}"
     )
 
     failed = [c["name"] for c in regression_checks if not c["passed"]]

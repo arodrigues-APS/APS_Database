@@ -78,12 +78,12 @@ INSERT INTO stress_proxy_distance_settings (
 )
 VALUES (
     'default',
-    'Phase 5 default constants preserving the Phase 4 hard-coded behavior except avalanche normalized Vds is not a comparable knob.',
+    '2026-07-06 waveform-pure defaults: energy retained as blocker/annotation, not waveform rank distance.',
     5.0,
     0.25,
     0.20,
     0.15,
-    1.0,
+    0.0,
     0.0,
     0.25,
     0.75,
@@ -2555,8 +2555,6 @@ candidates AS (
     FROM stress_test_context_view
     WHERE source IN ('sc', 'avalanche')
       AND device_type IS NOT NULL
-      AND electrical_terminal_energy_j IS NOT NULL
-      AND electrical_terminal_energy_j > 0.0
 ),
 candidate_links AS (
     SELECT
@@ -2568,8 +2566,6 @@ candidate_links AS (
     CROSS JOIN stress_proxy_distance_settings settings
     JOIN candidates c ON c.device_type IS NOT DISTINCT FROM t.device_type
     WHERE settings.setting_name = 'default'
-      AND (t.target_match_tier <> 'energy_comparable'
-       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
 
     UNION ALL
 
@@ -2586,18 +2582,10 @@ candidate_links AS (
      AND t.voltage_class IS NOT NULL
      AND c.voltage_class = t.voltage_class
     WHERE settings.setting_name = 'default'
-      AND t.normalized_vds IS NOT NULL
-      AND c.normalized_vds IS NOT NULL
-      AND t.vds_collapse_fraction IS NOT NULL
-      AND c.vds_collapse_fraction IS NOT NULL
-      AND (t.target_match_tier <> 'energy_comparable'
-       OR ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
       AND NOT EXISTS (
           SELECT 1
           FROM candidates same_c
           WHERE same_c.device_type IS NOT DISTINCT FROM t.device_type
-            AND (t.target_match_tier <> 'energy_comparable'
-             OR ABS(LN(same_c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j)) <= settings.max_energy_log_delta)
       )
 ),
 pairs AS (
@@ -2839,6 +2827,8 @@ pairs AS (
         END AS normalized_vds_delta,
         CASE
             WHEN t.target_match_tier = 'energy_comparable'
+             AND c.electrical_terminal_energy_j IS NOT NULL
+             AND c.electrical_terminal_energy_j > 0.0
               THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
         END AS log_energy_delta,
         -- Display-only dex (log10) conversion of log_energy_delta above.
@@ -2846,6 +2836,8 @@ pairs AS (
         -- this exists solely so plots/exports can label the axis correctly.
         CASE
             WHEN t.target_match_tier = 'energy_comparable'
+             AND c.electrical_terminal_energy_j IS NOT NULL
+             AND c.electrical_terminal_energy_j > 0.0
               THEN ABS(LN(c.electrical_terminal_energy_j) - LN(t.electrical_terminal_energy_j))
                    / LN(10::double precision)
         END AS log_energy_delta_dex,
@@ -2866,7 +2858,8 @@ pairs AS (
         END AS duration_log_delta,
         COALESCE(mech.match_class, 'analog_questionable')
             AS mechanism_match_class,
-        mech.status_ceiling AS mechanism_status_ceiling,
+        CASE WHEN mech.match_class IS NULL THEN 'analog_questionable'
+             ELSE mech.status_ceiling END AS mechanism_status_ceiling,
         COALESCE(mech.preference, 3) AS mechanism_preference,
         COALESCE(
             mech.rationale,
@@ -2916,6 +2909,20 @@ distances AS (
             CASE WHEN scored.gate_delta IS NULL THEN 'gate_delta' END,
             CASE WHEN scored.normalized_vds_delta IS NULL THEN 'normalized_vds_delta' END
         ], NULL)::text[] AS damage_signature_missing_axes,
+        (scored.damage_signature_axes_used > 0) AS waveform_rankable,
+        (
+            scored.target_match_tier = 'energy_comparable'
+            AND scored.target_energy_j IS NOT NULL
+            AND scored.target_energy_j > 0.0
+            AND scored.candidate_energy_j IS NOT NULL
+            AND scored.candidate_energy_j > 0.0
+            AND scored.candidate_energy_comparability_class <> 'not_comparable'
+        ) AS energy_rankable,
+        (
+            scored.candidate_energy_j IS NULL
+            OR scored.candidate_energy_j <= 0.0
+            OR scored.candidate_energy_comparability_class = 'not_comparable'
+        ) AS candidate_energy_missing,
         COALESCE(NULLIF(CONCAT_WS(
             '+',
             CASE WHEN scored.collapse_delta IS NOT NULL THEN 'collapse' END,
@@ -2942,13 +2949,17 @@ distances AS (
         CASE
             WHEN scored.damage_signature_axes_used > 0 THEN
                 SQRT(
-                    CASE
-                        WHEN scored.target_match_tier = 'energy_comparable'
-                          THEN scored.energy_log_weight * POWER(scored.log_energy_delta, 2)
-                        ELSE 0.0
-                    END
-                  + scored.damage_signature_axis_distance_sq
-                  + POWER(scored.path_penalty, 2)
+                    scored.damage_signature_axis_distance_sq
+                  + scored.duration_log_weight * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
+                )
+        END AS waveform_only_distance,
+        -- Compatibility alias for pre-separation consumers.  Since 2026-07-06
+        -- this is intentionally identical to waveform_only_distance; energy and
+        -- path-prior terms live in energy_blended_control_distance instead.
+        CASE
+            WHEN scored.damage_signature_axes_used > 0 THEN
+                SQRT(
+                    scored.damage_signature_axis_distance_sq
                   + scored.duration_log_weight * POWER(COALESCE(scored.duration_log_delta, 1.0), 2)
                 )
         END AS waveform_distance
@@ -3175,22 +3186,32 @@ classified_raw AS (
         SQRT(POWER(e.waveform_distance, 2)
              + POWER(COALESCE(e.best_damage_distance, e.best_damage_distance_fallback), 2))
             AS combined_screening_distance,
+        -- Diagnostic/control only: preserves the old circularity audit after
+        -- waveform_distance became waveform-pure. Never rank v1 on this value.
+        SQRT(POWER(e.waveform_only_distance, 2)
+             + CASE
+                   WHEN e.target_match_tier = 'energy_comparable'
+                    AND e.log_energy_delta IS NOT NULL
+                       THEN POWER(e.log_energy_delta, 2)
+                   ELSE 0.0
+               END
+             + POWER(COALESCE(e.path_penalty, 0.75), 2)
+             + POWER(COALESCE(e.best_damage_distance, e.best_damage_distance_fallback), 2))
+            AS energy_blended_control_distance,
         CASE
-            WHEN e.target_match_tier = 'energy_comparable'
-             AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_out_of_range'
             WHEN e.damage_signature_axes_used = 0 THEN 'missing_damage_signature_overlap'
-            WHEN e.damage_signature_distance > e.damage_signature_mismatch_distance THEN 'damage_signature_mismatch'
+            WHEN e.signature_axis_distance > e.damage_signature_mismatch_distance THEN 'damage_signature_mismatch'
             WHEN e.match_scope = 'cross_device' THEN 'cross_device_screening_only'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
              AND e.measured_match_scope = 'exact_condition'
-             AND e.waveform_distance <= e.measured_exact_waveform_max THEN 'measured_damage_candidate'
+             AND e.waveform_only_distance <= e.measured_exact_waveform_max THEN 'measured_damage_candidate'
             WHEN e.prediction_comparability_status IN ('strong', 'usable')
-             AND e.waveform_distance <= e.predicted_waveform_max THEN 'predicted_damage_candidate'
+             AND e.waveform_only_distance <= e.predicted_waveform_max THEN 'predicted_damage_candidate'
             WHEN e.measured_comparability_status IN ('strong', 'usable')
-             AND e.waveform_distance <= e.device_run_waveform_max THEN 'device_run_measured_candidate'
+             AND e.waveform_only_distance <= e.device_run_waveform_max THEN 'device_run_measured_candidate'
             WHEN e.measured_comparability_status = 'weak'
-             AND e.waveform_distance <= e.weak_waveform_max THEN 'weak_measured_candidate'
-            WHEN e.waveform_distance <= e.waveform_only_max THEN 'waveform_only_candidate'
+             AND e.waveform_only_distance <= e.weak_waveform_max THEN 'weak_measured_candidate'
+            WHEN e.waveform_only_distance <= e.waveform_only_max THEN 'waveform_only_candidate'
             WHEN e.measured_comparability_status IS NULL
              AND e.prediction_comparability_status IS NULL THEN 'missing_damage_context'
             ELSE 'inspect_manually'
@@ -3198,6 +3219,7 @@ classified_raw AS (
         ARRAY_REMOVE(ARRAY[
             CASE WHEN e.target_match_tier = 'energy_comparable'
                     AND e.log_energy_delta > e.energy_out_of_range_log_delta THEN 'energy_far_out_of_range' END,
+            CASE WHEN e.candidate_energy_missing THEN 'candidate_energy_missing_or_not_comparable' END,
             CASE WHEN e.target_match_tier = 'energy_censored_damage_signature_only'
                  THEN 'target_energy_censored_damage_signature_only' END,
             CASE WHEN e.target_energy_floor_j IS NOT NULL
@@ -3211,7 +3233,7 @@ classified_raw AS (
                     AND e.target_technology_class IS DISTINCT FROM e.candidate_technology_class
                  THEN 'cross_device_technology_class_not_matched' END,
             CASE WHEN e.damage_signature_axes_used = 0 THEN 'missing_damage_signature_overlap' END,
-            CASE WHEN e.damage_signature_distance > e.damage_signature_mismatch_distance THEN 'damage_signature_distance_high' END,
+            CASE WHEN e.signature_axis_distance > e.damage_signature_mismatch_distance THEN 'signature_axis_distance_high' END,
             CASE WHEN e.collapse_delta IS NULL THEN 'missing_collapse_overlap' END,
             CASE WHEN e.gate_delta IS NULL THEN 'missing_gate_overlap' END,
             CASE WHEN e.normalized_vds_delta IS NULL
@@ -3281,9 +3303,8 @@ ranked AS (
             ORDER BY
                 CASE r.match_scope WHEN 'same_device' THEN 0 ELSE 1 END,
                 r.candidate_status_priority,
-                r.candidate_rank_penalty ASC,
-                r.mechanism_preference ASC,
                 r.damage_signature_mask_rank ASC,
+                r.damage_signature_axes_used DESC,
                 r.candidate_source,
                 r.candidate_stress_record_key
         ) AS candidate_rank
@@ -3295,9 +3316,7 @@ ranked AS (
                              c.damage_signature_axis_mask
                 ORDER BY
                     c.signature_axis_distance ASC NULLS LAST,
-                    c.best_damage_distance ASC NULLS LAST,
-                    c.waveform_distance ASC NULLS LAST,
-                    c.candidate_rank_penalty ASC,
+                    c.duration_log_delta ASC NULLS LAST,
                     c.candidate_source,
                     c.candidate_stress_record_key
             ) AS damage_signature_mask_rank,
@@ -3368,7 +3387,6 @@ claim_scored AS (
         cb.*,
         CASE
             WHEN cb.candidate_status IN (
-                'energy_out_of_range',
                 'missing_damage_signature_overlap',
                 'damage_signature_mismatch'
             )
@@ -3398,7 +3416,6 @@ claim_scored AS (
         END AS proxy_claim_status,
         CASE
             WHEN cb.candidate_status IN (
-                'energy_out_of_range',
                 'missing_damage_signature_overlap',
                 'damage_signature_mismatch'
             )
@@ -3432,7 +3449,6 @@ claim_scored AS (
         END AS proxy_claim_basis,
         CASE
             WHEN cb.candidate_status IN (
-                'energy_out_of_range',
                 'missing_damage_signature_overlap',
                 'damage_signature_mismatch'
             )
@@ -3475,9 +3491,8 @@ decision_ranked AS (
                     ELSE 3
                 END,
                 cs.candidate_status_priority,
-                cs.candidate_rank_penalty ASC,
-                cs.mechanism_preference ASC,
                 cs.damage_signature_mask_rank ASC,
+                cs.damage_signature_axes_used DESC,
                 cs.candidate_rank
         ) AS decision_safe_rank
     FROM claim_scored cs
@@ -3581,6 +3596,7 @@ SELECT
     target_context_flags,
     candidate_stress_record_key,
     candidate_rank,
+    candidate_rank AS waveform_rank,
     match_scope,
     distance_setting_name,
     candidate_source,
@@ -3669,11 +3685,15 @@ SELECT
     damage_signature_missing_axes,
     damage_signature_axis_mask,
     damage_signature_coverage_score,
+    waveform_rankable,
+    energy_rankable,
+    candidate_energy_missing,
     damage_signature_evidence_class,
     damage_signature_evidence_tier,
     damage_signature_mask_rank,
     signature_claim_quality,
     coverage_adjusted_damage_signature_distance,
+    waveform_only_distance,
     waveform_distance,
     measured_comparability_status,
     measured_comparable_axes,
@@ -3700,6 +3720,7 @@ SELECT
     best_damage_distance,
     damage_evidence_tier,
     combined_screening_distance,
+    energy_blended_control_distance,
     candidate_rank_penalty,
     uncapped_candidate_status,
     candidate_status,

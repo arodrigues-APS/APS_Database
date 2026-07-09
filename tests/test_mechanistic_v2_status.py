@@ -19,7 +19,7 @@ def status(**kw):
         prediction_comparability_status=None,
         target_regime="heavy_ion_hard_collapse_seb",
         candidate_pulse_count=None,
-        has_waveform=True,
+        energy_rankable=True,
     )
     base.update(kw)
     return mechanistic_energy_candidate_status(**base)
@@ -120,18 +120,18 @@ class StatusTests(unittest.TestCase):
                    measured_comparability_status="weak"),
             "mechanistic_cumulative_candidate")
 
-    def test_waveform_only(self):
+    def test_energy_screening_only(self):
         self.assertEqual(
             status(measured_comparability_status="weak",
                    candidate_pulse_count=None,
-                   has_waveform=True),
-            "mechanistic_waveform_candidate")
+                   energy_rankable=True),
+            "mechanistic_energy_screening_only")
 
     def test_inspect_manually(self):
         self.assertEqual(
             status(measured_comparability_status="weak",
                    candidate_pulse_count=None,
-                   has_waveform=False),
+                   energy_rankable=False),
             "mechanistic_inspect_manually")
 
 
@@ -141,7 +141,7 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual(mechanistic_status_priority("mechanistic_regime_mismatch"), 8)
         self.assertLess(
             mechanistic_status_priority("mechanistic_measured_candidate"),
-            mechanistic_status_priority("mechanistic_waveform_candidate"),
+            mechanistic_status_priority("mechanistic_energy_screening_only"),
         )
         self.assertEqual(mechanistic_status_priority("unknown_status"), 9)
 

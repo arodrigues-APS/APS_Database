@@ -13,8 +13,9 @@ pool v2 reads) carries ``signature_axis_distance`` for every pair.
 
 ``signature_axis_distance`` is the post-IV damage fingerprint distance using
 only measured axes (collapse/gate/Vds), excluding both energy and path priors.
-``damage_signature_distance`` and ``combined_screening_distance`` are kept as
-contaminated controls because they include path and energy terms respectively.
+``damage_signature_distance`` is kept as a path-prior contaminated control;
+``energy_blended_control_distance`` is the explicit energy/path blended control
+retained only for circularity diagnostics.
 
 Usage:
     python3 data_processing_scripts/export_proxy_method_concordance_csv.py
@@ -45,6 +46,17 @@ ARRAY_COLUMNS = (
 )
 
 QUERY = """
+    WITH energy_blended AS (
+        SELECT
+            r.target_stress_record_key,
+            r.candidate_stress_record_key,
+            ROW_NUMBER() OVER (
+                PARTITION BY r.target_stress_record_key
+                ORDER BY r.energy_blended_control_distance ASC NULLS LAST,
+                         r.candidate_stress_record_key
+            ) AS energy_blended_rank
+        FROM stress_proxy_candidate_ranked_view r
+    )
     SELECT
         v2.target_stress_record_key,
         v2.candidate_stress_record_key,
@@ -52,6 +64,8 @@ QUERY = """
         v2.target_event_type,
         v2.candidate_source,
         v2.match_scope,
+        v2.waveform_rank                         AS waveform_rank,
+        v2.energy_rank                           AS energy_rank,
         v2.candidate_rank_v1                      AS v1_rank,
         v2.mechanistic_energy_candidate_rank      AS v2_rank,
         v2.mechanistic_energy_candidate_status,
@@ -76,9 +90,15 @@ QUERY = """
         v2.energy_v2_blockers,
         v2.energy_v2_notes,
         -- v1 side, from the uncapped pool v2 reads from:
+        r.waveform_only_distance,                 -- waveform-only threshold metric
+        r.waveform_rankable,
+        r.energy_rankable,
+        r.candidate_energy_missing,
         r.signature_axis_distance,                -- energy-free + prior-free comparator
         r.damage_signature_distance,              -- path-prior contaminated control
-        r.combined_screening_distance,            -- energy-blended contaminated control
+        r.combined_screening_distance,            -- waveform+post-IV combined control
+        r.energy_blended_control_distance,        -- explicit energy/path blended contaminated control
+        er.energy_blended_rank,                   -- explicit energy-blended comparator rank
         r.log_energy_delta,                       -- terminal-energy mismatch (natural log / nats; NOT log10)
         r.log_energy_delta_dex,                   -- same mismatch, converted to log10/dex for display
         r.damage_signature_evidence_class,        -- v1 confidence (measured anchor?)
@@ -90,14 +110,36 @@ QUERY = """
         r.proxy_claim_basis                       AS v1_proxy_claim_basis,
         r.proxy_claim_blockers                    AS v1_proxy_claim_blockers,
         r.proxy_claim_summary                     AS v1_proxy_claim_summary,
-        r.candidate_status                        AS v1_candidate_status
+        r.candidate_status                        AS v1_candidate_status,
+        ce.dssig_pool_size,
+        ce.v2_pick_dssig_rank,
+        ce.v2_pick_dssig_percentile,
+        ce.v2_pick_dssig_percentile_fraction,
+        ce.v2_pick_dssig_decile,
+        ce.enrichment_band,
+        ce.strict_waveform_rank1_agreement,
+        ce.prior_free_signature_rank1_agreement,
+        ce.energy_blended_control_agreement,
+        ce.source_conflict,
+        ce.same_device_source_conflict,
+        ce.c2m0080120d_avalanche_vs_sc_conflict,
+        ce.conflict_priority,
+        ce.v1_signature_pick_key,
+        ce.v1_signature_pick_source,
+        ce.v2_pick_key,
+        ce.v2_pick_source
     FROM stress_proxy_candidate_energy_v2 v2
     LEFT JOIN stress_proxy_candidate_ranked_view r
         ON r.target_stress_record_key = v2.target_stress_record_key
        AND r.candidate_stress_record_key = v2.candidate_stress_record_key
-    WHERE v2.mechanistic_energy_candidate_rank <= %s
+    LEFT JOIN energy_blended er
+        ON er.target_stress_record_key = v2.target_stress_record_key
+       AND er.candidate_stress_record_key = v2.candidate_stress_record_key
+    LEFT JOIN stress_proxy_concordance_enrichment_view ce
+        ON ce.target_stress_record_key = v2.target_stress_record_key
+    WHERE v2.energy_rank <= %s
     ORDER BY v2.device_type, v2.target_stress_record_key,
-             v2.mechanistic_energy_candidate_rank
+             v2.energy_rank
 """
 
 

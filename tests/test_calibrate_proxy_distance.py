@@ -15,7 +15,7 @@ def default_settings():
         collapse_delta_scale=0.25,
         gate_delta_scale=0.20,
         normalized_vds_delta_scale=0.15,
-        energy_log_weight=1.0,
+        energy_log_weight=0.0,
         same_path_penalty=0.0,
         path_unknown_penalty=0.25,
         path_mismatch_penalty=0.75,
@@ -64,6 +64,15 @@ class ProxyDistanceCalibrationTests(unittest.TestCase):
         self.assertLess(scored["damage_signature_distance"], 2.50)
         self.assertEqual(scored["candidate_status"], "measured_damage_candidate")
 
+    def test_energy_delta_does_not_change_waveform_status(self):
+        row = calibration_row(None)
+        row["target_match_tier"] = "energy_comparable"
+        row["log_energy_delta"] = 10.0
+
+        scored = score_row(row, default_settings())
+
+        self.assertEqual(scored["candidate_status"], "measured_damage_candidate")
+
     def test_signature_axis_distance_excludes_path_penalty(self):
         scored = score_row(calibration_row(None), default_settings())
 
@@ -82,6 +91,7 @@ class ProxyDistanceCalibrationTests(unittest.TestCase):
                 "candidate_rank_penalty": 0,
                 "candidate_status_priority": 1,
                 "mechanism_preference": 2,
+                "damage_signature_axes_used": 1,
             },
         )
         higher_distance_richer_mask = (
@@ -93,6 +103,7 @@ class ProxyDistanceCalibrationTests(unittest.TestCase):
                 "candidate_rank_penalty": 0,
                 "candidate_status_priority": 1,
                 "mechanism_preference": 1,
+                "damage_signature_axes_used": 2,
             },
         )
 
@@ -104,6 +115,38 @@ class ProxyDistanceCalibrationTests(unittest.TestCase):
         self.assertEqual(ranked[0][0]["candidate_stress_record_key"], "b")
         self.assertEqual(ranked[0][1]["damage_signature_mask_rank"], 1)
         self.assertEqual(ranked[1][1]["damage_signature_mask_rank"], 1)
+
+    def test_axes_richness_breaks_cross_mask_source_tie(self):
+        collapse_only = (
+            {"candidate_source": "avalanche", "candidate_stress_record_key": "a"},
+            {
+                "damage_signature_axis_mask": "collapse",
+                "signature_axis_distance": 0.10,
+                "waveform_distance": 0.10,
+                "candidate_rank_penalty": 0,
+                "candidate_status_priority": 1,
+                "mechanism_preference": 1,
+                "damage_signature_axes_used": 1,
+            },
+        )
+        richer_sc = (
+            {"candidate_source": "sc", "candidate_stress_record_key": "b"},
+            {
+                "damage_signature_axis_mask": "collapse+normalized_vds",
+                "signature_axis_distance": 0.10,
+                "waveform_distance": 0.10,
+                "candidate_rank_penalty": 0,
+                "candidate_status_priority": 1,
+                "mechanism_preference": 1,
+                "damage_signature_axes_used": 2,
+            },
+        )
+
+        ranked = ranked_candidate_items([collapse_only, richer_sc])
+        self.assertEqual(ranked[0][0]["candidate_stress_record_key"], "b")
+
+        ranked_reversed = ranked_candidate_items([richer_sc, collapse_only])
+        self.assertEqual(ranked_reversed[0][0]["candidate_stress_record_key"], "b")
 
     def test_within_one_axis_mask_distance_ranks_first(self):
         far = (

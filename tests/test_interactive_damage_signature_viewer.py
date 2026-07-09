@@ -8,16 +8,26 @@ from data_processing_scripts.create_interactive_damage_signature_viewer import (
     CRITICAL_OVERLAP_COLORS,
     HTML_TEMPLATE,
     KOSIER_2026_SELC_CRITICAL_J_CM2,
+    V3_COMPONENTS,
+    V3_COMPONENT_COLORS,
     _v2_key_tail,
     _v2_target_label,
+    agreement_matrix_payload,
+    boundary_coverage_payload,
     concordance_3d_plot_payload,
+    concordance_enrichment_ecdf_payload,
+    curation_queue_payload,
     dex_series,
     energy_balance_plot_payload,
     energy_delta_plot_payload,
     irradiation_energy_summary,
+    overview_payload,
+    reciprocal_enrichment_payload,
     v2_interval_overlap_plot_payload,
     v2_overlap_summary_plot_payload,
     v2_severity_parity_plot_payload,
+    v3_agreement_payload,
+    v3_vector_explorer_payload,
 )
 from data_processing_scripts.export_proxy_candidate_energy_v2_csv import (
     _flatten_array,
@@ -456,15 +466,19 @@ class Concordance3DPayloadTests(unittest.TestCase):
         self.assertEqual(f["devices"], ["DUT-A"])
         # "All devices" genuinely shows the whole cloud on this tab.
         self.assertIsNone(f["allShowsOnly"])
-        # 4 category proxies + 1 connector proxy, all device-independent (None).
+        # 5 category proxies (including the C2M0080120D conflict focus)
+        # + 1 connector proxy, all device-independent (None).
         proxies = [t for t in payload["traces"] if t.get("showlegend") is True]
-        self.assertEqual(len(proxies), 5)
+        self.assertEqual(len(proxies), 6)
 
-    def test_nonpositive_ratio_is_unplottable(self):
+    def test_nonpositive_ratio_uses_overlap_class_fallback(self):
         rows = [_conc_row("T", "c", v1_rank=1, v2_rank=1, csr=0.0, ds=0.2, led=0.1)]
+        rows[0]["candidate_failure_fraction_overlap_class"] = "near_miss"
         payload = concordance_3d_plot_payload(pd.DataFrame(rows))
-        # The single target is unplottable -> no device point traces.
-        self.assertEqual(payload["traces"], [])
+        markers = next(t for t in payload["traces"]
+                       if t["type"] == "scatter3d" and t["mode"] == "markers"
+                       and t["x"] and t["x"][0] is not None)
+        self.assertEqual(markers["y"][0], 2.0)
 
     def test_terminal_axis_falls_back_to_nats_over_ln10_when_dex_absent(self):
         # _conc_row's fixture has no log_energy_delta_dex column (older-CSV
@@ -490,6 +504,75 @@ class Concordance3DPayloadTests(unittest.TestCase):
         self.assertAlmostEqual(markers["z"][0], 0.75)
 
 
+class ConcordanceEnrichmentEcdfPayloadTests(unittest.TestCase):
+    def test_empty_returns_empty_payload(self):
+        payload = concordance_enrichment_ecdf_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No enrichment columns", payload["note"])
+
+    def test_ecdf_splits_scope_and_reports_best_decile(self):
+        rows = pd.DataFrame([
+            {"v2_rank": 1, "match_scope": "cross_device", "v2_pick_dssig_percentile": 5.0},
+            {"v2_rank": 1, "match_scope": "cross_device", "v2_pick_dssig_percentile": 15.0},
+            {"v2_rank": 1, "match_scope": "same_device", "v2_pick_dssig_percentile": 50.0},
+            {"v2_rank": 2, "match_scope": "cross_device", "v2_pick_dssig_percentile": 1.0},
+        ])
+        payload = concordance_enrichment_ecdf_payload(rows)
+        by_name = {t["name"]: t for t in payload["traces"]}
+        self.assertEqual(by_name["cross_device"]["x"], [5.0, 15.0])
+        self.assertEqual(by_name["cross_device"]["y"], [0.5, 1.0])
+        self.assertEqual(by_name["same_device"]["x"], [50.0])
+        self.assertIn("1/3", payload["note"])
+        self.assertEqual(payload["filter"]["traceDevices"], [None, None])
+
+
+class V3VectorExplorerPayloadTests(unittest.TestCase):
+    def _row(self, rank: int = 1) -> dict:
+        return {
+            "combined_rank": rank,
+            "combined_vector_distance": 2.0,
+            "target_event_type": "SEB",
+            "target_stress_record_key": "irradiation:1:2",
+            "candidate_source": "sc",
+            "proxy_claim_status": "screening_only",
+            "signature_component_share": 0.25,
+            "duration_component_share": 0.10,
+            "failure_fraction_component_share": 0.20,
+            "regime_path_component_share": 0.05,
+            "log_energy_component_share": 0.15,
+            "post_iv_damage_component_share": 0.15,
+            "coverage_gap_component_share": 0.10,
+            "signature_component_weighted_sq": 1.0,
+            "duration_component_weighted_sq": 0.4,
+            "failure_fraction_component_weighted_sq": 0.8,
+            "regime_path_component_weighted_sq": 0.2,
+            "log_energy_component_weighted_sq": 0.6,
+            "post_iv_damage_component_weighted_sq": 0.6,
+            "coverage_gap_component_weighted_sq": 0.4,
+        }
+
+    def test_empty_returns_empty_payload(self):
+        payload = v3_vector_explorer_payload(pd.DataFrame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No v3 CSV", payload["note"])
+
+    def test_rank1_component_traces_match_palette_order(self):
+        payload = v3_vector_explorer_payload(pd.DataFrame([
+            self._row(rank=1),
+            self._row(rank=2),
+        ]))
+        expected_names = [c[0] for c in V3_COMPONENTS]
+        self.assertEqual([t["name"] for t in payload["traces"]], expected_names)
+        self.assertEqual(len(payload["traces"]), 7)
+        for trace in payload["traces"]:
+            self.assertEqual(trace["type"], "bar")
+            self.assertEqual(trace["orientation"], "h")
+            self.assertEqual(trace["marker"]["color"], V3_COMPONENT_COLORS[trace["name"]])
+            self.assertEqual(len(trace["x"]), 1)
+        self.assertIn("uncalibrated", payload["note"])
+        self.assertTrue(all(d is None for d in payload["filter"]["traceDevices"]))
+
+
 class V2KeyTailTests(unittest.TestCase):
     """Axis/hover labels must never cut a record key mid-token."""
 
@@ -513,6 +596,112 @@ class V2KeyTailTests(unittest.TestCase):
         self.assertEqual(label, "SEB · irradiation:10843:11297")
 
 
+class V2CandidateAxisFallbackTests(unittest.TestCase):
+    """Current exports can lack own-threshold candidate boundaries while still
+    carrying the Kosier-context severity interval used for screening."""
+
+    def _fallback_row(self) -> dict:
+        row = _v2_row("DUT-A", 1, "missing_interval", "k-a1")
+        row["candidate_failure_fraction_low"] = None
+        row["candidate_failure_fraction_point"] = None
+        row["candidate_failure_fraction_high"] = None
+        row["candidate_severity_low_kosier_context"] = 2.0
+        row["candidate_severity_point_ratio_kosier_context"] = 4.0
+        row["candidate_severity_high_kosier_context"] = 8.0
+        row["critical_severity_overlap_class_kosier_context"] = "near_miss"
+        return row
+
+    def test_interval_overlap_uses_kosier_context_when_failure_fraction_missing(self):
+        payload = v2_interval_overlap_plot_payload(pd.DataFrame([self._fallback_row()]))
+        self.assertEqual(len(payload["traces"]), 2)
+        candidate = payload["traces"][1]
+        self.assertEqual(candidate["x"], [4.0])
+        self.assertEqual(candidate["customdata"][0][1:4], ["2", "8", "near_miss"])
+        self.assertEqual(candidate["customdata"][0][21], "Kosier-context severity fallback")
+
+    def test_parity_uses_kosier_context_when_failure_fraction_missing(self):
+        payload = v2_severity_parity_plot_payload(pd.DataFrame([self._fallback_row()]))
+        data_trace = payload["traces"][0]
+        self.assertEqual(data_trace["y"], [4.0])
+        self.assertEqual(data_trace["customdata"][0][1], "near_miss")
+        self.assertEqual(data_trace["customdata"][0][8], "Kosier-context severity fallback")
+
+
+
+
+class NewViewerSurfacePayloadTests(unittest.TestCase):
+    def _v2_frame(self) -> pd.DataFrame:
+        rows = [
+            _v2_row("DUT-A", 1, "missing_interval", "target-a"),
+            _v2_row("DUT-B", 1, "missing_interval", "target-b"),
+        ]
+        rows[0]["terminal_energy_overlap_class"] = "strong_overlap"
+        rows[1]["terminal_energy_overlap_class"] = "partial_overlap"
+        rows[0]["critical_severity_overlap_class_kosier_context"] = "far_miss"
+        rows[1]["critical_severity_overlap_class_kosier_context"] = "far_miss"
+        rows[0]["candidate_failure_fraction_gate_usable"] = False
+        rows[1]["candidate_failure_fraction_gate_usable"] = True
+        rows[0]["proxy_claim_status"] = "curation_candidate"
+        rows[1]["proxy_claim_status"] = "screening_only"
+        return pd.DataFrame(rows)
+
+    def _concordance_frame(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            _conc_row("target-a", "cand-v2-a", v1_rank=1, v2_rank=1, csr=1.0, ds=0.1, led=0.2),
+            _conc_row("target-b", "cand-v2-b", v1_rank=5, v2_rank=1, csr=2.0, ds=0.3, led=0.4),
+            _conc_row("target-b", "cand-v1-b", v1_rank=1, v2_rank=2, csr=1.5, ds=0.2, led=0.3),
+        ])
+
+    def test_boundary_coverage_splits_usable_and_missing(self):
+        payload = boundary_coverage_payload(self._v2_frame())
+        by_name = {trace["name"]: trace for trace in payload["traces"]}
+        self.assertIn("usable own-boundary", by_name)
+        self.assertIn("missing own-boundary", by_name)
+        self.assertIn("1/2", payload["note"])
+
+    def test_v2_summary_note_is_data_driven_and_has_kosier_axis(self):
+        payload = v2_overlap_summary_plot_payload(self._v2_frame())
+        axes = payload["traces"][0]["y"]
+        self.assertIn("Kosier-context severity", axes)
+        self.assertIn("Own-threshold severity: missing_interval", payload["note"])
+        self.assertIn("Kosier-context severity: far_miss", payload["note"])
+
+    def test_overview_reports_ranker_state_without_hardcoded_numbers(self):
+        payload = overview_payload(
+            pd.DataFrame(), pd.DataFrame([{"decision_safe_rank": 1}]),
+            self._v2_frame(), self._concordance_frame(), pd.DataFrame(),
+        )
+        self.assertEqual(payload["traces"][0]["type"], "bar")
+        self.assertIn("v2 rank-1 targets: 2", payload["note"])
+        self.assertIn("own-boundary coverage: 50.0%", payload["note"])
+
+    def test_agreement_matrix_uses_payload_definition(self):
+        payload = agreement_matrix_payload(self._concordance_frame())
+        names = [trace["name"] for trace in payload["traces"]]
+        self.assertIn("Consensus", names)
+        self.assertIn("v1 pick in v2 top-10", names)
+        self.assertIn("chance-level", payload["note"])
+
+    def test_curation_queue_table_uses_claim_and_truth_fields(self):
+        payload = curation_queue_payload(self._v2_frame(), self._concordance_frame())
+        self.assertEqual(payload["traces"][0]["type"], "table")
+        self.assertIn("truth curation", payload["note"])
+
+    def test_reciprocal_enrichment_requires_029_columns(self):
+        payload = reciprocal_enrichment_payload(self._concordance_frame())
+        self.assertEqual(payload["traces"], [])
+        self.assertIn("No enrichment columns", payload["note"])
+
+    def test_v3_agreement_bar_counts_matches(self):
+        v3 = pd.DataFrame([
+            {"combined_rank": 1, "target_stress_record_key": "target-a", "candidate_stress_record_key": "cand-v2-a"},
+            {"combined_rank": 1, "target_stress_record_key": "target-b", "candidate_stress_record_key": "other"},
+        ])
+        payload = v3_agreement_payload(v3, self._concordance_frame())
+        self.assertEqual(payload["traces"][0]["type"], "bar")
+        self.assertIn("screening-only", payload["note"])
+
+
 class LegendRowLayoutTests(unittest.TestCase):
     """Tabs stacking a two-line title + horizontal legend need a top margin
     that can hold both; 88px rendered them on top of each other."""
@@ -527,13 +716,14 @@ class LegendRowLayoutTests(unittest.TestCase):
             v2_overlap_summary_plot_payload(self._v2_frame()),
         ):
             layout = payload["layout"]
-            self.assertGreaterEqual(layout["margin"]["t"], 205)
+            self.assertGreaterEqual(layout["margin"]["t"], 225)
             self.assertEqual(layout["title"]["yanchor"], "top")
-            self.assertEqual(layout["title"]["y"], 1.0)
+            self.assertLess(layout["title"]["y"], 1.0)
+            self.assertGreaterEqual(layout["title"]["pad"]["b"], 10)
             if "legend" in layout:
                 self.assertEqual(layout["legend"]["yanchor"], "top")
-                self.assertLess(layout["legend"]["y"], layout["title"]["y"])
-                self.assertLessEqual(layout["legend"]["y"], 0.96)
+                self.assertLess(layout["legend"]["y"], layout["title"]["y"] - 0.05)
+                self.assertLessEqual(layout["legend"]["y"], 0.90)
 
 
 class TemplateDeviceFilterHonestyTests(unittest.TestCase):
