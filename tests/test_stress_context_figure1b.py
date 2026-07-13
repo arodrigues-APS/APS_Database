@@ -1,11 +1,21 @@
+import os
 import unittest
 
+import pytest
+
 from aps.db_config import get_connection
+
+
+pytestmark = pytest.mark.production_smoke
 
 
 class StressContextFigure1BTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if os.environ.get("APS_RUN_PRODUCTION_SMOKE") != "1":
+            raise unittest.SkipTest(
+                "set APS_RUN_PRODUCTION_SMOKE=1 to run live database checks"
+            )
         cls.conn = get_connection()
 
     @classmethod

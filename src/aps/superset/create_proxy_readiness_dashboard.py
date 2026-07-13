@@ -11,10 +11,8 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import json
-from pathlib import Path
 
-from aps.common import apply_schema as apply_common_schema
-from aps.db_config import SUPERSET_URL, get_connection
+from aps.db_config import SUPERSET_URL
 from aps.superset.superset_api import (
     build_json_metadata,
     create_chart,
@@ -26,15 +24,6 @@ from aps.superset.superset_api import (
 )
 from aps.viewers.proxy_viz_palette import CANDIDATE_COLORS
 
-from aps.paths import REPO_ROOT
-SCHEMA_PATH = REPO_ROOT / "schema" / "025_proxy_readiness_waveforms.sql"
-# Applied right after 025 because it depends on stress_test_context_view.
-MECH_ENERGY_SCHEMA_PATH = REPO_ROOT / "schema" / "028_mechanistic_energy_proxy.sql"
-VIZ_SUPPORT_SCHEMA_PATH = REPO_ROOT / "schema" / "029_proxy_viz_support.sql"
-PIPELINE_SCHEMAS = {
-    "022_irradiation_single_events.sql",
-    "027_radiation_stress_dose.sql",
-}
 DASHBOARD_TITLE = "Proxy Readiness - Waveform Failure Features"
 DASHBOARD_SLUG = "proxy-readiness-waveforms"
 
@@ -437,17 +426,6 @@ V2_CLAIM_STATUS_DESCRIPTION = (
     "with label='equivalent' and label_basis='measured_post_iv' become "
     "validated."
 )
-
-def apply_proxy_schema() -> None:
-    """Rebuild the single-event dependency and the proxy-readiness views."""
-    with get_connection() as conn:
-        apply_common_schema(conn, include_pipeline=PIPELINE_SCHEMAS)
-        with conn.cursor() as cur:
-            cur.execute(SCHEMA_PATH.read_text())
-            cur.execute(MECH_ENERGY_SCHEMA_PATH.read_text())
-            cur.execute(VIZ_SUPPORT_SCHEMA_PATH.read_text())
-        conn.commit()
-
 
 def sql_filter(expression: str) -> dict:
     return {
@@ -2603,22 +2581,22 @@ def main() -> None:
     parser.add_argument(
         "--schema-only",
         action="store_true",
-        help="Rebuild database views and exit before touching Superset.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--skip-schema",
         action="store_true",
-        help="Use existing database views and only update Superset metadata.",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
-    if not args.skip_schema:
-        print("Rebuilding proxy-readiness SQL views...")
-        apply_proxy_schema()
-        print("Proxy-readiness SQL views rebuilt")
-
     if args.schema_only:
-        return
+        parser.error(
+            "database model builds no longer belong to dashboards; run "
+            "aps models build proxy-analytics"
+        )
+    if args.skip_schema:
+        print("--skip-schema is obsolete; dashboards now always consume prepared models.")
 
     create_dashboard()
 

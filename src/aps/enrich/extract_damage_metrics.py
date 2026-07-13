@@ -33,18 +33,10 @@ Usage:
 
 import argparse
 import json
-import sys
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2.extras import Json
-except ImportError:
-    import subprocess
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2.extras import Json
+import psycopg2
+from psycopg2.extras import Json
 
 from aps.db_config import get_connection
 from aps.ingest.promote_to_baselines import EXTRACT_PER_FILE_SQL

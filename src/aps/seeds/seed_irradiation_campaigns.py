@@ -24,14 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import psycopg2
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from aps.config import get_settings
+from aps.db_config import get_connection
 from aps.common import apply_schema
 
 
@@ -1078,18 +1072,19 @@ def main(argv=None):
     args = _parse_args(argv)
     mode = _seed_mode(args)
     git_ref = _git_ref()
+    settings = get_settings()
 
     print("=" * 70)
     print("Seeding irradiation campaign tables")
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     print(f"Mode: {mode}")
     print(f"Git ref: {git_ref}")
     print("=" * 70)
 
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD,
-    )
+    conn = get_connection()
     conn.autocommit = False
     cur = conn.cursor()
 

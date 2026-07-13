@@ -5,7 +5,8 @@ After=network.target
 [Service]
 User=arodrigues
 Group=www-data
-WorkingDirectory=/home/arodrigues/APS_Database/APS_Database
+WorkingDirectory=/opt/aps_database/APS_Database
+EnvironmentFile=/etc/aps/aps.env
 Environment="PATH=/opt/aps_database/venv/bin"
 ExecStart=/opt/aps_database/venv/bin/uwsgi --ini server.ini
 

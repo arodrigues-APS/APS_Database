@@ -20,32 +20,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 from psycopg2.extras import RealDictCursor
 
-try:
-    from aps.db_config import get_connection
-except ModuleNotFoundError:  # pragma: no cover - package import path
-    from aps.db_config import get_connection
-
-from aps.paths import SCHEMA_DIR
-# 025 is re-applied first because it now defines stress_proxy_candidate_ranked_view,
-# which 028's v2 view reads from.  Both are idempotent.  Assumes the upstream
-# pipeline schemas (022/027) and the damage_equivalence_* views are already live.
-SCHEMA_PATHS = (
-    SCHEMA_DIR / "025_proxy_readiness_waveforms.sql",
-    SCHEMA_DIR / "028_mechanistic_energy_proxy.sql",
-    SCHEMA_DIR / "029_proxy_viz_support.sql",
-)
+from aps.config import get_settings
+from aps.db.models import build_model
+from aps.db_config import get_connection
 
 
 def apply_schema(conn) -> None:
-    with conn.cursor() as cur:
-        for path in SCHEMA_PATHS:
-            cur.execute(path.read_text())
-            print(f"Applied {path.name}")
-    conn.commit()
+    """Compatibility entry point for the explicit proxy-analytics model build."""
+    result = build_model(conn, "proxy-analytics", settings=get_settings())
+    print(
+        f"Built {result.model} as model build {result.build_id} "
+        f"({result.checksum[:12]})"
+    )
 
 
 def _print_rows(title, rows):

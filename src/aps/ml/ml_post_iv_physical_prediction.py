@@ -35,7 +35,7 @@ from pathlib import Path
 try:
     from psycopg2.extras import Json, RealDictCursor, execute_values
 except ImportError:
-    sys.exit("psycopg2 is required: pip install psycopg2-binary")
+    sys.exit("psycopg2 is required; install the APS package environment first")
 
 from aps.db_config import get_connection
 

@@ -52,20 +52,12 @@ Bootstrap mode:
 
 import argparse
 import json
-import sys
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2.extras import Json
-except ImportError:
-    import subprocess
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2.extras import Json
+from psycopg2.extras import Json
 
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from aps.config import get_settings
+from aps.db_config import get_connection
 
 
 # ── Source configuration ────────────────────────────────────────────────────
@@ -651,10 +643,14 @@ def main():
     args = ap.parse_args()
 
     cfg = SOURCE_CONFIGS[args.source]
+    settings = get_settings()
 
     print("=" * 72)
     print(f"{cfg['label']} → Baselines Promotion Gate")
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     if args.bootstrap:
         print("Gate:   BYPASSED (bootstrap mode — trusting pristine label)")
     else:
@@ -667,8 +663,7 @@ def main():
     print("=" * 72)
 
     t0 = perf_counter()
-    conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-                            user=DB_USER, password=DB_PASSWORD)
+    conn = get_connection()
     conn.autocommit = False
     cur = conn.cursor()
 

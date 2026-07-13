@@ -2,9 +2,8 @@
 """
 Short-Circuit Ruggedness Data Ingestion Script
 ================================================
-Parses pre-SC and post-SC MOSFET measurement CSV files from:
-  1. /home/arodrigues/NAS/Common_Files/Short Circuit Measurements/ForDataAnalysis/
-  2. /home/arodrigues/NAS/Common_Files/Short Circuit Measurements/curvetracermeasurements/
+Parses pre-SC and post-SC MOSFET measurement CSV files from the configured
+APS_NAS_ROOT Short Circuit Measurements corpus (or APS_SC_ROOTS).
 
 Loads them into the existing baselines_metadata / baselines_measurements tables
 with additional SC-specific columns (data_source='sc_ruggedness').
@@ -20,32 +19,19 @@ Usage:
 import os
 import re
 import csv
-import sys
 import argparse
 from pathlib import Path
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import execute_values
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import execute_values
-
-try:
-    import pandas as pd
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl", "xlrd"])
-    import pandas as pd
+import pandas as pd
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import execute_values
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from aps.config import get_settings, require_directory
+from aps.db_config import get_connection
 from aps.common import (apply_schema,
                     load_device_library, load_device_mapping_rules, match_device,
                     compute_file_hash, find_matching_tsp,
@@ -53,10 +39,34 @@ from aps.common import (apply_schema,
                     categorize_measurement as categorize_sc_measurement,
                     sweep_stats, refine_category_by_sweep)
 
-SC_ROOTS = [
-    "/home/arodrigues/NAS/Common_Files/Short Circuit Measurements/ForDataAnalysis",
-    "/home/arodrigues/NAS/Common_Files/Short Circuit Measurements/curvetracermeasurements",
-]
+SC_ROOTS: list[str] = []
+
+
+def resolve_sc_roots() -> list[str]:
+    """Resolve source roots at execution time, never from a personal path."""
+    configured = os.environ.get("APS_SC_ROOTS", "").strip()
+    if configured:
+        roots = [part for part in configured.split(os.pathsep) if part]
+        if roots:
+            return [
+                str(require_directory(root, "APS_SC_ROOTS"))
+                for root in roots
+            ]
+    common = get_settings().require_nas_root() / "Short Circuit Measurements"
+    return [
+        str(
+            require_directory(
+                common / "ForDataAnalysis",
+                "APS_NAS_ROOT/Short Circuit Measurements/ForDataAnalysis",
+            )
+        ),
+        str(
+            require_directory(
+                common / "curvetracermeasurements",
+                "APS_NAS_ROOT/Short Circuit Measurements/curvetracermeasurements",
+            )
+        ),
+    ]
 
 # File extensions to skip (non-data files found in SC directories)
 SKIP_EXTENSIONS = {
@@ -936,21 +946,24 @@ def main():
                         help='Drop all SC data and re-ingest from scratch')
     args = parser.parse_args()
 
+    global SC_ROOTS
+    SC_ROOTS = resolve_sc_roots()
     start_time = perf_counter()
 
     print("=" * 70)
     print("Short-Circuit Ruggedness Data Ingestion")
     print("=" * 70)
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    settings = get_settings()
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     if args.subset:
         print("Mode: SUBSET (C3M0075120D only)")
     print()
 
     # Connect
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
-    )
+    conn = get_connection()
     conn.autocommit = False
     apply_schema(conn)
     cur = conn.cursor()

@@ -16,11 +16,22 @@ import re
 import sys
 
 import openpyxl
-import psycopg2
+from aps.config import get_settings, require_directory
+from aps.db_config import get_connection
 
-from aps.db_config import get_db_params, DATA_ROOT
+IRRADIATION_ROOT = ""
 
-IRRADIATION_ROOT = os.path.join(DATA_ROOT, "Measurements", "Irradiation")
+
+def resolve_irradiation_root() -> str:
+    override = os.environ.get("APS_IRRADIATION_ROOT", "").strip()
+    if override:
+        return str(require_directory(override, "APS_IRRADIATION_ROOT"))
+    return str(
+        require_directory(
+            get_settings().require_data_root() / "Measurements" / "Irradiation",
+            "APS_DATA_ROOT/Measurements/Irradiation",
+        )
+    )
 
 # ── Logbook file paths (relative to IRRADIATION_ROOT) ──────────────────────
 LOGBOOK_CONFIG = {
@@ -410,7 +421,9 @@ def main():
     )
     args = parser.parse_args()
 
-    conn = psycopg2.connect(**get_db_params())
+    global IRRADIATION_ROOT
+    IRRADIATION_ROOT = resolve_irradiation_root()
+    conn = get_connection()
     cur = conn.cursor()
 
     # Load campaign id mapping

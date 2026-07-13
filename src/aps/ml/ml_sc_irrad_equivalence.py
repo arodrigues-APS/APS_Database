@@ -48,7 +48,7 @@ from pathlib import Path
 try:
     import numpy as np
 except ImportError:
-    sys.exit("numpy is required: pip install --break-system-packages numpy")
+    sys.exit("numpy is required; install the APS pipeline environment first")
 
 try:
     import matplotlib
@@ -56,7 +56,7 @@ try:
     import matplotlib.pyplot as plt
 except ImportError:
     sys.exit("matplotlib is required: "
-             "pip install --break-system-packages matplotlib")
+             "install the APS pipeline environment first")
 
 from aps.db_config import get_connection
 

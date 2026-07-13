@@ -36,21 +36,8 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2.extras import Json, execute_values
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2.extras import Json, execute_values
-
-try:
-    import numpy as np
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy"])
-    import numpy as np
+import numpy as np
+from psycopg2.extras import Json, execute_values
 
 try:
     import h5py
@@ -64,25 +51,44 @@ except ImportError:
 
 
 def ensure_waveform_dependencies():
-    """Import waveform parsers only for full ingest, not --remap-only."""
-    global h5py, loadmat
-    if h5py is None:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py"])
-        import h5py as _h5py
-        h5py = _h5py
-    if loadmat is None:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "scipy"])
-        from scipy.io import loadmat as _loadmat
-        loadmat = _loadmat
+    """Require optional waveform readers for a full ingest.
 
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, NAS_ROOT
+    Dependencies are declared in the pipeline extra and must be installed
+    before execution. An ingest must never alter a shared virtual environment
+    or reach the network to repair itself.
+    """
+    missing = []
+    if h5py is None:
+        missing.append("h5py")
+    if loadmat is None:
+        missing.append("scipy")
+    if missing:
+        raise RuntimeError(
+            "Avalanche waveform ingestion requires "
+            + ", ".join(missing)
+            + ". Install the pinned APS pipeline environment before running it."
+        )
+
+from aps.config import get_settings, require_directory
+from aps.db_config import get_connection
 from aps.common import (apply_schema, compute_file_hash, load_device_library,
                     load_device_mapping_rules, match_device)
 
 
-AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
+AVALANCHE_ROOT = ""
+
+
+def resolve_avalanche_root() -> str:
+    """Resolve the avalanche corpus only when an ingest is invoked."""
+    override = os.environ.get("APS_AVALANCHE_ROOT", "").strip()
+    if override:
+        return str(require_directory(override, "APS_AVALANCHE_ROOT"))
+    return str(
+        require_directory(
+            get_settings().require_nas_root() / "Avalanche Measurements",
+            "APS_NAS_ROOT/Avalanche Measurements",
+        )
+    )
 VALID_EXTENSIONS = {".h5", ".hdf5", ".mat"}
 UNSUPPORTED_EXTENSIONS = {".wfm"}
 SKIP_FILES = {"Thumbs.db"}
@@ -1050,7 +1056,7 @@ def remap_existing_avalanche_rows(conn, dry_run=False):
 
 def main():
     ap = argparse.ArgumentParser(description="Ingest avalanche HDF5 waveform data")
-    ap.add_argument("--root", default=AVALANCHE_ROOT)
+    ap.add_argument("--root")
     ap.add_argument("--dry-run", action="store_true",
                     help="Parse and summarize without DB writes")
     ap.add_argument("--rebuild", action="store_true",
@@ -1063,21 +1069,25 @@ def main():
                     help="Only re-run device mapping on existing avalanche rows")
     args = ap.parse_args()
 
+    global AVALANCHE_ROOT
+    AVALANCHE_ROOT = args.root or resolve_avalanche_root()
+    args.root = AVALANCHE_ROOT
     t0 = perf_counter()
 
     print("=" * 72)
     print("Avalanche HDF5 Ingestion")
     print("=" * 72)
     print(f"Root:       {args.root}")
-    print(f"Target:     postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    settings = get_settings()
+    print(
+        f"Target:     postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     print(f"Dry run:    {args.dry_run}")
     print(f"Max points: {args.max_points}")
 
     if args.remap_only:
-        conn = psycopg2.connect(
-            host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-            user=DB_USER, password=DB_PASSWORD,
-        )
+        conn = get_connection()
         conn.autocommit = False
         try:
             if not args.dry_run:
@@ -1106,10 +1116,7 @@ def main():
         print("Nothing to do.")
         return
 
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD,
-    )
+    conn = get_connection()
     conn.autocommit = False
     if not args.dry_run:
         apply_schema(conn)

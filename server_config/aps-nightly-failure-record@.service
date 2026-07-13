@@ -4,4 +4,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+User=arodrigues
+Group=www-data
+WorkingDirectory=/opt/aps_database/APS_Database
+EnvironmentFile=/etc/aps/aps.env
 ExecStart=/opt/aps_database/APS_Database/scripts/aps-nightly-failure-record.sh %i
+UMask=0027
+NoNewPrivileges=true

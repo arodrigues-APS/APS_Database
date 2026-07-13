@@ -13,17 +13,8 @@ Usage:
     python3 seed_device_library.py
 """
 
-import sys
-
-try:
-    import psycopg2
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-
-# ── DB Connection ────────────────────────────────────────────────────────────
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from aps.config import get_settings
+from aps.db_config import get_connection
 
 
 # ── Device Catalogue ─────────────────────────────────────────────────────────
@@ -128,15 +119,16 @@ DEVICES = [
 
 
 def main():
+    settings = get_settings()
     print("=" * 70)
     print("Seeding device_library table")
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     print("=" * 70)
 
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD,
-    )
+    conn = get_connection()
     conn.autocommit = False
     cur = conn.cursor()
 

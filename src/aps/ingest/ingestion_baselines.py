@@ -23,41 +23,28 @@ Usage:
 import os
 import re
 import csv
-import sys
 from pathlib import Path
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import execute_values
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import execute_values
-
-try:
-    import pandas as pd
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl", "xlrd"])
-    import pandas as pd
+import pandas as pd
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import execute_values
 
 from luaparser import ast as lua_ast
 from luaparser import astnodes
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from aps.config import get_settings, require_directory
+from aps.db_config import get_connection
 from aps.common import (apply_schema,
                     load_device_library, load_device_mapping_rules, match_device,
                     compute_file_hash, find_matching_tsp,
                     map_columns, expand_multistep_rows, categorize_measurement,
                     sweep_stats, refine_category_by_sweep)
 
-PRISTINE_ROOT = "/home/arodrigues/APS_Database/Measurements/Pristine"
+PRISTINE_ROOT = ""
 
 # Set to True to drop existing baseline tables and rebuild from scratch
 REBUILD = False
@@ -69,6 +56,19 @@ REBUILD = False
 # each time it runs.  Each row has a part_number (used as the search pattern
 # in filenames/paths) plus metadata columns.
 # load_device_library() is imported from common.py.
+
+
+def resolve_pristine_root() -> str:
+    """Resolve the pristine corpus only when an ingest is actually invoked."""
+    override = os.environ.get("APS_PRISTINE_ROOT", "").strip()
+    if override:
+        return str(require_directory(override, "APS_PRISTINE_ROOT"))
+    return str(
+        require_directory(
+            get_settings().require_data_root() / "Measurements" / "Pristine",
+            "APS_DATA_ROOT/Measurements/Pristine",
+        )
+    )
 
 
 # ── TSP Parser (using luaparser) ──────────────────────────────────────────────
@@ -1164,20 +1164,23 @@ FROM (
 # ── Main Ingestion ───────────────────────────────────────────────────────────
 
 def main():
+    global PRISTINE_ROOT
+    PRISTINE_ROOT = resolve_pristine_root()
+    settings = get_settings()
     start_time = perf_counter()
 
     print("=" * 70)
     print("Baselines Data Ingestion")
     print("=" * 70)
     print(f"Source: {PRISTINE_ROOT}")
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     print()
 
     # Connect
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
-    )
+    conn = get_connection()
     conn.autocommit = False
     apply_schema(conn)
     cur = conn.cursor()

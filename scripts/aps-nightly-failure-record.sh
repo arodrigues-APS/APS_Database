@@ -28,7 +28,7 @@ latest_log() {
     else
       printf '  latest_log=<none>\n'
     fi
-    printf '  inspect=systemctl --user status %s --no-pager\n' "${UNIT}"
-    printf '  journal=journalctl --user -u %s -n 120 --no-pager\n' "${UNIT}"
+    printf '  inspect=systemctl status %s --no-pager\n' "${UNIT}"
+    printf '  journal=journalctl -u %s -n 120 --no-pager\n' "${UNIT}"
   } >> "${FAILURE_LOG}"
 } 9>"${LOCK_FILE}"

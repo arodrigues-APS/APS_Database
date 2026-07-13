@@ -9,13 +9,9 @@
 
 import os
 import re
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-# The pipeline package lives in src/ (installable as aps-database); under
-# uwsgi only the repo root is on sys.path, so add src/ before aps imports.
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from configobj import ConfigObj
 from flask import Flask, flash, jsonify, request
 from flask_wtf import FlaskForm
@@ -28,25 +24,42 @@ import psycopg2.extras
 
 
 from data_scraping import DataScraping
+from aps.config import get_settings
+from aps.paths import REPO_ROOT
 
 
-#load configuration file
-conf = ConfigObj('config.ini')
+# Load metadata only; filesystem indexing is lazy on the first search request.
+conf = ConfigObj(str(REPO_ROOT / "config.ini"))
 
-#get DataScraping class object
 ds = DataScraping(conf)
-ds.search_results(sterms=[])  # pre-warm the file listing cache at startup
 
 #simple class to hold all configuration parameters for the flask server
 class Config():
 	EXPLAIN_TEMPLATE_LOADING = True
-	SECRET_KEY = os.environ.get('SECRET_KEY') or 'vRbPDgZP6rHpjCSQWByy'
+	SECRET_KEY = None
 	WTF_CSRF_TIME_LIMIT = None
 
 app = Flask(__name__)
 Markdown(app)
 app.config.from_object(Config)
 csrf = CSRFProtect(app)
+
+
+def create_app(*, secret_key=None, scanner=None, config_overrides=None):
+	"""Configure the compatibility Flask application without infrastructure work.
+
+	Route extraction into blueprints remains incremental, but this boundary makes
+	WSGI import free of database migrations and NAS scanning and allows tests to
+	inject a scanner. Database/schema readiness is a deploy concern.
+	"""
+	global ds
+	if scanner is not None:
+		ds = scanner
+	key = secret_key or get_settings().require_flask_secret_key()
+	app.config["SECRET_KEY"] = key
+	if config_overrides:
+		app.config.update(config_overrides)
+	return app
 
 #class for defining search form
 class SearchForm(FlaskForm):
@@ -87,13 +100,12 @@ def send_file(path):
 
 @app.route("/readme")
 def readme():
-	md_text = Path('Readme.md').read_text()
+	md_text = (REPO_ROOT / "Readme.md").read_text()
 	return render_template("readme.html", md_text=md_text)
 
 
 # ── Device Library ───────────────────────────────────────────────────────────
 from aps.db_config import get_connection
-from aps.common import apply_schema
 
 def get_db():
 	"""Return a psycopg2 connection to the mosfets database."""
@@ -120,18 +132,6 @@ def db_cursor(cursor_factory=None):
 			cur.close()
 		conn.close()
 
-
-# Apply idempotent schema migrations (schema/*.sql).
-# This must succeed at boot so admin pages cannot come up against a partial
-# schema (which leads to confusing runtime errors).
-try:
-	_boot_conn = get_connection()
-	try:
-		apply_schema(_boot_conn)
-	finally:
-		_boot_conn.close()
-except Exception as _e:
-	raise RuntimeError(f"Database schema bootstrap failed: {_e}") from _e
 
 # Allowed values for drop-down fields
 DEVICE_CATEGORIES = ["MOSFET", "Diode", "IGBT", "Other"]
@@ -171,17 +171,17 @@ class DeviceMappingRuleForm(FlaskForm):
 	submit = SubmitField("Add Rule")
 
 
-IRRADIATION_ROOT = os.path.join(
-	os.environ.get("APS_DATA_ROOT", "/home/arodrigues/APS_Database"),
-	"Measurements", "Irradiation")
-
 def list_irradiation_folders():
 	"""Return folder names under Measurements/Irradiation/."""
-	if not os.path.isdir(IRRADIATION_ROOT):
+	data_root = get_settings().data_root
+	if data_root is None:
+		return []
+	irradiation_root = data_root / "Measurements" / "Irradiation"
+	if not irradiation_root.is_dir():
 		return []
 	return sorted(
-		d for d in os.listdir(IRRADIATION_ROOT)
-		if os.path.isdir(os.path.join(IRRADIATION_ROOT, d))
+		d for d in os.listdir(irradiation_root)
+		if os.path.isdir(irradiation_root / d)
 		and not d.startswith('.')
 	)
 
@@ -723,10 +723,6 @@ def sync_irradiation_metadata():
 
 # ── Avalanche Campaigns ───────────────────────────────────────────────────────
 
-from aps.db_config import NAS_ROOT
-
-AVALANCHE_ROOT = os.path.join(NAS_ROOT, "Avalanche Measurements")
-
 AVALANCHE_OUTCOMES = ["unknown", "survived", "failed"]
 
 
@@ -741,37 +737,16 @@ class AvalancheCampaignForm(FlaskForm):
 	submit             = SubmitField("Add Campaign")
 
 
-_ENSURE_AVALANCHE_SQL = """
-CREATE TABLE IF NOT EXISTS avalanche_campaigns (
-    id                 SERIAL PRIMARY KEY,
-    folder_path        TEXT NOT NULL UNIQUE,
-    campaign_name      TEXT NOT NULL,
-    inductance_mh      DOUBLE PRECISION,
-    temperature_c      DOUBLE PRECISION,
-    device_part_number TEXT,
-    outcome_default    TEXT DEFAULT 'unknown',
-    notes              TEXT
-);
-DO $$ BEGIN
-    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
-        ALTER TABLE baselines_metadata ADD COLUMN avalanche_family TEXT;
-    END IF;
-EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-DO $$ BEGIN
-    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
-        ALTER TABLE baselines_metadata ADD COLUMN avalanche_inductance_mh DOUBLE PRECISION;
-    END IF;
-EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-DO $$ BEGIN
-    IF to_regclass('public.baselines_metadata') IS NOT NULL THEN
-        ALTER TABLE baselines_metadata ADD COLUMN avalanche_temperature_c DOUBLE PRECISION;
-    END IF;
-EXCEPTION WHEN duplicate_column THEN NULL; END $$;
-"""
-
-
-def _ensure_avalanche_schema(cur):
-	cur.execute(_ENSURE_AVALANCHE_SQL)
+def _require_avalanche_schema(cur):
+	"""Fail clearly when release migration 031 has not been applied."""
+	cur.execute("SELECT to_regclass('public.avalanche_campaigns')")
+	row = cur.fetchone()
+	table_name = row["to_regclass"] if isinstance(row, dict) else row[0]
+	if table_name is None:
+		raise RuntimeError(
+			"Avalanche administration schema is not ready; "
+			"apply forward migration 031 with aps db migrate."
+		)
 
 
 def _list_avalanche_families(cur):
@@ -806,7 +781,7 @@ def avalanche():
 		else:
 			try:
 				with db_cursor() as (_conn, cur):
-					_ensure_avalanche_schema(cur)
+					_require_avalanche_schema(cur)
 					cur.execute("""
 						INSERT INTO avalanche_campaigns
 						    (folder_path, campaign_name, inductance_mh,
@@ -830,7 +805,7 @@ def avalanche():
 	known_families = []
 	try:
 		with db_cursor(cursor_factory=psycopg2.extras.RealDictCursor) as (_conn, cur):
-			_ensure_avalanche_schema(cur)
+			_require_avalanche_schema(cur)
 			cur.execute("SELECT * FROM avalanche_campaigns ORDER BY folder_path")
 			campaigns = cur.fetchall()
 			known_families = _list_avalanche_families(cur)
@@ -848,7 +823,7 @@ def avalanche():
 def delete_avalanche_campaign(campaign_id):
 	try:
 		with db_cursor() as (_conn, cur):
-			_ensure_avalanche_schema(cur)
+			_require_avalanche_schema(cur)
 			cur.execute("DELETE FROM avalanche_campaigns WHERE id = %s", (campaign_id,))
 		flash("Campaign removed.", "success")
 	except Exception as e:
@@ -860,7 +835,7 @@ def delete_avalanche_campaign(campaign_id):
 def edit_avalanche_campaign(campaign_id):
 	try:
 		with db_cursor() as (_conn, cur):
-			_ensure_avalanche_schema(cur)
+			_require_avalanche_schema(cur)
 			cur.execute("""
 				UPDATE avalanche_campaigns
 				SET folder_path        = %s,
@@ -892,7 +867,7 @@ def sync_avalanche_metadata():
 	"""Push inductance / temperature / device overrides to baselines_metadata null fields."""
 	try:
 		with db_cursor() as (_conn, cur):
-			_ensure_avalanche_schema(cur)
+			_require_avalanche_schema(cur)
 
 			cur.execute("""
 				UPDATE baselines_metadata bm
@@ -937,4 +912,4 @@ def sync_avalanche_metadata():
 
 
 if __name__ == "__main__":
-	app.run(debug=False)
+	create_app().run(debug=False)

@@ -40,20 +40,12 @@ import argparse
 import json
 import math
 import statistics
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2.extras import Json, execute_values
-except ImportError:
-    import subprocess
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2.extras import Json, execute_values
+import psycopg2
+from psycopg2.extras import Json, execute_values
 
 from aps.common import apply_schema
 from aps.db_config import get_connection
@@ -61,11 +53,6 @@ from aps.db_config import get_connection
 
 DETECTOR_VERSION = "single_event_detector_v3_source_aware"
 EVENT_TYPES = ("SEB", "SELCI", "SELCII", "MIXED", "UNKNOWN")
-from aps.paths import SCHEMA_DIR
-PROXY_READINESS_SCHEMA = SCHEMA_DIR / "025_proxy_readiness_waveforms.sql"
-# Depends on stress_test_context_view from 025; re-applied alongside it so the
-# CASCADE drop in 025 never leaves the feature view missing.
-MECH_ENERGY_SCHEMA = SCHEMA_DIR / "028_mechanistic_energy_proxy.sql"
 
 
 @dataclass(frozen=True)
@@ -1219,18 +1206,6 @@ def ensure_views(cur):
     cur.execute(CREATE_VIEWS_SQL)
 
 
-def ensure_proxy_readiness_views(cur):
-    if not PROXY_READINESS_SCHEMA.exists():
-        raise FileNotFoundError(
-            f"Missing proxy-readiness schema: {PROXY_READINESS_SCHEMA}")
-    cur.execute(PROXY_READINESS_SCHEMA.read_text())
-    if not MECH_ENERGY_SCHEMA.exists():
-        raise FileNotFoundError(
-            f"Missing mechanistic-energy schema: {MECH_ENERGY_SCHEMA}")
-    cur.execute(MECH_ENERGY_SCHEMA.read_text())
-    return True
-
-
 def fetch_metadata(cur, args):
     where = [
         "md.irrad_campaign_id IS NOT NULL",
@@ -1476,11 +1451,9 @@ def main():
 
             if args.dry_run:
                 conn.rollback()
-                proxy_views_rebuilt = False
             else:
                 insert_results(cur, summaries, events)
                 ensure_views(cur)
-                proxy_views_rebuilt = ensure_proxy_readiness_views(cur)
                 conn.commit()
 
             elapsed = perf_counter() - t0
@@ -1501,8 +1474,10 @@ def main():
                 print("  irradiation_single_event_view")
                 print("  irradiation_single_event_file_frequency_view")
                 print("  irradiation_single_event_let_frequency_view")
-                if proxy_views_rebuilt:
-                    print("  stress proxy-readiness materialized views")
+                print(
+                    "  Proxy analytics is built separately by "
+                    "aps models build proxy-analytics."
+                )
     finally:
         conn.close()
 

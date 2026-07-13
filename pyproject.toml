@@ -13,6 +13,9 @@ dependencies = [
     "psycopg2-binary",
 ]
 
+[project.scripts]
+aps = "aps.cli:main"
+
 [project.optional-dependencies]
 # Flask/uwsgi lab data server (server.py). Pins reproduce the frozen state
 # the deployed venv was built from — bump deliberately, not incidentally.
@@ -28,6 +31,7 @@ server = [
     "WTForms==3.0.1",
     "configobj==5.0.6",
     "Markdown==3.4.1",
+    "uWSGI==2.0.31",
 ]
 # Nightly ingestion / enrichment / viewer and dashboard builders
 # (the module set scripts/nightly_update_and_ingest.sh preflight-checks,
@@ -61,6 +65,8 @@ dev = [
 package-dir = {"" = "src"}
 packages = [
     "aps",
+    "aps.db",
+    "aps.pipelines",
     "aps.ingest",
     "aps.seeds",
     "aps.enrich",
@@ -73,6 +79,12 @@ packages = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration and not production_smoke'"
+markers = [
+    "integration: requires an isolated disposable service such as PostgreSQL",
+    "production_smoke: read-only checks against the explicitly configured production environment",
+    "unit: fast infrastructure-free test",
+]
 
 [tool.ruff]
 line-length = 120

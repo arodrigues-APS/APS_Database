@@ -84,11 +84,11 @@ services:
     container_name: postgresqlv2
     restart: unless-stopped
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "APSLab"
-      POSTGRES_DB: mosfets
+      POSTGRES_USER: ${APS_DATA_DB_USER:?set APS_DATA_DB_USER in superset/.env}
+      POSTGRES_PASSWORD: ${APS_DATA_DB_PASSWORD:?set APS_DATA_DB_PASSWORD in superset/.env}
+      POSTGRES_DB: ${APS_DATA_DB_NAME:?set APS_DATA_DB_NAME in superset/.env}
     shm_size: 128G
     volumes:
       - postgresqlv2_data:/var/lib/postgresql/data

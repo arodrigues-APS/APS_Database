@@ -36,16 +36,10 @@ import argparse
 from pathlib import Path
 from time import perf_counter
 
-try:
-    import psycopg2
-    from psycopg2.extras import execute_values
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
-    import psycopg2
-    from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values
 
-from aps.db_config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DATA_ROOT
+from aps.config import get_settings, require_directory
+from aps.db_config import get_connection
 from aps.common import (apply_schema,
                     load_device_library, load_device_mapping_rules, match_device,
                     compute_file_hash, categorize_measurement,
@@ -53,7 +47,20 @@ from aps.common import (apply_schema,
 
 
 # ── Irradiation root ────────────────────────────────────────────────────────
-IRRADIATION_ROOT = os.path.join(DATA_ROOT, "Measurements", "Irradiation")
+IRRADIATION_ROOT = ""
+
+
+def resolve_irradiation_root() -> str:
+    """Resolve the irradiation corpus only for an executing command."""
+    override = os.environ.get("APS_IRRADIATION_ROOT", "").strip()
+    if override:
+        return str(require_directory(override, "APS_IRRADIATION_ROOT"))
+    return str(
+        require_directory(
+            get_settings().require_data_root() / "Measurements" / "Irradiation",
+            "APS_DATA_ROOT/Measurements/Irradiation",
+        )
+    )
 
 # ── Campaign discovery ──────────────────────────────────────────────────────
 # Campaigns are managed via the Flask /irradiation UI.  Each campaign row has
@@ -776,10 +783,16 @@ def main():
                              "mixed 7/5-column Vgs/Igs rows from source files")
     args = parser.parse_args()
 
+    global IRRADIATION_ROOT
+    IRRADIATION_ROOT = resolve_irradiation_root()
     print("=" * 70)
     print("Irradiation Data Ingestion")
     print(f"Source: {IRRADIATION_ROOT}")
-    print(f"Target: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    settings = get_settings()
+    print(
+        f"Target: postgresql://{settings.db_host}:"
+        f"{settings.db_port}/{settings.db_name}"
+    )
     if args.dry_run:
         print("MODE: DRY RUN (no database changes)")
     print("=" * 70)
@@ -788,10 +801,7 @@ def main():
         print(f"\nERROR: Irradiation root not found: {IRRADIATION_ROOT}")
         sys.exit(1)
 
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD,
-    )
+    conn = get_connection()
     conn.autocommit = False
     if not args.dry_run:
         apply_schema(conn)
