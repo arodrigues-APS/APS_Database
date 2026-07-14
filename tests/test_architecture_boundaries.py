@@ -85,6 +85,20 @@ def test_flask_request_module_contains_no_schema_ddl():
     assert re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|VIEW|INDEX)\b", server_text, re.I) is None
 
 
+def test_superset_dashboard_builders_do_not_own_schema_ddl():
+    ddl = re.compile(
+        r"\b(?:CREATE|ALTER|DROP)\s+"
+        r"(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX)\b",
+        re.I,
+    )
+    offenders = []
+    for path in SUPERSET_ROOT.glob("create_*dashboard.py"):
+        if ddl.search(path.read_text()):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+
+    assert offenders == []
+
+
 def test_release_b_bootstrap_keeps_services_stopped_until_verified():
     script = (REPO_ROOT / "scripts" / "bootstrap_release_b_systemd.sh").read_text()
 

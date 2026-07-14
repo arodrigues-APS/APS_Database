@@ -39,11 +39,15 @@ Usage:
 
 import json
 import sys
+from functools import partial
 
 from aps.db_config import SUPERSET_URL, get_connection
 from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
-                          refresh_dataset_columns, create_chart,
+                          refresh_dataset_columns, create_chart as create_api_chart,
                           create_or_update_dashboard, build_json_metadata)
+from aps.superset.nonproxy_dashboard_support import create_documented_chart
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 
 DASHBOARD_TITLE = "SC ↔ Avalanche ↔ Irradiation Damage Equivalence"

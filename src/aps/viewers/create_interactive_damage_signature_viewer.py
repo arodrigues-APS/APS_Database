@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -45,6 +44,8 @@ V2_CSV = OUT_DIR / "proxy_candidate_energy_v2.csv"
 CONCORDANCE_CSV = OUT_DIR / "proxy_method_concordance.csv"
 # Optional: written by export_proxy_candidate_combined_v3_csv.py.
 V3_CSV = OUT_DIR / "proxy_candidate_combined_v3.csv"
+# Optional complete winner union used by the honest v1 -> v2 -> v3 comparator.
+METHOD_COMPARISON_CSV = OUT_DIR / "proxy_method_comparison_union.csv"
 PLOTLY_ASSET = OUT_DIR / "plotly-2.35.2.min.js"
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 OUTPUT_HTML = OUT_DIR / "damage_signature_3d_interactive.html"
@@ -2290,7 +2291,11 @@ def v2_overlap_summary_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     df = rows.copy()
     if "mechanistic_energy_candidate_rank" in df.columns:
         df = df[df["mechanistic_energy_candidate_rank"] == 1]
-    present_axes = [(c, l) for c, l in V2_OVERLAP_SUMMARY_AXES if c in df.columns]
+    present_axes = [
+        (column, label)
+        for column, label in V2_OVERLAP_SUMMARY_AXES
+        if column in df.columns
+    ]
     if df.empty or not present_axes:
         return {"traces": [], "layout": common_cartesian_layout(base_title),
                 "note": empty_note}
@@ -2469,7 +2474,6 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
     )
 
     # device -> parallel point arrays; device -> connector segments.
-    dev_x: dict[Any, list] = {}
     dev_pts: dict[Any, dict[str, list]] = {}
     dev_conn: dict[Any, dict[str, list]] = {}
     counts = {"consensus": 0, "mild": 0, "strong": 0, "unplottable": 0, "conflict_focus": 0}
@@ -2480,15 +2484,15 @@ def concordance_3d_plot_payload(rows: pd.DataFrame) -> dict[str, Any]:
         color, symbol = CONCORDANCE_STYLE[category]
         if _truthy_flag(rec.get("c2m0080120d_avalanche_vs_sc_conflict")):
             color, symbol = CONCORDANCE_STYLE["conflict_focus"]
-        p["x"].append(coord[0]); p["y"].append(coord[1]); p["z"].append(coord[2])
-        p["color"].append(color); p["symbol"].append(symbol)
+        p["x"].append(coord[0])
+        p["y"].append(coord[1])
+        p["z"].append(coord[2])
+        p["color"].append(color)
+        p["symbol"].append(symbol)
         p["cdat"].append(_concordance_customdata(rec, category))
 
     for _tkey, group in df.groupby("target_stress_record_key"):
         recs = group.to_dict("records")
-        exported_v2_ranks = [finite_number(r.get("v2_rank")) for r in recs]
-        exported_v2_ranks = [r for r in exported_v2_ranks if r is not None and r > 0]
-        exported_top_n = int(max(exported_v2_ranks)) if exported_v2_ranks else len(recs)
         v2_pick = next((r for r in recs if r.get("v2_rank") == 1), None)
         if v2_pick is None:
             continue
@@ -2655,7 +2659,6 @@ def concordance_enrichment_ecdf_payload(rows: pd.DataFrame) -> dict[str, Any]:
                 "note": "No v2 rank-1 rows have a signature-ordering percentile."}
     traces = []
     trace_device = []
-    titles = {}
     for scope, sub in df.groupby(df.get("match_scope", pd.Series("all", index=df.index)).fillna("all")):
         vals = sorted(float(v) for v in sub["percentile"] if math.isfinite(float(v)))
         if not vals:
@@ -3047,7 +3050,8 @@ def conflict_browser_payload(rows: pd.DataFrame) -> dict[str, Any]:
         "v1 rank": [], "v2 rank": [], "Claim": [], "Truth": [], "Blockers": [], "Conflict": [],
     }
     for r in filtered:
-        v2 = r["v2"]; v1 = r["v1"] or {}
+        v2 = r["v2"]
+        v1 = r["v1"] or {}
         cols["Target"].append(_v2_key_tail(str(r["target"]), 34))
         cols["Device"].append(_v2_clean(v2.get("device_type")))
         cols["Category"].append(r["category"])
@@ -3123,9 +3127,13 @@ def reciprocal_enrichment_payload(rows: pd.DataFrame) -> dict[str, Any]:
     recs = _concordance_rank1_records(rows)
     if not recs or "v2_pick_dssig_percentile" not in getattr(rows, "columns", []):
         return _empty_payload(title, "No enrichment columns are exported for reciprocal enrichment.")
-    x = []; y = []; colors = []; labels = []
+    x = []
+    y = []
+    colors = []
+    labels = []
     for r in recs:
-        v2 = r["v2"]; v1 = r["v1"]
+        v2 = r["v2"]
+        v1 = r["v1"]
         pct = finite_number(v2.get("v2_pick_dssig_percentile"))
         if pct is None or v1 is None:
             continue
@@ -3192,6 +3200,152 @@ def v3_agreement_payload(v3_rows: pd.DataFrame, concordance_rows: pd.DataFrame) 
                          "marker": {"color": ["#1a9850", "#4575b4", "#e6731a", "#8c959f"]}}],
             "layout": layout,
             "note": "v3 is screening-only. This bar asks whether the combined vector reproduces v1, v2, both, or neither before inspecting component shares."}
+
+
+def _comparison_trace(records: list[dict[str, Any]], target: str) -> list[dict[str, Any]]:
+    """Build connected rank-percentile paths for one target's winner union."""
+    result = []
+    for record in records:
+        if record["target"] != target:
+            continue
+        y = [record.get(f"{method}_percentile") for method in ("v1", "v2", "v3")]
+        y = [value if value is not None else 110.0 for value in y]
+        ranks = [record.get(f"{method}_rank") or "N/A" for method in ("v1", "v2", "v3")]
+        reasons = [record.get(f"{method}_reason") or "rank available" for method in ("v1", "v2", "v3")]
+        criteria = [record.get(f"{method}_criterion") or "winner" for method in ("v1", "v2", "v3")]
+        result.append({
+            "type": "scatter",
+            "mode": "lines+markers+text",
+            "name": record["candidate_label"],
+            "x": ["v1 signature", "v2 energy", "v3 combined"],
+            "y": y,
+            "text": ["★" if record.get(f"picked_{method}") else "" for method in ("v1", "v2", "v3")],
+            "textposition": "top center",
+            "customdata": [[ranks[i], reasons[i], criteria[i], record["candidate_source"], record["truth"]] for i in range(3)],
+            "hovertemplate": (
+                "%{x}<br>pool-normalized rank=%{y:.1f}%<br>native rank=%{customdata[0]}"
+                "<br>availability=%{customdata[1]}<br>first losing criterion=%{customdata[2]}"
+                "<br>source=%{customdata[3]}<br>truth=%{customdata[4]}<extra>%{fullData.name}</extra>"
+            ),
+            "line": {"width": 3},
+            "marker": {"size": 11},
+        })
+    return result
+
+
+def method_comparator_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    """Target-selectable v1→v2→v3 rank-1 union comparator.
+
+    Percentiles normalize unlike candidate-pool sizes. A candidate outside the
+    official v2 top-10/v3 shortlist is placed on an explicit N/A rail rather
+    than assigned a fabricated worst rank.
+    """
+    title = "v1 → v2 → v3 rank-1 candidate comparator"
+    required = {
+        "target_stress_record_key", "candidate_stress_record_key", "device_type",
+        "picked_by_v1", "picked_by_v2", "picked_by_v3",
+        "picked_by_method_count",
+        "v1_rank_percentile", "v2_rank_percentile", "v3_rank_percentile",
+    }
+    if rows is None or rows.empty:
+        return _empty_payload(title, "The method-comparison union export is not available.")
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        return _empty_payload(title, "Comparison export is missing required columns: " + ", ".join(missing))
+
+    records: list[dict[str, Any]] = []
+    ordered = rows.sort_values(
+        ["device_type", "target_stress_record_key", "picked_by_method_count"],
+        ascending=[True, True, False],
+        na_position="last",
+    )
+    for row in ordered.to_dict("records"):
+        candidate_key = _v2_clean(row.get("candidate_stress_record_key"))
+        record: dict[str, Any] = {
+            "target": _v2_clean(row.get("target_stress_record_key")),
+            "device": _v2_clean(row.get("device_type")) or "unknown",
+            "candidate": candidate_key,
+            "candidate_label": _v2_key_tail(candidate_key, 26),
+            "candidate_source": _v2_clean(row.get("candidate_source")) or "unknown",
+            "truth": _v2_clean(row.get("truth_validation_status")) or "no_curated_truth",
+            "transition": _v2_clean(row.get("transition_class")) or "unknown",
+        }
+        for method in ("v1", "v2", "v3"):
+            record[f"picked_{method}"] = _truthy_flag(row.get(f"picked_by_{method}"))
+            record[f"{method}_rank"] = finite_number(row.get(f"{method}_rank"))
+            record[f"{method}_percentile"] = finite_number(row.get(f"{method}_rank_percentile"))
+            record[f"{method}_reason"] = _v2_clean(row.get(f"{method}_rank_unavailable_reason"))
+            record[f"{method}_criterion"] = _v2_clean(row.get(f"{method}_first_losing_criterion"))
+        records.append(record)
+    targets = list(dict.fromkeys(record["target"] for record in records if record["target"]))
+    if not targets:
+        return _empty_payload(title, "The comparison export contains no target keys.")
+    first = targets[0]
+    layout = cartesian_legend_row_layout(title)
+    layout.update({
+        "xaxis": {"title": {"text": "official screening method"}},
+        "yaxis": {
+            "title": {"text": "rank / method pool (%) — lower is better"},
+            "range": [115, 0],
+            "tickvals": [0, 25, 50, 75, 100, 110],
+            "ticktext": ["0", "25", "50", "75", "100", "N/A"],
+            "gridcolor": "#d8dee4",
+        },
+        "shapes": [{"type": "rect", "xref": "paper", "x0": 0, "x1": 1,
+                    "y0": 104, "y1": 115, "fillcolor": "#fff8c5",
+                    "line": {"width": 0}, "layer": "below"}],
+        "margin": {"l": 78, "r": 30, "t": 92, "b": 70},
+    })
+    return {
+        "traces": _comparison_trace(records, first),
+        "layout": layout,
+        "comparisonRows": records,
+        "initialTarget": first,
+        "note": (
+            f"{len(targets)} targets; {len(records)} distinct candidates selected by at least one method. "
+            "Stars mark method winners. Lines connect the same candidate across methods. Percentiles "
+            "normalize different pool sizes; N/A is an availability rail, not a worst score. v3 is an "
+            "uncalibrated screening-only rerank of the official v2 top-10."
+        ),
+    }
+
+
+def method_transition_payload(rows: pd.DataFrame) -> dict[str, Any]:
+    title = "Winner transitions across v1, v2, and v3"
+    required = {
+        "target_stress_record_key",
+        "picked_by_method_count",
+        "transition_class",
+    }
+    if rows is None or rows.empty:
+        return _empty_payload(title, "No method-comparison transition data are available.")
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        return _empty_payload(
+            title,
+            "Comparison export is missing required columns: " + ", ".join(missing),
+        )
+    target_rows = rows.sort_values("picked_by_method_count", ascending=False).drop_duplicates("target_stress_record_key")
+    devices = sorted(target_rows.get("device_type", pd.Series("unknown", index=target_rows.index)).fillna("unknown").astype(str).unique())
+    classes = ["all_three_same", "v3_follows_v1", "v3_follows_v2", "v3_selects_third_candidate",
+               "v1_winner_unavailable", "v2_winner_unavailable", "v3_winner_unavailable"]
+    colors = ["#1a9850", "#e6731a", "#4575b4", "#762a83", "#8c959f", "#8c959f", "#8c959f"]
+    traces = []
+    trace_devices = []
+    for device in devices:
+        subset = target_rows[target_rows["device_type"].fillna("unknown").astype(str).eq(device)]
+        counts = subset["transition_class"].fillna("unknown").astype(str).value_counts()
+        traces.append({"type": "bar", "name": device, "x": classes,
+                       "y": [int(counts.get(label, 0)) for label in classes],
+                       "marker": {"color": colors}, "showlegend": True})
+        trace_devices.append(device)
+    layout = common_cartesian_layout(title)
+    layout.update({"barmode": "group", "xaxis": {"title": {"text": "transition class"}, "tickangle": -22},
+                   "yaxis": {"title": {"text": "irradiation targets"}, "gridcolor": "#d8dee4"}})
+    return {"traces": traces, "layout": layout,
+            "filter": {"devices": devices, "traceDevices": trace_devices,
+                       "titleAll": title, "titles": {d: f"{title} — {d}" for d in devices}},
+            "note": "One row per irradiation target. This view distinguishes true three-way consensus, v3 following v1 or v2, a third-candidate selection, and method-unavailable states."}
 
 def plotly_script_tag() -> str:
     if PLOTLY_ASSET.exists():
@@ -3341,7 +3495,7 @@ __PLOTLY_SCRIPT__
   <button id="v2-tab" class="tab" role="tab" aria-selected="false"
     data-view="v2summary">v2 readiness</button>
   <button id="method-tab" class="tab" role="tab" aria-selected="false"
-    data-view="agreement">Method agreement</button>
+    data-view="comparator">Method comparator</button>
   <button id="v3-tab" class="tab" role="tab" aria-selected="false"
     data-view="v3">v3 explainability</button>
   <button id="curation-tab" class="tab" role="tab" aria-selected="false"
@@ -3356,13 +3510,13 @@ __PLOTLY_SCRIPT__
   <button class="tab subtab" data-subview="v2parity">parity</button>
   <button class="tab subtab" data-subview="boundary">boundary coverage</button>
   <button class="tab subtab" data-subview="v2overlap">intervals</button>
-  <button class="tab subtab" data-subview="agreement">agreement matrix</button>
+  <button class="tab subtab" data-subview="comparator">rank paths</button>
+  <button class="tab subtab" data-subview="methodTransitions">winner transitions</button>
+  <button class="tab subtab" data-subview="agreement">v1/v2 summary</button>
   <button class="tab subtab" data-subview="concordanceEcdf">enrichment ECDF</button>
-  <button class="tab subtab" data-subview="reciprocal">reciprocal enrichment</button>
   <button class="tab subtab" data-subview="conflictBrowser">conflict browser</button>
-  <button class="tab subtab" data-subview="concordance">3D diagnostics</button>
+  <button class="tab subtab" data-subview="concordance">archive: 3D diagnostics</button>
   <button class="tab subtab" data-subview="v3">component shares</button>
-  <button class="tab subtab" data-subview="v3agreement">v3 agreement</button>
   <button class="tab subtab" data-subview="source">sources 3D</button>
   <button class="tab subtab" data-subview="delta">delta geometry</button>
   <button class="tab subtab" data-subview="evidenceSummary">evidence summary</button>
@@ -3381,19 +3535,24 @@ __PLOTLY_SCRIPT__
   <span>applies to views that expose per-device traces; pair views key on the
   irradiation target device.</span>
 </div>
+<div id="comparator-controls" class="filterbar" hidden>
+  <label for="target-filter">Irradiation target:</label>
+  <select id="target-filter" aria-label="Select irradiation target for method comparison"></select>
+  <span>shows every distinct candidate selected rank 1 by v1, v2, or v3 for this target.</span>
+</div>
 <main class="panel">
   <div id="overview-plot" class="plot" role="tabpanel"></div>
   <div id="v2summary-plot" class="plot" role="tabpanel" hidden></div>
   <div id="v2parity-plot" class="plot" role="tabpanel" hidden></div>
   <div id="boundary-plot" class="plot" role="tabpanel" hidden></div>
   <div id="v2overlap-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="comparator-plot" class="plot" role="tabpanel" hidden></div>
+  <div id="methodTransitions-plot" class="plot" role="tabpanel" hidden></div>
   <div id="agreement-plot" class="plot" role="tabpanel" hidden></div>
   <div id="concordanceEcdf-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="reciprocal-plot" class="plot" role="tabpanel" hidden></div>
   <div id="conflictBrowser-plot" class="plot" role="tabpanel" hidden></div>
   <div id="concordance-plot" class="plot" role="tabpanel" hidden></div>
   <div id="v3-plot" class="plot" role="tabpanel" hidden></div>
-  <div id="v3agreement-plot" class="plot" role="tabpanel" hidden></div>
   <div id="curation-plot" class="plot" role="tabpanel" hidden></div>
   <div id="source-plot" class="plot" role="tabpanel" hidden></div>
   <div id="delta-plot" class="plot" role="tabpanel" hidden></div>
@@ -3408,13 +3567,13 @@ __PLOTLY_SCRIPT__
 <script id="v2parity-payload" type="application/json">__V2_PARITY_PAYLOAD__</script>
 <script id="boundary-payload" type="application/json">__BOUNDARY_PAYLOAD__</script>
 <script id="v2overlap-payload" type="application/json">__V2_PAYLOAD__</script>
+<script id="comparator-payload" type="application/json">__COMPARATOR_PAYLOAD__</script>
+<script id="methodTransitions-payload" type="application/json">__METHOD_TRANSITIONS_PAYLOAD__</script>
 <script id="agreement-payload" type="application/json">__AGREEMENT_PAYLOAD__</script>
 <script id="concordanceEcdf-payload" type="application/json">__CONCORDANCE_ECDF_PAYLOAD__</script>
-<script id="reciprocal-payload" type="application/json">__RECIPROCAL_PAYLOAD__</script>
 <script id="conflictBrowser-payload" type="application/json">__CONFLICT_BROWSER_PAYLOAD__</script>
 <script id="concordance-payload" type="application/json">__CONCORDANCE_PAYLOAD__</script>
 <script id="v3-payload" type="application/json">__V3_PAYLOAD__</script>
-<script id="v3agreement-payload" type="application/json">__V3_AGREEMENT_PAYLOAD__</script>
 <script id="curation-payload" type="application/json">__CURATION_PAYLOAD__</script>
 <script id="source-payload" type="application/json">__SOURCE_PAYLOAD__</script>
 <script id="delta-payload" type="application/json">__DELTA_PAYLOAD__</script>
@@ -3432,16 +3591,16 @@ __PLOTLY_SCRIPT__
   }
 
   const VIEWS = ["overview", "v2summary", "v2parity", "boundary", "v2overlap",
-    "agreement", "concordanceEcdf", "reciprocal", "conflictBrowser", "concordance",
-    "v3", "v3agreement", "curation", "source", "delta", "evidenceSummary",
+    "comparator", "methodTransitions", "agreement", "concordanceEcdf", "conflictBrowser", "concordance",
+    "v3", "curation", "source", "delta", "evidenceSummary",
     "energy", "energySums"];
-  const MAIN_VIEWS = ["overview", "v2summary", "agreement", "v3", "curation",
+  const MAIN_VIEWS = ["overview", "v2summary", "comparator", "v3", "curation",
     "source", "energy"];
   const SUBVIEW_PARENT = {
     v2summary: "v2summary", v2parity: "v2summary", boundary: "v2summary", v2overlap: "v2summary",
-    agreement: "agreement", concordanceEcdf: "agreement", reciprocal: "agreement",
-    conflictBrowser: "agreement", concordance: "agreement",
-    v3: "v3", v3agreement: "v3",
+    comparator: "comparator", methodTransitions: "comparator", agreement: "comparator",
+    concordanceEcdf: "comparator", conflictBrowser: "comparator", concordance: "comparator",
+    v3: "v3",
     source: "source", delta: "source", evidenceSummary: "source",
     energy: "energy", energySums: "energy"
   };
@@ -3457,13 +3616,13 @@ __PLOTLY_SCRIPT__
     v2parity: JSON.parse(document.getElementById("v2parity-payload").textContent),
     boundary: JSON.parse(document.getElementById("boundary-payload").textContent),
     v2overlap: JSON.parse(document.getElementById("v2overlap-payload").textContent),
+    comparator: JSON.parse(document.getElementById("comparator-payload").textContent),
+    methodTransitions: JSON.parse(document.getElementById("methodTransitions-payload").textContent),
     agreement: JSON.parse(document.getElementById("agreement-payload").textContent),
     concordanceEcdf: JSON.parse(document.getElementById("concordanceEcdf-payload").textContent),
-    reciprocal: JSON.parse(document.getElementById("reciprocal-payload").textContent),
     conflictBrowser: JSON.parse(document.getElementById("conflictBrowser-payload").textContent),
     concordance: JSON.parse(document.getElementById("concordance-payload").textContent),
     v3: JSON.parse(document.getElementById("v3-payload").textContent),
-    v3agreement: JSON.parse(document.getElementById("v3agreement-payload").textContent),
     curation: JSON.parse(document.getElementById("curation-payload").textContent),
     source: JSON.parse(document.getElementById("source-payload").textContent),
     delta: JSON.parse(document.getElementById("delta-payload").textContent),
@@ -3499,6 +3658,77 @@ __PLOTLY_SCRIPT__
     opt.textContent = name;
     deviceSelect.appendChild(opt);
   });
+  const targetSelect = document.getElementById("target-filter");
+  const comparatorControls = document.getElementById("comparator-controls");
+
+  function comparatorRecords(target) {
+    const rows = payloads.comparator.comparisonRows || [];
+    return rows.filter(function (row) { return row.target === target; });
+  }
+
+  function comparatorTraces(target) {
+    return comparatorRecords(target).map(function (row) {
+      const methods = ["v1", "v2", "v3"];
+      return {
+        type: "scatter",
+        mode: "lines+markers+text",
+        name: row.candidate_label,
+        x: ["v1 signature", "v2 energy", "v3 combined"],
+        y: methods.map(function (method) {
+          const value = row[method + "_percentile"];
+          return value === null || value === undefined ? 110 : value;
+        }),
+        text: methods.map(function (method) { return row["picked_" + method] ? "★" : ""; }),
+        textposition: "top center",
+        customdata: methods.map(function (method) {
+          return [
+            row[method + "_rank"] === null ? "N/A" : row[method + "_rank"],
+            row[method + "_reason"] || "rank available",
+            row[method + "_criterion"] || "winner",
+            row.candidate_source,
+            row.truth
+          ];
+        }),
+        hovertemplate: "%{x}<br>pool-normalized rank=%{y:.1f}%<br>native rank=%{customdata[0]}" +
+          "<br>availability=%{customdata[1]}<br>first losing criterion=%{customdata[2]}" +
+          "<br>source=%{customdata[3]}<br>truth=%{customdata[4]}<extra>%{fullData.name}</extra>",
+        line: { width: 3 },
+        marker: { size: 11 }
+      };
+    });
+  }
+
+  function renderComparatorTarget() {
+    if (!rendered.comparator || !targetSelect.value) { return; }
+    const layout = JSON.parse(JSON.stringify(payloads.comparator.layout || {}));
+    layout.title = layout.title || {};
+    layout.title.text = "v1 → v2 → v3 rank-1 comparator — " + targetSelect.value;
+    Plotly.react("comparator-plot", comparatorTraces(targetSelect.value), layout, config);
+  }
+
+  function refreshComparatorTargets() {
+    const rows = payloads.comparator.comparisonRows || [];
+    const previous = targetSelect.value;
+    const targets = [];
+    rows.forEach(function (row) {
+      if ((currentDevice === DEVICE_ALL || row.device === currentDevice) &&
+          targets.indexOf(row.target) < 0) {
+        targets.push(row.target);
+      }
+    });
+    targetSelect.innerHTML = "";
+    targets.forEach(function (target) {
+      const option = document.createElement("option");
+      option.value = target;
+      option.textContent = target;
+      targetSelect.appendChild(option);
+    });
+    if (targets.indexOf(previous) >= 0) {
+      targetSelect.value = previous;
+    }
+    renderComparatorTarget();
+  }
+  targetSelect.addEventListener("change", renderComparatorTarget);
 
   // Views that can only render one device at a time (categorical axes)
   // declare filter.allShowsOnly; "All devices" then falls back to the first
@@ -3697,6 +3927,7 @@ __PLOTLY_SCRIPT__
         applyFilter(name);
       }
     });
+    refreshComparatorTargets();
     if (currentView) {
       document.getElementById("plot-note").textContent = noteFor(currentView);
     }
@@ -3720,6 +3951,9 @@ __PLOTLY_SCRIPT__
       applyFilter(view);
     }
     rendered[view] = true;
+    if (view === "comparator") {
+      refreshComparatorTargets();
+    }
   }
 
   function viewFromHash() {
@@ -3734,6 +3968,7 @@ __PLOTLY_SCRIPT__
       view = firstEnabled(requestedParent);
     }
     const parent = SUBVIEW_PARENT[view] || view;
+    comparatorControls.hidden = view !== "comparator";
     document.querySelectorAll(".tab[data-view]").forEach(function (button) {
       const active = button.dataset.view === parent;
       button.classList.toggle("active", active);
@@ -3816,6 +4051,10 @@ def main() -> None:
         pd.read_csv(CONCORDANCE_CSV) if CONCORDANCE_CSV.exists() else pd.DataFrame()
     )
     v3_records = pd.read_csv(V3_CSV) if V3_CSV.exists() else pd.DataFrame()
+    comparison_records = (
+        pd.read_csv(METHOD_COMPARISON_CSV)
+        if METHOD_COMPARISON_CSV.exists() else pd.DataFrame()
+    )
     overview_payload_data = overview_payload(
         source_records, delta_comparisons, v2_records, concordance_records, v3_records
     )
@@ -3823,13 +4062,13 @@ def main() -> None:
     v2_parity_payload = v2_severity_parity_plot_payload(v2_records)
     v2_summary_payload = v2_overlap_summary_plot_payload(v2_records)
     boundary_payload = boundary_coverage_payload(v2_records)
+    comparator_payload_data = method_comparator_payload(comparison_records)
+    transition_payload = method_transition_payload(comparison_records)
     agreement_payload = agreement_matrix_payload(concordance_records)
     concordance_payload = concordance_3d_plot_payload(concordance_records)
     concordance_ecdf_payload = concordance_enrichment_ecdf_payload(concordance_records)
-    reciprocal_payload = reciprocal_enrichment_payload(concordance_records)
     conflict_payload = conflict_browser_payload(concordance_records)
     v3_payload = v3_vector_explorer_payload(v3_records)
-    v3_agreement = v3_agreement_payload(v3_records, concordance_records)
     curation_payload_data = curation_queue_payload(v2_records, concordance_records)
     evidence_summary_payload = evidence_quality_summary_payload(delta_comparisons)
 
@@ -3841,13 +4080,13 @@ def main() -> None:
         v2_parity_payload,
         boundary_payload,
         v2_payload,
+        comparator_payload_data,
+        transition_payload,
         agreement_payload,
         concordance_ecdf_payload,
-        reciprocal_payload,
         conflict_payload,
         concordance_payload,
         v3_payload,
-        v3_agreement,
         curation_payload_data,
         source_payload,
         delta_payload,
@@ -3868,13 +4107,13 @@ def main() -> None:
         .replace("__V2_PARITY_PAYLOAD__", json_for_html(v2_parity_payload))
         .replace("__BOUNDARY_PAYLOAD__", json_for_html(boundary_payload))
         .replace("__V2_PAYLOAD__", json_for_html(v2_payload))
+        .replace("__COMPARATOR_PAYLOAD__", json_for_html(comparator_payload_data))
+        .replace("__METHOD_TRANSITIONS_PAYLOAD__", json_for_html(transition_payload))
         .replace("__AGREEMENT_PAYLOAD__", json_for_html(agreement_payload))
         .replace("__CONCORDANCE_ECDF_PAYLOAD__", json_for_html(concordance_ecdf_payload))
-        .replace("__RECIPROCAL_PAYLOAD__", json_for_html(reciprocal_payload))
         .replace("__CONFLICT_BROWSER_PAYLOAD__", json_for_html(conflict_payload))
         .replace("__CONCORDANCE_PAYLOAD__", json_for_html(concordance_payload))
         .replace("__V3_PAYLOAD__", json_for_html(v3_payload))
-        .replace("__V3_AGREEMENT_PAYLOAD__", json_for_html(v3_agreement))
         .replace("__CURATION_PAYLOAD__", json_for_html(curation_payload_data))
         .replace("__SOURCE_PAYLOAD__", json_for_html(source_payload))
         .replace("__DELTA_PAYLOAD__", json_for_html(delta_payload))
@@ -3903,12 +4142,12 @@ def main() -> None:
         f"{count_points(v2_summary_payload):,} v2 summary; "
         f"{count_points(v2_parity_payload):,} v2 parity; "
         f"{count_points(boundary_payload):,} boundary; "
+        f"{count_points(comparator_payload_data):,} comparator; "
+        f"{count_points(transition_payload):,} transitions; "
         f"{count_points(agreement_payload):,} agreement; "
         f"{count_points(concordance_ecdf_payload):,} ECDF; "
         f"{count_points(conflict_payload):,} conflicts; "
-        f"{count_points(reciprocal_payload):,} reciprocal; "
         f"{count_points(v3_payload):,} v3 components; "
-        f"{count_points(v3_agreement):,} v3 agreement; "
         f"{count_points(curation_payload_data):,} curation rows; "
         f"{count_points(source_payload):,} source; "
         f"{count_points(delta_payload):,} delta; "

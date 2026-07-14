@@ -47,54 +47,31 @@ Usage:
     python3 create_baselines_dashboard.py
 """
 
-import json
 import sys
+from functools import partial
 
 from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
-                          refresh_dataset_columns, create_chart,
+                          refresh_dataset_columns, create_chart as create_api_chart,
                           create_or_update_dashboard, build_json_metadata)
 from aps.db_config import SUPERSET_URL
+from aps.superset.nonproxy_dashboard_support import (
+    DASHBOARD_GUIDANCE,
+    build_tabbed_layout,
+    create_documented_chart,
+)
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 
 # ── Dashboard Layout ─────────────────────────────────────────────────────────
 
 def build_dashboard_layout(charts):
     """Build position_json from (chart_id, uuid, name, width, height) tuples."""
-    layout = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {
-            "type": "GRID", "id": "GRID_ID",
-            "children": [], "parents": ["ROOT_ID"],
-        },
-        "HEADER_ID": {
-            "type": "HEADER", "id": "HEADER_ID",
-            "meta": {"text": "Baselines"},
-        },
-    }
-    row_children = []
-    for i, (cid, cuuid, cname, width, height) in enumerate(charts):
-        if cid is None:
-            continue
-        row_id = f"ROW-bl-{i}"
-        chart_key = f"CHART-bl-{i}"
-        layout[row_id] = {
-            "type": "ROW", "id": row_id,
-            "children": [chart_key],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        }
-        layout[chart_key] = {
-            "type": "CHART", "id": chart_key, "children": [],
-            "parents": ["ROOT_ID", "GRID_ID", row_id],
-            "meta": {
-                "chartId": cid, "width": width, "height": height,
-                "sliceName": cname, "uuid": cuuid,
-            },
-        }
-        row_children.append(row_id)
-    layout["GRID_ID"]["children"] = row_children
-    return layout
+    return build_tabbed_layout(
+        "Baselines", "bl",
+        [("Raw Measurement Explorer", "TAB-baselines-explorer", charts)],
+        {"*": DASHBOARD_GUIDANCE["baselines"]},
+    )
 
 
 # ── Native Filters ───────────────────────────────────────────────────────────
@@ -380,7 +357,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -418,7 +395,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -456,7 +433,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -495,7 +472,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -534,7 +511,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -573,7 +550,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,
@@ -611,7 +588,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
             },
             12, 60,

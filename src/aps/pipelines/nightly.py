@@ -468,10 +468,24 @@ def default_steps() -> tuple[Step, ...]:
             critical=False,
         ),
         Step(
+            "export-proxy-method-comparison",
+            ("-m", "aps.exports.export_proxy_method_comparison_union_csv"),
+            "export the complete v1/v2/v3 winner union",
+            depends_on=("build-proxy-analytics",),
+            critical=False,
+        ),
+        Step(
             "viewer-interactive-damage-signature",
             ("-m", "aps.viewers.create_interactive_damage_signature_viewer"),
             "build the self-contained interactive damage-signature viewer",
-            depends_on=("build-proxy-analytics",),
+            depends_on=(
+                "viewer-source-damage-signature",
+                "viewer-damage-signature-delta",
+                "export-proxy-energy-v2",
+                "export-proxy-concordance",
+                "export-proxy-combined-v3",
+                "export-proxy-method-comparison",
+            ),
             critical=False,
         ),
         Step(

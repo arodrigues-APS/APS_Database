@@ -34,13 +34,20 @@ Usage:
     python3 create_sc_dashboard.py
 """
 
-import json
 import sys
+from functools import partial
 
 from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
-                          refresh_dataset_columns, create_chart,
+                          refresh_dataset_columns, create_chart as create_api_chart,
                           create_or_update_dashboard, build_json_metadata)
 from aps.db_config import SUPERSET_URL
+from aps.superset.nonproxy_dashboard_support import (
+    DASHBOARD_GUIDANCE,
+    build_tabbed_layout,
+    create_documented_chart,
+)
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 DASHBOARD_TITLE = "Short Circuit"
 DASHBOARD_SLUG = "short-circuit"
@@ -53,60 +60,10 @@ def build_dashboard_layout(tab_defs):
 
     chart_tuples: list of (chart_id, chart_uuid, chart_name, width, height).
     """
-    layout = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {
-            "type": "GRID", "id": "GRID_ID",
-            "children": [], "parents": ["ROOT_ID"],
-        },
-        "HEADER_ID": {
-            "type": "HEADER", "id": "HEADER_ID",
-            "meta": {"text": DASHBOARD_TITLE},
-        },
-    }
-
-    tabs_id = "TABS-sc"
-    tab_children = [td[1] for td in tab_defs]
-    layout["GRID_ID"]["children"] = [tabs_id]
-    layout[tabs_id] = {
-        "type": "TABS", "id": tabs_id,
-        "children": tab_children,
-        "parents": ["ROOT_ID", "GRID_ID"],
-    }
-
-    for tab_name, tab_id, chart_list in tab_defs:
-        tab_parents = ["ROOT_ID", "GRID_ID", tabs_id, tab_id]
-        row_ids = []
-        for i, (cid, cuuid, cname, width, height) in enumerate(chart_list):
-            if cid is None:
-                continue
-            row_id = f"ROW-{tab_id}-{i}"
-            chart_key = f"CHART-{tab_id}-{i}"
-            layout[row_id] = {
-                "type": "ROW", "id": row_id,
-                "children": [chart_key],
-                "parents": tab_parents,
-                "meta": {"background": "BACKGROUND_TRANSPARENT"},
-            }
-            layout[chart_key] = {
-                "type": "CHART", "id": chart_key, "children": [],
-                "parents": tab_parents + [row_id],
-                "meta": {
-                    "chartId": cid, "width": width, "height": height,
-                    "sliceName": cname, "uuid": cuuid,
-                },
-            }
-            row_ids.append(row_id)
-
-        layout[tab_id] = {
-            "type": "TAB", "id": tab_id,
-            "children": row_ids,
-            "parents": ["ROOT_ID", "GRID_ID", tabs_id],
-            "meta": {"text": tab_name},
-        }
-
-    return layout
+    return build_tabbed_layout(
+        DASHBOARD_TITLE, "sc", tab_defs,
+        {"*": DASHBOARD_GUIDANCE["short-circuit"]},
+    )
 
 
 # ── Native Filters ───────────────────────────────────────────────────────────
@@ -451,7 +408,7 @@ def sc_curve_params(x_axis, cat, x_title, y_title,
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -496,7 +453,7 @@ def waveform_params(y_col, y_label, y_title):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -529,12 +486,15 @@ def main():
     waveform_ds = find_or_create_dataset(session, db_id, "sc_waveform_view")
     degrad_ds = find_or_create_dataset(session, db_id,
                                         "sc_degradation_summary")
+    paired_damage_ds = find_or_create_dataset(
+        session, db_id, "damage_equivalence_view"
+    )
     if not main_ds:
         print("  FATAL: Could not create sc_ruggedness_view dataset.")
         print("  Run ingestion_sc.py first to create the views.")
         sys.exit(1)
 
-    for ds_id in [main_ds, waveform_ds, degrad_ds]:
+    for ds_id in [main_ds, waveform_ds, degrad_ds, paired_damage_ds]:
         if ds_id:
             refresh_dataset_columns(session, ds_id)
 
@@ -774,7 +734,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -819,7 +779,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -839,11 +799,10 @@ def main():
     tab4_chart_defs = []
     if degrad_ds:
         tab4_chart_defs = [
-            # 0 – Vth Shift vs SC Duration scatter
-            #     Uses degradation_summary: compare avg_abs_i_drain at a
-            #     gate voltage near Vth between pristine and post_sc
+            # 0 – Contextual curve overlay. The summary does not contain a
+            # same-sample pristine join, so this is not labeled degradation.
             (
-                "SC – Avg |Id| by SC Condition (IdVg)",
+                "SC – IdVg Curves by SC Condition",
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
@@ -881,7 +840,7 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
-                    "connectNulls": True,
+                    "connectNulls": False,
                     "zoomable": True,
                     "logAxis": "y",
                     "series_limit": 50,
@@ -889,9 +848,9 @@ def main():
                 12, 60,
             ),
 
-            # 1 – IdVd degradation: compare output curves pre vs post
+            # 1 – Contextual IdVd overlay by condition.
             (
-                "SC – Avg Id by SC Condition (IdVd)",
+                "SC – IdVd Curves by SC Condition",
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
@@ -928,16 +887,16 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
-                    "connectNulls": True,
+                    "connectNulls": False,
                     "zoomable": True,
                     "series_limit": 50,
                 },
                 12, 60,
             ),
 
-            # 2 – Degradation flag summary table
+            # 2 – Acquisition-condition summary, not a paired delta.
             (
-                "SC – Degradation Summary Table",
+                "SC – Electrical Condition Summary",
                 degrad_ds,
                 "table",
                 {
@@ -965,6 +924,62 @@ def main():
                 12, 50,
             ),
         ]
+
+    if paired_damage_ds:
+        paired_filter = [{
+            "expressionType": "SQL",
+            "sqlExpression": "source = 'sc'",
+            "clause": "WHERE",
+        }]
+        tab4_chart_defs.extend([
+            (
+                "SC – Paired Damage Metrics",
+                paired_damage_ds,
+                "table",
+                {
+                    "query_mode": "raw",
+                    "all_columns": [
+                        "device_type", "sc_voltage_v", "sc_duration_us",
+                        "dvth", "dvth_iqr", "dvth_n",
+                        "drds", "drds_iqr", "drds_n",
+                        "dbv", "dbv_iqr", "dbv_n", "n_samples", "label",
+                    ],
+                    "adhoc_filters": paired_filter,
+                    "row_limit": 10000,
+                    "include_search": True,
+                    "table_timestamp_format": "smart_date",
+                },
+                12, 52,
+            ),
+            (
+                "SC – Damage vs Pulse Duration",
+                paired_damage_ds,
+                "echarts_timeseries_scatter",
+                {
+                    "x_axis": "sc_duration_us",
+                    "metrics": [{
+                        "expressionType": "SQL",
+                        "sqlExpression": "AVG(dvth)",
+                        "label": "Median ΔVth (V)",
+                    }],
+                    "groupby": ["device_type", "sc_voltage_v", "dvth_n", "label"],
+                    "adhoc_filters": paired_filter + [{
+                        "expressionType": "SQL",
+                        "sqlExpression": "dvth IS NOT NULL",
+                        "clause": "WHERE",
+                    }],
+                    "row_limit": 10000,
+                    "show_legend": True,
+                    "rich_tooltip": True,
+                    "x_axis_title": "SC pulse duration (µs)",
+                    "y_axis_title": "Median ΔVth (V)",
+                    "markerEnabled": True,
+                    "markerSize": 10,
+                    "zoomable": True,
+                },
+                12, 52,
+            ),
+        ])
 
     # ── Create all charts and build tabs ─────────────────────────────────
     print("\n   Creating all charts...")
@@ -994,14 +1009,14 @@ def main():
         named_cid(tab1_info, "SC – IdVg Transfer Curves"),
         named_cid(tab1_info, "SC – Subthreshold Curves"),
         named_cid(tab3_info, "SC – IdVg (Individual Runs)"),
-        named_cid(tab4_info, "SC – Avg |Id| by SC Condition (IdVg)"),
+        named_cid(tab4_info, "SC – IdVg Curves by SC Condition"),
     ]))
     v_gate_chart_ids = list(filter(None, [
         named_cid(tab1_info, "SC – IdVd Output Curves"),
         named_cid(tab1_info, "SC – 3rd Quadrant (Body Diode)"),
         named_cid(tab1_info, "SC – Body Diode Curves"),
         named_cid(tab3_info, "SC – IdVd (Individual Runs)"),
-        named_cid(tab4_info, "SC – Avg Id by SC Condition (IdVd)"),
+        named_cid(tab4_info, "SC – IdVd Curves by SC Condition"),
     ]))
 
     # 5. Build dashboard

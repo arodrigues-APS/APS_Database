@@ -65,6 +65,20 @@ def test_invalid_superset_timeout_fails_closed():
         Settings.from_environ({"APS_SUPERSET_READ_TIMEOUT_SECONDS": "0"})
 
 
+def test_legacy_cv_dpt_is_disabled_by_default_and_strictly_parsed():
+    settings = Settings.from_environ({})
+    assert settings.enable_legacy_cv_dpt is False
+    with pytest.raises(ConfigurationError, match="legacy CV/DPT is disabled"):
+        settings.require_legacy_cv_dpt_enabled()
+
+    enabled = Settings.from_environ({"APS_ENABLE_LEGACY_CV_DPT": "1"})
+    assert enabled.enable_legacy_cv_dpt is True
+    enabled.require_legacy_cv_dpt_enabled()
+
+    with pytest.raises(ConfigurationError, match="APS_ENABLE_LEGACY_CV_DPT"):
+        Settings.from_environ({"APS_ENABLE_LEGACY_CV_DPT": "occasionally"})
+
+
 def test_redacted_summary_never_contains_secret_values():
     settings = Settings.from_environ(
         {

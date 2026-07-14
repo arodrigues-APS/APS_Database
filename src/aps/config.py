@@ -126,6 +126,20 @@ def _positive_float(values: Mapping[str, str], name: str, default: float) -> flo
     return value
 
 
+def _boolean(values: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = values.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{name} must be one of 1/0, true/false, yes/no, or on/off; got {raw!r}"
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     """Environment-derived settings with explicit checks at use boundaries."""
@@ -144,6 +158,7 @@ class Settings:
     flask_secret_key: str | None
     data_root: Path | None
     nas_root: Path | None
+    enable_legacy_cv_dpt: bool
 
     @classmethod
     def from_environ(
@@ -187,6 +202,9 @@ class Settings:
             flask_secret_key=_secret_value(values.get("APS_FLASK_SECRET_KEY")),
             data_root=_path_value(values.get("APS_DATA_ROOT")),
             nas_root=_path_value(values.get("APS_NAS_ROOT")),
+            enable_legacy_cv_dpt=_boolean(
+                values, "APS_ENABLE_LEGACY_CV_DPT", False
+            ),
         )
 
     def _require_secret(self, value: str | None, variable: str) -> str:
@@ -230,6 +248,15 @@ class Settings:
     def require_nas_root(self) -> Path:
         return require_directory(self.nas_root, "APS_NAS_ROOT")
 
+    def require_legacy_cv_dpt_enabled(self) -> None:
+        """Refuse the legacy snapshot feature unless it is explicitly enabled."""
+        if not self.enable_legacy_cv_dpt:
+            raise ConfigurationError(
+                "legacy CV/DPT is disabled. Keep APS_ENABLE_LEGACY_CV_DPT=0 "
+                "until the canonical importer and parity record are accepted; "
+                "set it to 1 only for an explicitly approved compatibility run."
+            )
+
     def validate_nightly(self) -> None:
         """Fail before a nightly run can mistake missing config for no data."""
         self.database_params()
@@ -254,6 +281,7 @@ class Settings:
             "flask_secret_key_configured": self.flask_secret_key is not None,
             "data_root": str(self.data_root) if self.data_root else None,
             "nas_root": str(self.nas_root) if self.nas_root else None,
+            "enable_legacy_cv_dpt": self.enable_legacy_cv_dpt,
         }
 
 

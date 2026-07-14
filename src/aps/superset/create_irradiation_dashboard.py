@@ -50,11 +50,19 @@ Usage:
 
 import json
 import sys
+from functools import partial
 
 from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
-                          refresh_dataset_columns, create_chart,
+                          refresh_dataset_columns, create_chart as create_api_chart,
                           create_or_update_dashboard, build_json_metadata)
 from aps.db_config import SUPERSET_URL
+from aps.superset.nonproxy_dashboard_support import (
+    DASHBOARD_GUIDANCE,
+    build_tabbed_layout,
+    create_documented_chart,
+)
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 DASHBOARD_TITLE = "Irradiation"
 DASHBOARD_SLUG = "irradiation"
@@ -67,60 +75,10 @@ def build_dashboard_layout(tab_defs):
 
     chart_tuples: list of (chart_id, chart_uuid, chart_name, width, height).
     """
-    layout = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {
-            "type": "GRID", "id": "GRID_ID",
-            "children": [], "parents": ["ROOT_ID"],
-        },
-        "HEADER_ID": {
-            "type": "HEADER", "id": "HEADER_ID",
-            "meta": {"text": DASHBOARD_TITLE},
-        },
-    }
-
-    tabs_id = "TABS-irrad"
-    tab_children = [td[1] for td in tab_defs]
-    layout["GRID_ID"]["children"] = [tabs_id]
-    layout[tabs_id] = {
-        "type": "TABS", "id": tabs_id,
-        "children": tab_children,
-        "parents": ["ROOT_ID", "GRID_ID"],
-    }
-
-    for tab_name, tab_id, chart_list in tab_defs:
-        tab_parents = ["ROOT_ID", "GRID_ID", tabs_id, tab_id]
-        row_ids = []
-        for i, (cid, cuuid, cname, width, height) in enumerate(chart_list):
-            if cid is None:
-                continue
-            row_id = f"ROW-{tab_id}-{i}"
-            chart_key = f"CHART-{tab_id}-{i}"
-            layout[row_id] = {
-                "type": "ROW", "id": row_id,
-                "children": [chart_key],
-                "parents": tab_parents,
-                "meta": {"background": "BACKGROUND_TRANSPARENT"},
-            }
-            layout[chart_key] = {
-                "type": "CHART", "id": chart_key, "children": [],
-                "parents": tab_parents + [row_id],
-                "meta": {
-                    "chartId": cid, "width": width, "height": height,
-                    "sliceName": cname, "uuid": cuuid,
-                },
-            }
-            row_ids.append(row_id)
-
-        layout[tab_id] = {
-            "type": "TAB", "id": tab_id,
-            "children": row_ids,
-            "parents": ["ROOT_ID", "GRID_ID", tabs_id],
-            "meta": {"text": tab_name},
-        }
-
-    return layout
+    return build_tabbed_layout(
+        DASHBOARD_TITLE, "irrad", tab_defs,
+        {"*": DASHBOARD_GUIDANCE["irradiation"]},
+    )
 
 
 # ── Native Filters ───────────────────────────────────────────────────────────
@@ -437,7 +395,7 @@ def irrad_curve_params(x_axis, cat, x_title, y_title,
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -488,7 +446,7 @@ def irrad_waveform_params(y_col, y_label, y_title, metric_expr=None,
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -739,9 +697,11 @@ def main():
             6, 50,
         ),
 
-        # 2 – Data Points per Ion Species (stacked bar by measurement category)
+        # 2 – Measurement-file coverage by ion species. Raw sampled-point
+        # counts overweight captures with denser acquisition and are not a
+        # meaningful experimental denominator.
         (
-            "Irrad – Points per Ion Species",
+            "Irrad – Measurement Files per Ion Species",
             overview_ds,
             "echarts_timeseries_bar",
             {
@@ -749,15 +709,15 @@ def main():
                 "time_grain_sqla": None,
                 "x_axis_sort_asc": True,
                 "metrics": [{"expressionType": "SQL",
-                             "sqlExpression": "SUM(n_points)",
-                             "label": "Data Points"}],
+                             "sqlExpression": "SUM(n_files)",
+                             "label": "Measurement Files"}],
                 "groupby": ["measurement_category"],
                 "adhoc_filters": [],
                 "row_limit": 1000,
                 "show_legend": True,
                 "rich_tooltip": True,
                 "x_axis_title": "Ion Species",
-                "y_axis_title": "Data Points",
+                "y_axis_title": "Measurement Files",
                 "y_axis_format": "SMART_NUMBER",
                 "stack": True,
             },
@@ -767,9 +727,9 @@ def main():
 
     if event_let_ds:
         tab1_chart_defs.append(
-            # 3 – SEB/SELCI/SELCII events per LET (stacked by event type)
+            # 3 – Exposure-normalized SEB/SELC event rate per LET.
             (
-                "Irrad – SE Events per LET",
+                "Irrad – SE Event Rate per 1e5 Fluence vs LET",
                 event_let_ds,
                 "echarts_timeseries_bar",
                 {
@@ -778,8 +738,11 @@ def main():
                     "x_axis_sort_asc": True,
                     "metrics": [{
                         "expressionType": "SQL",
-                        "sqlExpression": "SUM(n_events)",
-                        "label": "Events",
+                        "sqlExpression": (
+                            "1e5 * SUM(n_events) "
+                            "/ NULLIF(SUM(summed_fluence_span), 0)"
+                        ),
+                        "label": "Events per 1e5 fluence",
                     }],
                     "groupby": ["event_type"],
                     "adhoc_filters": [
@@ -792,6 +755,11 @@ def main():
                         },
                         {
                             "expressionType": "SQL",
+                            "sqlExpression": "summed_fluence_span > 0",
+                            "clause": "WHERE",
+                        },
+                        {
+                            "expressionType": "SQL",
                             "sqlExpression": "let_mev_cm2_mg IS NOT NULL",
                             "clause": "WHERE",
                         },
@@ -800,7 +768,7 @@ def main():
                     "show_legend": True,
                     "rich_tooltip": True,
                     "x_axis_title": "LET (MeV cm^2/mg)",
-                    "y_axis_title": "Events",
+                    "y_axis_title": "Events per 1e5 fluence",
                     "y_axis_format": "SMART_NUMBER",
                     "stack": True,
                     "order_desc": False,
@@ -1071,9 +1039,10 @@ def main():
     tab4_chart_defs = []
     if degrad_ds:
         tab4_chart_defs = [
-            # 0 – IdVg shift comparison by ion species (log Y)
+            # 0 – Contextual IdVg overlay. This view has no same-device
+            # pristine join, so it must not be labeled a threshold shift.
             (
-                "Irrad – IdVg Shift by Ion Species",
+                "Irrad – IdVg Curves by Ion Species",
                 degrad_ds,
                 "echarts_timeseries_line",
                 {
@@ -1109,7 +1078,7 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
-                    "connectNulls": True,
+                    "connectNulls": False,
                     "zoomable": True,
                     "logAxis": "y",
                     "series_limit": 50,
@@ -1148,7 +1117,7 @@ def main():
                     "y_axis_bounds": [None, None],
                     "tooltipTimeFormat": "smart_date",
                     "markerEnabled": False,
-                    "connectNulls": True,
+                    "connectNulls": False,
                     "zoomable": True,
                     "logAxis": "y",
                     "series_limit": 50,
@@ -1156,9 +1125,9 @@ def main():
                 12, 60,
             ),
 
-            # 2 – Degradation Summary table
+            # 2 – Condition summary (not a paired degradation estimate).
             (
-                "Irrad – Degradation Summary",
+                "Irrad – Electrical Condition Summary",
                 degrad_ds,
                 "table",
                 {
@@ -1259,7 +1228,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -1304,7 +1273,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
                 "series_limit": 50,
                 "series_limit_metric": {
@@ -1349,7 +1318,7 @@ def main():
                 "y_axis_bounds": [None, None],
                 "tooltipTimeFormat": "smart_date",
                 "markerEnabled": False,
-                "connectNulls": True,
+                "connectNulls": False,
                 "zoomable": True,
                 "logAxis": "y",
                 "series_limit": 50,
@@ -1412,7 +1381,7 @@ def main():
     v_drain_chart_ids = list(filter(None, [
         named_cid(tab2_info, "Irrad – IdVg Transfer Curves"),
         named_cid(tab2_info, "Irrad – Subthreshold Curves"),
-        named_cid(tab4_info, "Irrad – IdVg Shift by Ion Species"),
+        named_cid(tab4_info, "Irrad – IdVg Curves by Ion Species"),
         named_cid(tab5_info, "Irrad – IdVg (Individual Runs)"),
     ]))
     v_gate_chart_ids = list(filter(None, [

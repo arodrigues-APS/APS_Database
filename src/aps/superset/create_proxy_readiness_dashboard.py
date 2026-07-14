@@ -9,7 +9,6 @@ why each candidate is supported, weak, or blocked.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import json
 
 from aps.db_config import SUPERSET_URL
@@ -24,7 +23,10 @@ from aps.superset.superset_api import (
 )
 from aps.viewers.proxy_viz_palette import CANDIDATE_COLORS
 
-DASHBOARD_TITLE = "Proxy Readiness - Waveform Failure Features"
+# Keep the established slug so deploying this definition updates the existing
+# dashboard instead of creating a second copy.  The title now reflects the
+# actual scope: three screening methods, their evidence gates, and concordance.
+DASHBOARD_TITLE = "Proxy Method Readiness & Concordance"
 DASHBOARD_SLUG = "proxy-readiness-waveforms"
 
 DATASET_TABLES = {
@@ -45,6 +47,118 @@ DATASET_TABLES = {
     "candidate_boundary": "stress_candidate_destruction_boundary_energy_view",
 }
 
+# Native-filter targets are declared centrally so definition tests can prove
+# that every target column exists in the corresponding SQL view.  The mapping
+# also prevents a filter from being scoped to a chart merely because it shared
+# a broad legacy group label.
+FILTER_TARGET_COLUMNS = {
+    "readiness": {"device_type"},
+    "experiment_plan": {"measurement_device_type"},
+    "candidates": {
+        "device_type",
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+        "proxy_claim_status",
+        "damage_signature_evidence_class",
+    },
+    "candidate_summary": {
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+        "proxy_claim_status",
+    },
+    "candidates_v2": {
+        "device_type",
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+        "proxy_claim_status",
+    },
+    "candidates_v3": {
+        "device_type",
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+    },
+    "concordance_enrichment": {
+        "device_type",
+        "target_event_type",
+        "v2_pick_source",
+        "v2_match_scope",
+        "v2_proxy_claim_status",
+    },
+    "context": {"device_type", "source", "stress_regime", "event_type"},
+    "destruction_boundary": {"device_type"},
+    "candidate_boundary": {"device_type", "source"},
+    "event_features": {"device_type"},
+}
+
+# Unit-of-analysis and evidence provenance is appended to every saved chart
+# description.  This makes measured, modeled, aggregate, and screening views
+# distinguishable from Superset itself rather than only from external docs.
+DATASET_PROVENANCE = {
+    "gate_zero": (
+        "one portfolio-wide evidence-gate row",
+        "derived coverage gate from measured waveform and post-IV availability",
+    ),
+    "readiness": (
+        "one physical device family",
+        "derived coverage counts from measured waveform and post-IV records",
+    ),
+    "file_features": (
+        "one waveform file",
+        "measured waveform metadata with derived readiness features",
+    ),
+    "event_features": (
+        "one detected or file-level stress event",
+        "measured waveform features with derived event/readiness classifications",
+    ),
+    "basis_features": (
+        "one stress-feature basis row",
+        "derived waveform feature basis",
+    ),
+    "context": (
+        "one stress record or detected irradiation event",
+        "measured stress context plus explicitly labeled modeled energy fields",
+    ),
+    "destruction_boundary": (
+        "one device and voltage-class boundary rollup",
+        "empirical outcome rollup; unknown outcomes are not failure evidence",
+    ),
+    "candidates": (
+        "one target/candidate pair",
+        "v1 screening output; distances are not calibrated equivalence probabilities",
+    ),
+    "candidate_summary": (
+        "one grouped cohort of v1 rank-1 targets",
+        "aggregate of v1 screening output",
+    ),
+    "experiment_plan": (
+        "one proposed measurement action",
+        "derived planning queue ranked by evidence expected to be unlocked",
+    ),
+    "candidates_v2": (
+        "one target/candidate pair",
+        "v2 staged mechanistic-energy screening output with fail-closed blockers",
+    ),
+    "candidates_v3": (
+        "one target/candidate pair from the v2 top-10 shortlist",
+        "v3 uncalibrated combined-vector reranking output",
+    ),
+    "combined_settings": (
+        "one ranker-settings version",
+        "declared, uncalibrated v3 weights and configuration",
+    ),
+    "concordance_enrichment": (
+        "one energy-rankable target",
+        "derived v1/v2 concordance and curated-truth coverage diagnostics",
+    ),
+    "candidate_boundary": (
+        "one candidate device/source/timescale boundary cell",
+        "empirical survival/failure rollup with explicit unknown outcomes",
+    ),
+}
 
 FIGURE1B_LANDSCAPE_DESCRIPTION = (
     "Recreates Kozak et al. IEEE TPEL 2023 Figure 1(b) with database "
@@ -295,6 +409,61 @@ TAB_IDS = {
     TAB_RAW: "TAB-proxy-raw",
 }
 MARKDOWN_PANELS = [
+    {
+        "tab": TAB_READINESS,
+        "code": (
+            "### Decision contract and provenance\n\n"
+            "This dashboard asks whether SC/avalanche records are sufficiently "
+            "supported to act as **screening candidates** for irradiation "
+            "targets, why v1/v2/v3 disagree, and which measurement removes the "
+            "next blocker. Rows represent device families, target/candidate "
+            "pairs, or stress records as stated in each chart description. "
+            "Measured, modeled, and derived fields are never interchangeable. "
+            "A distance, overlap, or rank is not validation: only curated "
+            "measured post-IV truth can produce a validated claim. Source views "
+            "are rebuilt from schemas 025, 028, and 029; the Superset dashboard "
+            "modified timestamp identifies the deployed build."
+        ),
+        "width": 12,
+        "height": 7,
+    },
+    {
+        "tab": TAB_MECHANISTIC,
+        "code": (
+            "### v2 is a fail-closed screening ranker\n\n"
+            "Read target severity, candidate failure-fraction support, terminal "
+            "energy, match scope, claim status, and blockers together. Missing "
+            "own-device destruction boundaries remain **missing evidence**; "
+            "Kosier or cross-device fallbacks are context and must not be read "
+            "as measured candidate thresholds."
+        ),
+        "width": 12,
+        "height": 5,
+    },
+    {
+        "tab": TAB_CONCORDANCE,
+        "code": (
+            "### Agreement and human review\n\n"
+            "Exact rank-1 agreement is intentionally strict. Enrichment asks a "
+            "different question: where the v2 winner lies in the energy-free "
+            "signature ordering. Review queues remain unvalidated until a "
+            "curated measured post-IV label supplies reviewer, basis, and date."
+        ),
+        "width": 12,
+        "height": 5,
+    },
+    {
+        "tab": TAB_RAW,
+        "code": (
+            "### Forensic QA and export\n\n"
+            "These wide tables preserve evidence and provenance for drill-through "
+            "and export. They are not the primary decision surface. Row limits "
+            "apply to the on-screen table; narrow filters before interpreting "
+            "absence or downloading a cohort."
+        ),
+        "width": 12,
+        "height": 5,
+    },
     {
         "tab": TAB_CANDIDATE,
         "code": (
@@ -756,175 +925,283 @@ def select_filter(filter_id: str, name: str, targets, scoped_chart_ids,
     }
 
 
-def build_native_filters(all_chart_ids, dataset_ids, chart_groups):
-    candidate_ids = chart_groups["candidate"]
-    candidate_v2_ids = chart_groups.get("candidate_v2", [])
-    candidate_v3_ids = chart_groups.get("candidate_v3", [])
-    concordance_ids = chart_groups.get("concordance", [])
-    context_ids = chart_groups["context"]
-    readiness_ids = chart_groups["readiness"]
-    planning_ids = chart_groups["planning"]
-    device_only_ids = chart_groups.get("device_only", [])
-    all_ids = list(all_chart_ids)
+def build_chart_catalog(chart_defs, chart_ids):
+    """Return the deployed chart contract used by filters and reconciliation.
 
-    cand = dataset_ids["candidates"]
-    cand_v2 = dataset_ids["candidates_v2"]
-    cand_v3 = dataset_ids["candidates_v3"]
-    conc = dataset_ids["concordance_enrichment"]
-    ctx = dataset_ids["context"]
-    tab_readiness = TAB_IDS[TAB_READINESS]
-    tab_candidate = TAB_IDS[TAB_CANDIDATE]
-    tab_mechanistic = TAB_IDS[TAB_MECHANISTIC]
-    tab_v3 = TAB_IDS[TAB_V3]
-    tab_concordance = TAB_IDS[TAB_CONCORDANCE]
-    tab_diag = TAB_IDS[TAB_PHYSICS]
+    The positional chart-definition tuple remains compatible with the other
+    dashboard builders, while this catalog records the fields that Superset
+    lifecycle checks need. Failed chart creations (chart_id is None) are
+    omitted from filter scopes but remain visible in the caller's error output.
+    """
+    if len(chart_defs) != len(chart_ids):
+        raise ValueError("chart definitions and chart ids must have equal length")
+
+    catalog = []
+    for definition, chart_id in zip(chart_defs, chart_ids):
+        if chart_id is None:
+            continue
+        name, dataset_id, _viz_type, _params, _width, _height, tab, group = definition
+        catalog.append(
+            {
+                "chart_id": int(chart_id),
+                "name": name,
+                "dataset_id": dataset_id,
+                "tab": tab,
+                "tab_id": TAB_IDS[tab],
+                "group": group,
+            }
+        )
+    return catalog
+
+
+def build_native_filters(all_chart_ids, dataset_ids, chart_catalog):
+    """Build a small, tab-specific native-filter set from actual chart inputs.
+
+    Device is the only global semantic filter. Each analytical tab then gets no
+    more than four controls. A chart enters a scope only when both its real
+    dataset and its tab support the filter; moved curation queues therefore no
+    longer inherit filters from their former tabs.
+    """
+    all_ids = [int(chart_id) for chart_id in all_chart_ids if chart_id is not None]
+    catalog_ids = [row["chart_id"] for row in chart_catalog]
+    if set(all_ids) != set(catalog_ids):
+        raise ValueError("chart catalog must describe every deployed chart id")
+
+    dataset_key_by_id = {dataset_id: key for key, dataset_id in dataset_ids.items()}
+    if len(dataset_key_by_id) != len(dataset_ids):
+        raise ValueError("dataset ids must be unique when building filter scopes")
+
+    def target(dataset_key, column):
+        valid_columns = FILTER_TARGET_COLUMNS.get(dataset_key, set())
+        if column not in valid_columns:
+            raise ValueError(
+                f"unsupported filter target {dataset_key}.{column}; "
+                "update FILTER_TARGET_COLUMNS only after the SQL view exposes it"
+            )
+        return dataset_ids[dataset_key], column
+
+    def scoped(*, tabs=None, dataset_keys=None, groups=None, names=None):
+        tab_set = set(tabs or [])
+        dataset_set = set(dataset_keys or [])
+        dataset_id_set = {dataset_ids[key] for key in dataset_set}
+        group_set = set(groups or [])
+        name_set = set(names or [])
+        return [
+            row["chart_id"]
+            for row in chart_catalog
+            if (not tab_set or row["tab"] in tab_set)
+            and (not dataset_id_set or row["dataset_id"] in dataset_id_set)
+            and (not group_set or row["group"] in group_set)
+            and (not name_set or row["name"] in name_set)
+        ]
+
+    def tab_ids_for(chart_ids):
+        selected = set(chart_ids)
+        tabs = {
+            row["tab"]
+            for row in chart_catalog
+            if row["chart_id"] in selected
+        }
+        return [TAB_IDS[tab] for tab in TAB_ORDER if tab in tabs]
 
     device_filter_id = "NATIVE_FILTER-proxy-device"
 
-    def candidate_filter(fid, label, column):
+    def make_filter(fid, label, targets, chart_ids):
+        if not chart_ids:
+            raise ValueError(f"native filter {fid} has no charts in scope")
         return select_filter(
-            fid, label, [(cand, column)], candidate_ids, all_ids,
-            parent_ids=[device_filter_id],
-            tabs_in_scope=[tab_candidate, tab_diag],
+            fid,
+            label,
+            targets,
+            chart_ids,
+            all_ids,
+            parent_ids=[] if fid == device_filter_id else [device_filter_id],
+            tabs_in_scope=tab_ids_for(chart_ids),
         )
 
-    def candidate_v2_filter(fid, label, column):
-        return select_filter(
-            fid, label, [(cand_v2, column)], candidate_v2_ids, all_ids,
-            parent_ids=[device_filter_id],
-            tabs_in_scope=[tab_mechanistic],
-        )
+    device_target_map = {
+        "readiness": "device_type",
+        "experiment_plan": "measurement_device_type",
+        "candidates": "device_type",
+        "candidates_v2": "device_type",
+        "candidates_v3": "device_type",
+        "concordance_enrichment": "device_type",
+        "context": "device_type",
+        "destruction_boundary": "device_type",
+        "candidate_boundary": "device_type",
+        "event_features": "device_type",
+    }
+    device_scope = scoped(dataset_keys=device_target_map)
 
-    def candidate_v3_filter(fid, label, column):
-        return select_filter(
-            fid, label, [(cand_v3, column)], candidate_v3_ids, all_ids,
-            parent_ids=[device_filter_id],
-            tabs_in_scope=[tab_v3],
-        )
+    v1_datasets = {"candidates", "candidate_summary"}
+    v1_event_scope = scoped(tabs={TAB_CANDIDATE}, dataset_keys=v1_datasets)
+    v1_candidate_scope = scoped(tabs={TAB_CANDIDATE}, dataset_keys={"candidates"})
 
-    def concordance_filter(fid, label, column):
-        return select_filter(
-            fid, label, [(conc, column)], concordance_ids, all_ids,
-            parent_ids=[device_filter_id],
-            tabs_in_scope=[tab_concordance],
-        )
+    v2_scope = scoped(tabs={TAB_MECHANISTIC}, dataset_keys={"candidates_v2"})
+    v2_source_scope = scoped(
+        tabs={TAB_MECHANISTIC},
+        dataset_keys={"candidates_v2", "candidate_boundary"},
+    )
 
-    def context_filter(fid, label, column):
-        return select_filter(
-            fid, label, [(ctx, column)], context_ids, all_ids,
-            tabs_in_scope=[tab_diag],
-        )
+    v3_scope = scoped(tabs={TAB_V3}, dataset_keys={"candidates_v3"})
+
+    curation_datasets = {"candidates", "candidates_v2", "concordance_enrichment"}
+    curation_scope = scoped(tabs={TAB_CONCORDANCE}, dataset_keys=curation_datasets)
+
+    physics_scope = scoped(tabs={TAB_PHYSICS}, dataset_keys={"context"})
 
     return [
-        select_filter(
+        make_filter(
             device_filter_id,
             "Device Type",
             [
-                (cand, "device_type"),
-                (cand_v2, "device_type"),
-                (ctx, "device_type"),
-                (dataset_ids["readiness"], "device_type"),
-                (dataset_ids["experiment_plan"], "measurement_device_type"),
-                (dataset_ids["destruction_boundary"], "device_type"),
-                (cand_v3, "device_type"),
-                (conc, "device_type"),
+                target(dataset_key, column)
+                for dataset_key, column in device_target_map.items()
             ],
-            candidate_ids + candidate_v2_ids + candidate_v3_ids + concordance_ids
-            + context_ids + readiness_ids + planning_ids + device_only_ids,
-            all_ids,
-            tabs_in_scope=[
-                tab_readiness, tab_candidate, tab_mechanistic, tab_v3,
-                tab_concordance, tab_diag,
+            device_scope,
+        ),
+        # v1: four controls on the v1 tab.
+        make_filter(
+            "NATIVE_FILTER-proxy-v1-event",
+            "v1 Target Event",
+            [
+                target("candidates", "target_event_type"),
+                target("candidate_summary", "target_event_type"),
             ],
+            v1_event_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-target-event", "Target Event", "target_event_type"
+        make_filter(
+            "NATIVE_FILTER-proxy-v1-source",
+            "v1 Candidate Source",
+            [
+                target("candidates", "candidate_source"),
+                target("candidate_summary", "candidate_source"),
+            ],
+            v1_event_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-target-tier", "Target Tier", "target_match_tier"
+        make_filter(
+            "NATIVE_FILTER-proxy-v1-claim",
+            "v1 Claim Status",
+            [
+                target("candidates", "proxy_claim_status"),
+                target("candidate_summary", "proxy_claim_status"),
+            ],
+            v1_event_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-target-let", "Target LET (MeV cm2/mg)",
-            "target_let_surface"
+        make_filter(
+            "NATIVE_FILTER-proxy-v1-evidence",
+            "v1 Evidence Class",
+            [target("candidates", "damage_signature_evidence_class")],
+            v1_candidate_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-candidate-source", "Candidate Source",
-            "candidate_source"
+        # v2: source also controls the candidate-boundary gap chart.
+        make_filter(
+            "NATIVE_FILTER-proxy-v2-event",
+            "v2 Target Event",
+            [target("candidates_v2", "target_event_type")],
+            v2_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-mechanism", "Mechanism Class",
-            "mechanism_match_class"
+        make_filter(
+            "NATIVE_FILTER-proxy-v2-source",
+            "v2 Candidate Source",
+            [
+                target("candidates_v2", "candidate_source"),
+                target("candidate_boundary", "source"),
+            ],
+            v2_source_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-status", "Candidate Status", "candidate_status"
+        make_filter(
+            "NATIVE_FILTER-proxy-v2-scope",
+            "v2 Match Scope",
+            [target("candidates_v2", "match_scope")],
+            v2_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-claim-status", "Proxy Claim Status",
-            "proxy_claim_status"
+        make_filter(
+            "NATIVE_FILTER-proxy-v2-claim",
+            "v2 Claim Status",
+            [target("candidates_v2", "proxy_claim_status")],
+            v2_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-confidence", "Replacement Confidence",
-            "replacement_confidence"
+        # v3: three controls on the v3 tab.
+        make_filter(
+            "NATIVE_FILTER-proxy-v3-event",
+            "v3 Target Event",
+            [target("candidates_v3", "target_event_type")],
+            v3_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-evidence-tier", "Evidence Tier",
-            "damage_evidence_tier"
+        make_filter(
+            "NATIVE_FILTER-proxy-v3-source",
+            "v3 Candidate Source",
+            [target("candidates_v3", "candidate_source")],
+            v3_scope,
         ),
-        candidate_filter(
-            "NATIVE_FILTER-proxy-target-regime", "Target Regime",
-            "target_stress_regime"
+        make_filter(
+            "NATIVE_FILTER-proxy-v3-scope",
+            "v3 Match Scope",
+            [target("candidates_v3", "match_scope")],
+            v3_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-regime", "v2 Target Regime",
-            "target_mechanistic_regime"
+        # Concordance filters deliberately target all three datasets used by
+        # the tab: the v1 queue, v2 queues, and enrichment/conflict views.
+        make_filter(
+            "NATIVE_FILTER-proxy-concordance-event",
+            "Review Target Event",
+            [
+                target("candidates", "target_event_type"),
+                target("candidates_v2", "target_event_type"),
+                target("concordance_enrichment", "target_event_type"),
+            ],
+            curation_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-status", "v2 Candidate Status",
-            "mechanistic_energy_candidate_status"
+        make_filter(
+            "NATIVE_FILTER-proxy-concordance-source",
+            "Review Candidate Source",
+            [
+                target("candidates", "candidate_source"),
+                target("candidates_v2", "candidate_source"),
+                target("concordance_enrichment", "v2_pick_source"),
+            ],
+            curation_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-claim-status", "v2 Proxy Claim Status",
-            "proxy_claim_status"
+        make_filter(
+            "NATIVE_FILTER-proxy-concordance-scope",
+            "Review Match Scope",
+            [
+                target("candidates", "match_scope"),
+                target("candidates_v2", "match_scope"),
+                target("concordance_enrichment", "v2_match_scope"),
+            ],
+            curation_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-scope", "v2 Match Scope", "match_scope"
+        make_filter(
+            "NATIVE_FILTER-proxy-concordance-claim",
+            "Review Claim Status",
+            [
+                target("candidates", "proxy_claim_status"),
+                target("candidates_v2", "proxy_claim_status"),
+                target("concordance_enrichment", "v2_proxy_claim_status"),
+            ],
+            curation_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-overlap", "v2 Severity Overlap",
-            "candidate_failure_fraction_overlap_class"
+        # Physics context: three controls. LET remains available in chart hover
+        # and Raw/QA without consuming another dashboard-level filter.
+        make_filter(
+            "NATIVE_FILTER-proxy-context-source",
+            "Context Source",
+            [target("context", "source")],
+            physics_scope,
         ),
-        candidate_v2_filter(
-            "NATIVE_FILTER-proxy-v2-source", "v2 Candidate Source",
-            "candidate_source"
+        make_filter(
+            "NATIVE_FILTER-proxy-context-regime",
+            "Context Regime",
+            [target("context", "stress_regime")],
+            physics_scope,
         ),
-        candidate_v3_filter(
-            "NATIVE_FILTER-proxy-v3-event", "v3 Target Event", "target_event_type"
-        ),
-        candidate_v3_filter(
-            "NATIVE_FILTER-proxy-v3-source", "v3 Candidate Source", "candidate_source"
-        ),
-        candidate_v3_filter(
-            "NATIVE_FILTER-proxy-v3-scope", "v3 Match Scope", "match_scope"
-        ),
-        concordance_filter(
-            "NATIVE_FILTER-proxy-concordance-event", "Concordance Target Event",
-            "target_event_type"
-        ),
-        concordance_filter(
-            "NATIVE_FILTER-proxy-concordance-scope", "Concordance Scope",
-            "v2_match_scope"
-        ),
-        concordance_filter(
-            "NATIVE_FILTER-proxy-concordance-source", "Concordance v2 Source",
-            "v2_pick_source"
-        ),
-        context_filter("NATIVE_FILTER-proxy-context-source", "Context Source", "source"),
-        context_filter(
-            "NATIVE_FILTER-proxy-context-regime", "Context Regime", "stress_regime"
-        ),
-        context_filter("NATIVE_FILTER-proxy-context-let", "Irradiation LET", "let_label"),
-        context_filter(
-            "NATIVE_FILTER-proxy-context-event", "Context Event Type", "event_type"
+        make_filter(
+            "NATIVE_FILTER-proxy-context-event",
+            "Context Event Type",
+            [target("context", "event_type")],
+            physics_scope,
         ),
     ]
 
@@ -1013,50 +1290,25 @@ def build_chart_defs(dataset_ids):
         "target_stress_record_key",
         "candidate_stress_record_key",
         "candidate_rank",
-        "decision_safe_rank",
         "device_type",
         "target_event_type",
-        "target_match_tier",
-        "target_energy_j",
-        "target_energy_comparability_class",
-        "target_energy_censored_reason",
         "candidate_source",
         "candidate_device_label",
         "candidate_stress_condition_label",
-        "candidate_energy_j",
-        "candidate_energy_comparability_class",
-        "candidate_status",
-        "replacement_confidence",
-        "proxy_claim_status",
-        "proxy_claim_basis",
         "match_scope",
-        "damage_evidence_tier",
+        "candidate_status",
+        "proxy_claim_status",
         "damage_signature_evidence_class",
-        "signature_claim_quality",
-        "damage_signature_coverage_score",
-        "damage_signature_missing_axes",
         "damage_signature_distance",
-        "coverage_adjusted_damage_signature_distance",
-        "measured_comparability_status",
-        "measured_match_scope",
-        "measured_sign_mismatch_axis_count",
-        "prediction_comparability_status",
-        "prediction_sign_mismatch_axis_count",
-        "waveform_distance",
         "best_damage_distance",
-        "combined_screening_distance",
-        "candidate_blockers",
         "proxy_claim_blockers",
-        "proxy_claim_summary",
     ]
     decision_safe_cols = [
         "target_stress_record_key",
         "candidate_stress_record_key",
         "decision_safe_rank",
-        "candidate_rank",
         "device_type",
         "target_event_type",
-        "target_match_tier",
         "candidate_source",
         "candidate_device_label",
         "candidate_stress_condition_label",
@@ -1067,11 +1319,7 @@ def build_chart_defs(dataset_ids):
         "damage_evidence_tier",
         "signature_claim_quality",
         "measured_comparability_status",
-        "measured_match_scope",
         "measured_sign_mismatch_axis_count",
-        "target_energy_comparability_class",
-        "candidate_energy_comparability_class",
-        "combined_screening_distance",
         "proxy_claim_blockers",
         "proxy_claim_summary",
     ]
@@ -2515,12 +2763,19 @@ def create_dashboard() -> int | None:
     print("\nCreating proxy-readiness charts...")
     charts_info = []
     chart_ids = []
-    groups = defaultdict(list)
-    for name, ds_id, viz_type, params, width, height, tab, group in build_chart_defs(dataset_ids):
+    deployed_defs = []
+    chart_defs = build_chart_defs(dataset_ids)
+    dataset_key_by_id = {dataset_id: key for key, dataset_id in dataset_ids.items()}
+    for definition in chart_defs:
+        name, ds_id, viz_type, params, width, height, tab, group = definition
         description = params.get("_description")
         if description is not None:
             params = {key: value for key, value in params.items()
                       if key != "_description"}
+        dataset_key = dataset_key_by_id[ds_id]
+        unit, evidence = DATASET_PROVENANCE[dataset_key]
+        provenance = f"Unit of analysis: {unit}. Evidence basis: {evidence}."
+        description = f"{description} {provenance}" if description else provenance
         cid, cuuid = create_chart(
             session, name, ds_id, viz_type, params, description=description
         )
@@ -2528,21 +2783,12 @@ def create_dashboard() -> int | None:
         if not cid:
             continue
         chart_ids.append(cid)
-        if group:
-            groups[group].append(cid)
-
-    chart_groups = {
-        "candidate": groups.get("candidate", []),
-        "candidate_v2": groups.get("candidate_v2", []),
-        "context": groups.get("context", []),
-        "readiness": groups.get("readiness", []),
-        "planning": groups.get("planning", []),
-        "device_only": groups.get("device_only", []),
-    }
+        deployed_defs.append(definition)
 
     print("\nBuilding proxy-readiness dashboard layout...")
     position_json = build_dashboard_layout(charts_info, MARKDOWN_PANELS)
-    native_filters = build_native_filters(chart_ids, dataset_ids, chart_groups)
+    chart_catalog = build_chart_catalog(deployed_defs, chart_ids)
+    native_filters = build_native_filters(chart_ids, dataset_ids, chart_catalog)
     json_metadata = build_json_metadata(chart_ids, native_filters)
     json_metadata["label_colors"] = CANDIDATE_COLORS
     json_metadata["shared_label_colors"] = CANDIDATE_COLORS

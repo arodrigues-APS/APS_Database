@@ -1560,8 +1560,12 @@ WITH vector_base AS (
             b.signature_axis_weight * POWER(COALESCE(b.signature_axis_distance, 3.0), 2)
           + b.duration_weight * POWER(COALESCE(b.duration_log_delta, 1.0), 2)
           + b.log_energy_weight * POWER(COALESCE(ABS(b.log_energy_delta), 5.0), 2)
+          -- Missing candidate destruction-boundary evidence must not silently
+          -- reuse terminal-energy overlap as a second, apparently independent
+          -- feature. The explicit missing-interval score is conservative and
+          -- remains visible through the basis/imputation columns emitted below.
           + b.failure_fraction_weight * POWER(COALESCE(b.failure_fraction_log_delta,
-                                                       b.terminal_energy_overlap_score), 2)
+                                                       b.failure_fraction_overlap_score), 2)
           + b.post_iv_damage_weight * POWER(COALESCE(b.best_damage_distance, 2.50), 2)
           + b.regime_path_weight * POWER(COALESCE(b.path_penalty, 0.75), 2)
           + b.coverage_gap_weight * POWER(b.damage_signature_coverage_gap, 2)
@@ -1637,6 +1641,12 @@ SELECT
     failure_fraction_log_delta,
     candidate_failure_fraction_overlap_class,
     failure_fraction_overlap_score,
+    (failure_fraction_log_delta IS NULL) AS failure_fraction_component_imputed,
+    CASE
+        WHEN failure_fraction_log_delta IS NOT NULL
+            THEN 'own_candidate_destruction_boundary'
+        ELSE 'explicit_missing_boundary_penalty'
+    END AS failure_fraction_component_basis,
     best_damage_distance,
     damage_signature_axes_used,
     damage_signature_coverage_score,

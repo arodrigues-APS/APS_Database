@@ -41,7 +41,7 @@ QUERY = """
             log_energy_weight * POWER(COALESCE(ABS(log_energy_delta), 5.0), 2)
                 AS log_energy_component_weighted_sq,
             failure_fraction_weight * POWER(
-                COALESCE(failure_fraction_log_delta, terminal_energy_overlap_score), 2
+                COALESCE(failure_fraction_log_delta, failure_fraction_overlap_score), 2
             ) AS failure_fraction_component_weighted_sq,
             post_iv_damage_weight * POWER(COALESCE(best_damage_distance, 2.50), 2)
                 AS post_iv_damage_component_weighted_sq,
@@ -75,6 +75,7 @@ QUERY = """
         damage_signature_coverage_gap, regime_match_class, path_penalty,
         signature_axis_weight, duration_weight, log_energy_weight, failure_fraction_weight,
         post_iv_damage_weight, regime_path_weight, coverage_gap_weight,
+        failure_fraction_component_imputed, failure_fraction_component_basis,
         signature_component_weighted_sq, duration_component_weighted_sq,
         log_energy_component_weighted_sq, failure_fraction_component_weighted_sq,
         post_iv_damage_component_weighted_sq, regime_path_component_weighted_sq,

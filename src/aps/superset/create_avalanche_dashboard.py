@@ -35,11 +35,19 @@ Usage:
 """
 
 import sys
+from functools import partial
 
 from aps.superset.superset_api import (get_session, find_database, find_or_create_dataset,
-                          refresh_dataset_columns, create_chart,
+                          refresh_dataset_columns, create_chart as create_api_chart,
                           create_or_update_dashboard, build_json_metadata)
 from aps.db_config import SUPERSET_URL
+from aps.superset.nonproxy_dashboard_support import (
+    DASHBOARD_GUIDANCE,
+    build_tabbed_layout,
+    create_documented_chart,
+)
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 DASHBOARD_TITLE = "Avalanche"
 DASHBOARD_SLUG  = "avalanche"
@@ -48,59 +56,10 @@ DASHBOARD_SLUG  = "avalanche"
 # ── Dashboard Layout ─────────────────────────────────────────────────────────
 
 def build_dashboard_layout(tab_defs):
-    layout = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {
-            "type": "GRID", "id": "GRID_ID",
-            "children": [], "parents": ["ROOT_ID"],
-        },
-        "HEADER_ID": {
-            "type": "HEADER", "id": "HEADER_ID",
-            "meta": {"text": DASHBOARD_TITLE},
-        },
-    }
-
-    tabs_id = "TABS-avl"
-    layout["GRID_ID"]["children"] = [tabs_id]
-    layout[tabs_id] = {
-        "type": "TABS", "id": tabs_id,
-        "children": [td[1] for td in tab_defs],
-        "parents": ["ROOT_ID", "GRID_ID"],
-    }
-
-    for tab_name, tab_id, chart_list in tab_defs:
-        tab_parents = ["ROOT_ID", "GRID_ID", tabs_id, tab_id]
-        row_ids = []
-        for i, (cid, cuuid, cname, width, height) in enumerate(chart_list):
-            if cid is None:
-                continue
-            row_id   = f"ROW-{tab_id}-{i}"
-            chart_key = f"CHART-{tab_id}-{i}"
-            layout[row_id] = {
-                "type": "ROW", "id": row_id,
-                "children": [chart_key],
-                "parents": tab_parents,
-                "meta": {"background": "BACKGROUND_TRANSPARENT"},
-            }
-            layout[chart_key] = {
-                "type": "CHART", "id": chart_key, "children": [],
-                "parents": tab_parents + [row_id],
-                "meta": {
-                    "chartId": cid, "width": width, "height": height,
-                    "sliceName": cname, "uuid": cuuid,
-                },
-            }
-            row_ids.append(row_id)
-
-        layout[tab_id] = {
-            "type": "TAB", "id": tab_id,
-            "children": row_ids,
-            "parents": ["ROOT_ID", "GRID_ID", tabs_id],
-            "meta": {"text": tab_name},
-        }
-
-    return layout
+    return build_tabbed_layout(
+        DASHBOARD_TITLE, "avl", tab_defs,
+        {"*": DASHBOARD_GUIDANCE["avalanche"]},
+    )
 
 
 # ── Native Filters ───────────────────────────────────────────────────────────
@@ -299,7 +258,7 @@ def waveform_params(y_col, y_label, y_title):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -338,7 +297,7 @@ def energy_scaling_params(x_col, x_title, y_col, y_label, y_title):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": True,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": True,
@@ -405,7 +364,7 @@ def prepost_curve_params(x_axis, cat, x_title, y_title, bias_col=None):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -448,7 +407,7 @@ def individual_curve_params(x_axis, cat, x_title, y_title):
         "y_axis_bounds": [None, None],
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": False,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "series_limit": 50,
         "series_limit_metric": {
@@ -653,21 +612,32 @@ def main():
             waveform_ds,
             "echarts_timeseries_line",
             waveform_params("vds", "Vds (V)", "V_DS (V)"),
-            12, 60,
+            6, 60,
         ),
         (
             "Avl – Waveform: Id vs Time",
             waveform_ds,
             "echarts_timeseries_line",
             waveform_params("id_drain", "Id (A)", "I_D (A)"),
-            12, 60,
+            6, 60,
         ),
         (
             "Avl – Waveform: Vgs vs Time",
             waveform_ds,
             "echarts_timeseries_line",
             waveform_params("vgs", "Vgs (V)", "V_GS (V)"),
-            12, 60,
+            6, 60,
+        ),
+        (
+            "Avl – Waveform: Instantaneous Power vs Time",
+            waveform_ds,
+            "echarts_timeseries_line",
+            waveform_params(
+                "ABS(vds * id_drain)",
+                "|Vds × Id| (W)",
+                "Instantaneous terminal power (W)",
+            ),
+            6, 60,
         ),
     ]
 

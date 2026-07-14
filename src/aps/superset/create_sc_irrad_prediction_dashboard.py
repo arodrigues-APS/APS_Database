@@ -25,17 +25,21 @@ Usage:
 
 import json
 import sys
+from functools import partial
 
 from aps.db_config import SUPERSET_URL, get_connection
+from aps.superset.nonproxy_dashboard_support import create_documented_chart
 from aps.superset.superset_api import (
     get_session,
     find_database,
     find_or_create_dataset,
     refresh_dataset_columns,
-    create_chart,
+    create_chart as create_api_chart,
     create_or_update_dashboard,
     build_json_metadata,
 )
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 
 DASHBOARD_TITLE = "Predicted Irradiation Damage Equivalence"
@@ -252,14 +256,15 @@ def build_native_filters(chart_ids, fp_ds_id, match_ds_id, coverage_ds_id,
     axes_id = "NATIVE_FILTER-pred-axes"
     status_id = "NATIVE_FILTER-pred-status"
 
-    all_targets = lambda col: [
-        {"datasetId": fp_ds_id, "column": {"name": col}},
-        {"datasetId": match_ds_id, "column": {"name": col}},
-        {"datasetId": coverage_ds_id, "column": {"name": col}},
-        {"datasetId": segment_ds_id, "column": {"name": col}},
-        {"datasetId": validation_ds_id, "column": {"name": col}},
-        {"datasetId": support_ds_id, "column": {"name": col}},
-    ]
+    def all_targets(col):
+        return [
+            {"datasetId": fp_ds_id, "column": {"name": col}},
+            {"datasetId": match_ds_id, "column": {"name": col}},
+            {"datasetId": coverage_ds_id, "column": {"name": col}},
+            {"datasetId": segment_ds_id, "column": {"name": col}},
+            {"datasetId": validation_ds_id, "column": {"name": col}},
+            {"datasetId": support_ds_id, "column": {"name": col}},
+        ]
 
     return [
         filter_select(

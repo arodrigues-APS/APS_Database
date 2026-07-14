@@ -47,6 +47,24 @@ def test_full_manifest_has_valid_dependency_references():
     assert any(step.name == "build-proxy-analytics" for step in selected)
 
 
+def test_interactive_viewer_declares_every_generated_input():
+    steps = {step.name: step for step in default_steps()}
+    viewer = steps["viewer-interactive-damage-signature"]
+
+    assert set(viewer.depends_on) == {
+        "viewer-source-damage-signature",
+        "viewer-damage-signature-delta",
+        "export-proxy-energy-v2",
+        "export-proxy-concordance",
+        "export-proxy-combined-v3",
+        "export-proxy-method-comparison",
+    }
+    assert steps["export-proxy-method-comparison"].command == (
+        "-m",
+        "aps.exports.export_proxy_method_comparison_union_csv",
+    )
+
+
 def test_unsafe_partial_model_run_is_rejected():
     with pytest.raises(PipelineSelectionError, match="build-proxy-analytics ->"):
         select_steps(default_steps(), only=("build-proxy-analytics",))

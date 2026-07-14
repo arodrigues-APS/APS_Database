@@ -148,6 +148,10 @@ def _print_model_plan(name: str, output: TextIO) -> None:
     print(f"model: {plan.name}", file=output)
     print(f"checksum: {plan.checksum}", file=output)
     print(f"build mode: {plan.build_mode}", file=output)
+    print(
+        f"activation setting: {plan.activation_setting or 'always enabled'}",
+        file=output,
+    )
     for field, values in (
         ("sql", plan.files),
         ("upstream dependencies", plan.dependencies),

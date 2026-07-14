@@ -48,6 +48,7 @@ class ModelDefinition:
     required_relations: tuple[str, ...] = ()
     expected_relations: tuple[str, ...] = ()
     build_mode: str = "replace"
+    activation_setting: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class ModelPlan:
     required_relations: tuple[str, ...]
     expected_relations: tuple[str, ...]
     build_mode: str
+    activation_setting: str | None
 
 
 @dataclass(frozen=True)
@@ -96,11 +98,28 @@ PROXY_ANALYTICS = ModelDefinition(
         "stress_energy_equivalence_features",
         "stress_proxy_candidate_energy_v2",
         "stress_proxy_candidate_combined_v3",
+        "stress_proxy_method_comparison_union_view",
     ),
 )
 
+LEGACY_CV_DPT = ModelDefinition(
+    name="legacy-cv-dpt",
+    description=(
+        "Opt-in compatibility views over the frozen legacy CV and double-pulse "
+        "snapshot; disabled until importer parity is accepted."
+    ),
+    sql_paths=(SCHEMA_DIR / "030_dynamic_characterization.sql",),
+    required_relations=("public.cpvd", "public.dptgraphs", "public.dptslopes"),
+    expected_relations=(
+        "cv_characterization_view",
+        "dpt_characterization_view",
+        "dpt_switching_metric_view",
+    ),
+    activation_setting="APS_ENABLE_LEGACY_CV_DPT",
+)
+
 MODEL_REGISTRY = {
-    definition.name: definition for definition in (PROXY_ANALYTICS,)
+    definition.name: definition for definition in (PROXY_ANALYTICS, LEGACY_CV_DPT)
 }
 
 MODEL_BUILDS_LEDGER_SQL = """
@@ -188,6 +207,7 @@ def model_plan(name: str | ModelDefinition) -> ModelPlan:
         required_relations=model.required_relations,
         expected_relations=model.expected_relations,
         build_mode=model.build_mode,
+        activation_setting=model.activation_setting,
     )
 
 
@@ -309,6 +329,8 @@ def build_model(
     from psycopg2.extras import Json
 
     active_settings = settings or get_settings()
+    if model.activation_setting == "APS_ENABLE_LEGACY_CV_DPT":
+        active_settings.require_legacy_cv_dpt_enabled()
     source = collect_source_provenance()
     require_clean_production_source(
         active_settings,

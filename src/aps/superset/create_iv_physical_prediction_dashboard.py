@@ -25,18 +25,25 @@ Usage:
 
 import json
 import sys
-from pathlib import Path
+from functools import partial
 
 from aps.db_config import SUPERSET_URL, get_connection
+from aps.superset.nonproxy_dashboard_support import (
+    DASHBOARD_GUIDANCE,
+    build_tabbed_layout,
+    create_documented_chart,
+)
 from aps.superset.superset_api import (
     get_session,
     find_database,
     find_or_create_dataset,
     refresh_dataset_columns,
-    create_chart,
+    create_chart as create_api_chart,
     create_or_update_dashboard,
     build_json_metadata,
 )
+
+create_chart = partial(create_documented_chart, create_api_chart)
 
 
 DASHBOARD_TITLE = "Post-IV Physical Prediction Validation Diagnostics"
@@ -51,9 +58,6 @@ FLAG_VIEW = "iv_physical_prediction_quality_flag_view"
 PARAM_SUMMARY_VIEW = "iv_physical_parameter_prediction_summary_view"
 CURVE_VIEW = "iv_physical_curve_prediction_view"
 CURVE_SHAPE_VIEW = "iv_physical_curve_shape_plot_view"
-
-from aps.paths import REPO_ROOT
-SCHEMA_PATH = REPO_ROOT / "schema" / "024_iv_physical_prediction.sql"
 
 TARGET_COLORS = {
     "IdVg / delta Vth": "#1f77b4",
@@ -75,12 +79,6 @@ TARGET_COLORS = {
     "sc": "#1f77b4",
     "irradiation": "#d55e00",
 }
-
-
-def apply_schema():
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(SCHEMA_PATH.read_text())
-        conn.commit()
 
 
 def ensure_views_exist():
@@ -394,7 +392,7 @@ def curve_shape_line_params(target_type, x_title):
         "tooltipTimeFormat": "smart_date",
         "markerEnabled": True,
         "markerSize": 4,
-        "connectNulls": True,
+        "connectNulls": False,
         "zoomable": True,
         "sort_series_type": "max",
         "sort_series_ascending": False,
@@ -409,86 +407,32 @@ def curve_shape_line_params(target_type, x_title):
 
 
 def build_dashboard_layout(charts):
-    layout_map = {
-        "idvg_curve_shapes": ("CHART-idvg-curve-shapes", "ROW-idvg-curve-shapes"),
-        "idvd_curve_shapes": ("CHART-idvd-curve-shapes", "ROW-idvd-curve-shapes"),
-        "param_summary": ("CHART-param-summary", "ROW-param-summary"),
-        "curve_table": ("CHART-curve-table", "ROW-curve-table"),
-        "summary": ("CHART-summary", "ROW-summary"),
-        "gates": ("CHART-gates", "ROW-gates"),
-        "support": ("CHART-support", "ROW-support"),
-        "predobs": ("CHART-predobs", "ROW-predobs"),
-        "resdist": ("CHART-resdist", "ROW-resdist"),
-        "validation_table": ("CHART-validation-table", "ROW-validation-table"),
-        "feature_bar": ("CHART-feature-bar", "ROW-feature-bar"),
-        "pair_table": ("CHART-pair-table", "ROW-pair-table"),
-        "feature_table": ("CHART-feature-table", "ROW-feature-table"),
-        "flag_table": ("CHART-flag-table", "ROW-flag-table"),
-    }
-    row_order = [
-        "idvg_curve_shapes",
-        "idvd_curve_shapes",
-        "param_summary",
-        "curve_table",
-        "summary",
-        "gates",
-        "support",
-        "predobs",
-        "resdist",
-        "validation_table",
-        "feature_bar",
-        "pair_table",
-        "feature_table",
-        "flag_table",
+    groups = [
+        ("Readiness & Gates", "TAB-ivphys-readiness", ["summary", "gates", "support"]),
+        ("Held-out Validation", "TAB-ivphys-validation", ["predobs", "resdist", "validation_table"]),
+        ("Generated Predictions", "TAB-ivphys-predictions", ["param_summary", "idvg_curve_shapes", "idvd_curve_shapes", "curve_table"]),
+        ("Model Evidence & QA", "TAB-ivphys-qa", ["feature_bar", "pair_table", "feature_table", "flag_table"]),
     ]
-    visible_rows = [
-        layout_map[key][1]
-        for key in row_order
-        if key in charts and charts[key][0] is not None
+    tab_defs = [
+        (name, tab_id, [charts[key] for key in keys if key in charts])
+        for name, tab_id, keys in groups
     ]
-    layout = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {
-            "type": "GRID",
-            "id": "GRID_ID",
-            "children": visible_rows,
-            "parents": ["ROOT_ID"],
-        },
-        "HEADER_ID": {
-            "type": "HEADER",
-            "id": "HEADER_ID",
-            "meta": {"text": DASHBOARD_TITLE},
-        },
+    guidance = {
+        "TAB-ivphys-readiness": DASHBOARD_GUIDANCE["post-iv-physical-prediction"],
+        "TAB-ivphys-validation": (
+            "### Held-out validation\n\nObserved-versus-predicted and residual views use only "
+            "supported held-out pairs. Read the target unit and configured gate limit before comparing errors."
+        ),
+        "TAB-ivphys-predictions": (
+            "### Generated outputs\n\nUse only after the selected target gate passes. Curves retain model, "
+            "support, confidence, reference-tier, and validation-mode provenance."
+        ),
+        "TAB-ivphys-qa": (
+            "### Model evidence and blockers\n\nFeature importance is descriptive, not causal. Pair and quality "
+            "tables expose donor support and reasons a prediction is unsupported."
+        ),
     }
-    for key in row_order:
-        if key not in charts:
-            continue
-        cid, cuuid, cname, _width, height = charts[key]
-        if cid is None:
-            continue
-        chart_id, row_id = layout_map[key]
-        layout[row_id] = {
-            "type": "ROW",
-            "id": row_id,
-            "children": [chart_id],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        }
-        layout[chart_id] = {
-            "type": "CHART",
-            "id": chart_id,
-            "children": [],
-            "parents": ["ROOT_ID", "GRID_ID", row_id],
-            "meta": {
-                "chartId": cid,
-                "width": 12,
-                "height": height,
-                "sliceName": cname,
-                "uuid": cuuid,
-            },
-        }
-    return layout
+    return build_tabbed_layout(DASHBOARD_TITLE, "ivphys", tab_defs, guidance)
 
 
 def filter_select(filter_id, name, targets, chart_ids, cascade=None):
@@ -671,8 +615,7 @@ def build_native_filters(chart_ids, datasets, chart_groups):
 def main():
     print(f"Creating {DASHBOARD_TITLE} dashboard\n" + "=" * 62)
 
-    print("1. Applying V2 prediction schema and dashboard views ...")
-    apply_schema()
+    print("1. Verifying prepared V2 prediction views ...")
     ensure_views_exist()
     print("   OK")
 

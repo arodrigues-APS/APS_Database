@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from aps.db.models import ModelDefinition, model_checksum, model_plan
+import pytest
+
+from aps.config import ConfigurationError, Settings
+from aps.db.models import ModelDefinition, build_model, model_checksum, model_plan
 
 
 def test_proxy_model_plan_owns_all_three_analytical_sql_assets():
@@ -13,6 +16,26 @@ def test_proxy_model_plan_owns_all_three_analytical_sql_assets():
         "schema/029_proxy_viz_support.sql",
     )
     assert "stress_proxy_candidate_combined_v3" in plan.expected_relations
+    assert "stress_proxy_method_comparison_union_view" in plan.expected_relations
+
+
+def test_legacy_cv_dpt_model_is_registered_but_disabled_by_default():
+    plan = model_plan("legacy_cv_dpt")
+
+    assert plan.files == ("schema/030_dynamic_characterization.sql",)
+    assert plan.activation_setting == "APS_ENABLE_LEGACY_CV_DPT"
+    assert plan.required_relations == (
+        "public.cpvd",
+        "public.dptgraphs",
+        "public.dptslopes",
+    )
+
+    with pytest.raises(ConfigurationError, match="legacy CV/DPT is disabled"):
+        build_model(
+            None,
+            "legacy-cv-dpt",
+            settings=Settings.from_environ({"APS_PROFILE": "test"}),
+        )
 
 
 def test_model_checksum_covers_file_names_and_contents(tmp_path: Path):

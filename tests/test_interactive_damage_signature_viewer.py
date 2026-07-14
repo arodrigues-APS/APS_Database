@@ -22,6 +22,8 @@ from aps.viewers.create_interactive_damage_signature_viewer import (
     energy_balance_plot_payload,
     energy_delta_plot_payload,
     irradiation_energy_summary,
+    method_comparator_payload,
+    method_transition_payload,
     overview_payload,
     reciprocal_enrichment_payload,
     v2_interval_overlap_plot_payload,
@@ -237,6 +239,77 @@ class ExporterHelperTests(unittest.TestCase):
         self.assertEqual(_flatten_array(None), "")
         self.assertEqual(_flatten_array("already"), "already")
         self.assertEqual(_flatten_queue_array(("x", "y")), "x; y")
+
+
+class MethodComparatorPayloadTests(unittest.TestCase):
+    @staticmethod
+    def _frame():
+        base = {
+            "target_stress_record_key": "irradiation|DUT-A|target-1",
+            "device_type": "DUT-A",
+            "v1_winner_key": "candidate-a",
+            "v2_winner_key": "candidate-b",
+            "v3_winner_key": "candidate-a",
+            "transition_class": "v3_follows_v1",
+            "truth_validation_status": "no_curated_truth",
+            "picked_by_method_count": 2,
+        }
+        a = {**base, "candidate_stress_record_key": "candidate-a",
+             "candidate_source": "avalanche", "picked_by_v1": True,
+             "picked_by_v2": False, "picked_by_v3": True,
+             "v1_rank": 1, "v1_rank_percentile": 2.0,
+             "v2_rank": None, "v2_rank_percentile": None,
+             "v2_rank_unavailable_reason": "outside_materialized_v2_top10",
+             "v3_rank": 1, "v3_rank_percentile": 10.0,
+             "v1_first_losing_criterion": "winner",
+             "v2_first_losing_criterion": "rank_not_materialized_outside_top10",
+             "v3_first_losing_criterion": "winner"}
+        b = {**base, "candidate_stress_record_key": "candidate-b",
+             "candidate_source": "short_circuit", "picked_by_method_count": 1,
+             "picked_by_v1": False, "picked_by_v2": True, "picked_by_v3": False,
+             "v1_rank": 5, "v1_rank_percentile": 10.0,
+             "v2_rank": 1, "v2_rank_percentile": 1.5,
+             "v3_rank": 2, "v3_rank_percentile": 20.0,
+             "v1_first_losing_criterion": "within_evidence_mask_signature_rank",
+             "v2_first_losing_criterion": "winner",
+             "v3_first_losing_criterion": "combined_vector_distance_or_tiebreaker"}
+        return pd.DataFrame([a, b])
+
+    def test_connects_every_union_winner_and_uses_explicit_na_rail(self):
+        payload = method_comparator_payload(self._frame())
+        self.assertEqual(len(payload["traces"]), 2)
+        by_name = {trace["name"]: trace for trace in payload["traces"]}
+        self.assertEqual(by_name["candidate-a"]["y"], [2.0, 110.0, 10.0])
+        self.assertEqual(by_name["candidate-a"]["text"], ["★", "", "★"])
+        self.assertIn("outside_materialized_v2_top10", by_name["candidate-a"]["customdata"][1])
+        self.assertEqual(len(payload["comparisonRows"]), 2)
+        self.assertIn("N/A is an availability rail", payload["note"])
+
+    def test_transition_counts_one_target_not_union_rows(self):
+        payload = method_transition_payload(self._frame())
+        self.assertEqual(len(payload["traces"]), 1)
+        trace = payload["traces"][0]
+        self.assertEqual(sum(trace["y"]), 1)
+        self.assertEqual(trace["y"][trace["x"].index("v3_follows_v1")], 1)
+
+    def test_stale_comparison_export_fails_to_an_explanatory_empty_payload(self):
+        stale = self._frame().drop(
+            columns=["picked_by_method_count", "transition_class"]
+        )
+        comparator = method_comparator_payload(stale)
+        transitions = method_transition_payload(stale)
+
+        self.assertEqual(comparator["traces"], [])
+        self.assertIn("picked_by_method_count", comparator["note"])
+        self.assertEqual(transitions["traces"], [])
+        self.assertIn("transition_class", transitions["note"])
+
+    def test_template_exposes_comparator_and_archives_unsafe_views(self):
+        self.assertIn('data-view="comparator"', HTML_TEMPLATE)
+        self.assertIn('id="target-filter"', HTML_TEMPLATE)
+        self.assertIn("archive: 3D diagnostics", HTML_TEMPLATE)
+        self.assertNotIn('data-subview="reciprocal"', HTML_TEMPLATE)
+        self.assertNotIn('data-subview="v3agreement"', HTML_TEMPLATE)
 
 
 class V2SeverityParityPayloadTests(unittest.TestCase):
