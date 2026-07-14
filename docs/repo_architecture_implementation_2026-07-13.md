@@ -131,10 +131,13 @@ NAS working tree is not independently portable to another machine. A new host
 must clone the repository normally or create its own separate Git directory;
 it must not copy this pointer and assume the local path exists.
 
-The safe and broken-metadata copies must be retained until the release commits
-are pushed to a durable remote. The active metadata directory is now the only
-copy that should receive new commits; the `/tmp` and `-safe` copies are
-recovery snapshots and must not be used concurrently.
+The active metadata directory is now the only copy that should receive new
+commits; the `/tmp` and `-safe` copies are recovery snapshots and must not
+be used concurrently. Release A and the Release B bootstrap became durable on
+the private remote on 2026-07-14 when
+`architecture-foundation-2026-07` was pushed through commit `46629d9`.
+The safe and broken-metadata copies must still be retained until the Release C
+code and implementation-record commits are also present on the remote.
 
 ### Locked Claude worktree disposition
 
@@ -192,8 +195,8 @@ checkout, or systemd schedule has been adopted.
 
 ## Release B implementation log
 
-Status: **in progress; production mutation paused at the durability and
-privilege gates**.
+Status: **in progress; source durability is established, and production
+mutation is paused at the privilege/configuration gate**.
 
 Release B discovery and safety actions completed on 2026-07-14:
 
@@ -226,28 +229,96 @@ legacy timer was the only production-state action and is reversible.
 
 Remaining Release B gates:
 
-1. The user explicitly approved pushing private repository changes to
-   `git@github.com:arodrigues-APS/APS_Database.git` on 2026-07-14. The
-   execution safety layer still prohibited the push, so the operator must run
-   the documented one-line push command directly. Release A remains local
-   until that command succeeds.
-2. This session has no non-interactive sudo authorization. The guarded
+1. This session has no non-interactive sudo authorization. The guarded
    `scripts/bootstrap_release_b_systemd.sh` procedure now provisions
    `/etc/aps/aps.env`, preserves old unit files, installs the system units,
    reloads systemd, and proves the timer is disabled. It must be run by an
    authorized operator; no password will be requested or stored by this
    implementation process.
-3. After durability and configuration are established: fast-forward `/opt`,
+2. After configuration is established: fast-forward `/opt`,
    baseline the reviewed migration prefix through
    `026_irradiation_energy_windows.sql`, apply migration 031, build the
    repeatable proxy model, run production smoke checks, and execute one
    attended nightly shadow run.
-4. Enable the new timer only if the shadow run, ledgers, backups, logs,
+3. Enable the new timer only if the shadow run, ledgers, backups, logs,
    artifacts, mounts, and failure recorder all verify successfully.
 
 ## Release C implementation log
 
-Status: **not started; blocked on Release B acceptance**.
+Status: **repository implementation and production-sized disposable
+verification complete; production release remains blocked on Release B
+acceptance**.
+
+Release C was reviewed and implemented without applying its schema, Superset
+metadata, application code, or services to production. The resulting
+repository changes were committed as `87b43f9`
+(`Add evidence-safe proxy and dashboard comparisons`) and are:
+
+- corrected the v3 score so missing candidate destruction-boundary evidence
+  uses the declared failure-fraction overlap penalty instead of silently
+  reusing terminal-energy overlap, and made the comparison decomposition use
+  the same term;
+- added a complete v1/v2/v3 winner-union model and CSV export that retains
+  official winners even when a v1 winner falls outside v2's materialized
+  top-10, exposes rank availability explicitly, records full shared source
+  provenance, and labels the evidence as screening-only;
+- added the comparison export to the nightly DAG and made the interactive
+  viewer declare all of its upstream exports/models rather than depending on
+  tuple order or accepting stale CSV contracts;
+- registered the legacy CV/DPT compatibility views as the
+  `legacy-cv-dpt` repeatable model, with a strict
+  `APS_ENABLE_LEGACY_CV_DPT` activation setting that defaults to false and
+  refuses a build before taking the model lock or writing a ledger row;
+- kept dashboard builders out of DDL ownership and added contract tests for
+  dataset provenance, chart/filter scope, and comparison semantics;
+- added shared non-proxy dashboard presentation support while preserving
+  existing dashboard identity/slug behavior;
+- made chart-description backfill and portfolio reconciliation dry-run by
+  default, verify both dashboard ID and title before mutation, and refuse the
+  entire apply if any identity is inconsistent; and
+- designated dashboards 14, 16, 28, and 33 as title-verified archive targets.
+  Dashboard 33 is included because production currently publishes the legacy
+  CV/DPT presentation even though the compatibility model is disabled by
+  policy.
+
+Production read-only inspection found that the live database already contains
+relations shaped like the in-progress v3/comparison work and that all 2,754
+comparison rows lack curated truth. That is useful compatibility evidence but
+is not proof of how those objects were deployed and is not a substitute for
+the model ledger. No Release C production mutation was performed.
+
+The exact Release C code content later committed as `87b43f9` was tested
+against a full restore of
+`mosfets-releaseB-20260713T160523Z.dump` in an isolated PostgreSQL 15
+container:
+
+- the restore completed successfully and reproduced 5,275 baseline metadata
+  records, 43 device-library rows, 8 irradiation campaigns, 20 irradiation
+  runs, and the expected empty avalanche campaign set;
+- a from-source `proxy-analytics` build succeeded with checksum
+  `fcf6204f3a8d`, producing 8,190 v3 candidates and 2,754 comparison rows
+  across 1,300 targets;
+- the maximum absolute error between the comparison component decomposition
+  and the official v3 distance was exactly zero, with zero winner-contract
+  violations;
+- all 1,466 comparison rows with an available v3 rank used the explicit
+  missing-boundary penalty consistently, rather than terminal-energy reuse;
+- the target transitions were 1 `all_three_same`, 481
+  `v2_winner_unavailable`, 182 `v3_follows_v2`, and 636
+  `v3_selects_third_candidate`;
+- the disabled legacy build refused with exit code 2 and no build record; an
+  explicitly enabled disposable build then succeeded with exact source/view
+  parity for CV (7,236), DPT waveforms (1,273,141), and DPT switching metrics
+  (189); and
+- the comparison exporter wrote exactly 2,754 data rows with one consistent
+  full Git revision, dirty-state flag, source fingerprint, and Git-available
+  flag.
+
+This establishes database compatibility and internal scientific consistency
+for the candidate. It does not establish a production release: Release C must
+be pushed, deployed only after Release B, applied through the registered
+model/dashboard paths, and verified against the release manifest before it can
+be called successful.
 
 ## Verification ledger
 
@@ -264,19 +335,29 @@ and whether it was offline, disposable-service, or production evidence.
 | 2026-07-14 | Release B production discovery | Release backups passed recorded SHA-256 checks; prior restored fingerprints matched current APS and Superset catalog counts; production ledgers absent; deployed `6ac2594` confirmed ancestor of `27d882f` | Adoption boundary established without database mutation |
 | 2026-07-14 | Nightly safety gate | Legacy user timer had repeated failures through 2026-07-14; timer disabled and stopped before next trigger; final state `disabled`/`inactive` | Known-failing unattended mutation prevented pending shadow verification |
 | 2026-07-14 | Release B operator bootstrap | Shell syntax and systemd unit verification passed; non-root execution refused before mutation; 17 focused tests and Ruff passed; boundary test proves the script contains no start, restart, or enable operation | Root bootstrap is reviewable and fail-closed; operator execution remains pending |
+| 2026-07-14 | Private remote durability | Operator push created and configured `origin/architecture-foundation-2026-07`; local and remote both resolved to `46629d9b5e2fab0740331755e6e17ddd6c025f60` | Release A and Release B bootstrap are durable; later Release C commits still require a follow-up push |
+| 2026-07-14 | Release C production read-only audit | Existing proxy-v3/comparison catalogs and Superset dashboard IDs/titles inspected; 2,754 comparison rows all reported `no_curated_truth`; dashboard 33 was published despite the disabled legacy policy | Compatibility and policy drift identified without production mutation |
+| 2026-07-14 | Release C full production-snapshot restore/build | PostgreSQL 15 restore succeeded; source fingerprints matched; proxy model build succeeded; 8,190 v3 rows, 2,754 comparison rows/1,300 targets, exact component equality, zero winner violations; gated legacy build refusal and explicitly enabled parity build both passed | Production-sized database gate passed in a disposable service; not deployment evidence |
+| 2026-07-14 | Release C exporter and PostgreSQL lifecycle | Comparison CSV contained 2,754 rows plus header and consistent full provenance; 4 explicitly selected integration tests passed | Export provenance and real lifecycle behavior verified against disposable PostgreSQL |
+| 2026-07-14 | Release C repository regression | 327 default tests and 36 subtests passed, 10 integration/production-smoke tests correctly deselected; all changed Python passed Ruff; the complete source/test tree compiled; `git diff --check` passed | Release C change scope is green; repository-wide Ruff still has 59 pre-existing errors in untouched legacy modules |
 
 ## Open release gates
 
-- The local recovery branch has no upstream. Release commits must be pushed to
-  a durable remote before a release is accepted. Approval has been granted,
-  but the execution safety layer requires the repository owner to run the
-  documented push command directly.
-- The local safe copy and preserved broken CIFS metadata must be retained until
-  those release commits are present on the remote.
-- Data and Superset backups must be restored successfully before production
-  mutation.
-- Environment files, credential rotation, database adoption, `/opt`
-  deployment, service installation/restart, smoke checks, nightly shadowing,
-  and timer enablement remain unapplied. Backup checksum and disposable-restore
-  evidence is present and catalog fingerprints match; a final release manifest
-  still needs to bind that evidence to the deployed SHA.
+- Release A and the Release B bootstrap are on the private remote at
+  `46629d9`. Release C code commit `87b43f9` and the implementation-record
+  commit must be pushed before deployment, and the local safe copy plus
+  preserved broken CIFS metadata must be retained until that succeeds.
+- The guarded sudo bootstrap must create and validate `/etc/aps/aps.env` and
+  install the system units while proving the nightly timer remains disabled.
+- Credential provisioning/rotation, exact migration adoption, `/opt`
+  fast-forward deployment, proxy model build, Flask/service smoke checks, and
+  one attended nightly shadow remain unapplied.
+- The timer may be enabled only after the shadow run verifies ledgers,
+  backups, logs, artifacts, mounts, failure recording, and service identity.
+- Release C must then be deployed as a separate reviewed commit, its registered
+  models built, its Superset dry-runs reviewed before explicit apply, and its
+  dashboard identities and screening-only evidence policy verified.
+- A final release manifest must bind the backup checksums, deployed Git SHA,
+  migration/model ledger rows, Superset reconciliation result, smoke results,
+  and rollback point. Only that evidence closes Release C and permits a
+  production-success report.
