@@ -44,6 +44,45 @@ Restore both dumps into disposable databases/containers. Verify:
 
 A backup is not a rehearsed rollback until this restore has succeeded.
 
+## Release B system bootstrap
+
+The tracked bootstrap installs the root-owned environment contract and system
+units, but it intentionally does not deploy code, restart the web service,
+start the nightly service, or enable the timer.
+
+The first invocation creates the environment template and exits with status 3.
+Use `sudoedit` so credentials do not appear in shell history:
+
+```bash
+cd /home/arodrigues/APS_Database/APS_Database
+git status --short
+sudo ./scripts/bootstrap_release_b_systemd.sh
+sudoedit /etc/aps/aps.env
+```
+
+For this host, the non-secret path values are:
+
+```text
+APS_DATA_ROOT=/home/arodrigues/APS_Database
+APS_NAS_ROOT=/home/arodrigues/NAS/Common_Files
+APS_WEB_TOOLS_DIR=/home/arodrigues/APS_Database/tools
+```
+
+Provision the database, Superset, and Flask secrets from their authorized
+credential sources. Keep `APS_PROFILE=production` and
+`APS_ENABLE_LEGACY_CV_DPT=0`. After saving the file, rerun the bootstrap:
+
+```bash
+sudo ./scripts/bootstrap_release_b_systemd.sh
+sudo systemctl is-enabled aps-nightly.timer
+sudo systemctl is-active aps-nightly.timer
+```
+
+Both timer checks must report `disabled` and `inactive`. The script keeps
+the first pre-Release B copy of any installed units under
+`/etc/aps/systemd-pre-release-b/`. Do not restart `server.service` or enable
+the nightly timer at this stage.
+
 ## Release sequence
 
 1. Provision `/etc/aps/aps.env` from
@@ -64,6 +103,15 @@ A backup is not a rehearsed rollback until this restore has succeeded.
    smoke checks.
 9. Write a release manifest with the final SHA, environment, migrations,
    model-build IDs, unit state, container state, and smoke results.
+
+The execution environment may refuse to publish a private repository even
+after operator approval. In that case, the repository owner performs the
+durability step directly:
+
+```bash
+cd /home/arodrigues/APS_Database/APS_Database
+git push --set-upstream origin architecture-foundation-2026-07
+```
 
 Credential rotation is a coordinated step after every consumer is configured.
 Verify old credentials no longer authenticate.

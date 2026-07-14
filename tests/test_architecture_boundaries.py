@@ -83,3 +83,12 @@ def test_flask_request_module_contains_no_schema_ddl():
     server_text = (REPO_ROOT / "server.py").read_text()
 
     assert re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|VIEW|INDEX)\b", server_text, re.I) is None
+
+
+def test_release_b_bootstrap_keeps_services_stopped_until_verified():
+    script = (REPO_ROOT / "scripts" / "bootstrap_release_b_systemd.sh").read_text()
+
+    assert "systemctl disable --now aps-nightly.timer" in script
+    assert "systemctl enable " not in script
+    assert "systemctl restart " not in script
+    assert "systemctl start " not in script

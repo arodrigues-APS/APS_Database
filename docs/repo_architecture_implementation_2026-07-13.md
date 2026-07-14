@@ -192,7 +192,58 @@ checkout, or systemd schedule has been adopted.
 
 ## Release B implementation log
 
-Status: **not started; blocked on Release A acceptance**.
+Status: **in progress; production mutation paused at the durability and
+privilege gates**.
+
+Release B discovery and safety actions completed on 2026-07-14:
+
+- confirmed the deployed checkout is clean at `6ac2594` and that this commit
+  is an ancestor of Release A (`27d882f`), so the planned deployment is a
+  true fast-forward and preserves the deployed phenotype-viewer link fixes;
+- verified PostgreSQL 15, the APS database, and the Superset metadata
+  database are healthy and reachable without changing them;
+- verified the release backup pair and its recorded SHA-256 checksums:
+  `mosfets-releaseB-20260713T160523Z.dump` (668,296,277 bytes) and
+  `superset_metadata-releaseB-20260713T160523Z.dump` (24,650,406 bytes);
+- reviewed the prior disposable-restore fingerprints. Restored APS counts
+  (`baselines_metadata=5275`, `device_library=43`,
+  `irradiation_campaigns=8`, `irradiation_runs=20`) and restored Superset
+  counts (`dashboards=13`, `datasets=84`, `slices=294`, `users=1`) match the
+  current production catalog fingerprints;
+- confirmed production has no `aps_forward_migrations`, `aps_model_builds`,
+  or `pipeline_runs` relation yet, so first adoption must use the reviewed
+  exact historical cutoff and cannot be treated as an ordinary upgrade;
+- identified that the legacy user-level nightly timer was still enabled and
+  had failed every night through 2026-07-14 on the same missing
+  `stress_proxy_distance_settings.phenotype_mismatch_distance` column; and
+- disabled and stopped that user timer before its next 03:00 trigger. It is
+  now `disabled` and `inactive`, preventing another known-failing unattended
+  mutation while adoption is incomplete.
+
+No production schema, model, application checkout, container, Superset
+metadata, or system service was changed during this discovery. Disabling the
+legacy timer was the only production-state action and is reversible.
+
+Remaining Release B gates:
+
+1. The user explicitly approved pushing private repository changes to
+   `git@github.com:arodrigues-APS/APS_Database.git` on 2026-07-14. The
+   execution safety layer still prohibited the push, so the operator must run
+   the documented one-line push command directly. Release A remains local
+   until that command succeeds.
+2. This session has no non-interactive sudo authorization. The guarded
+   `scripts/bootstrap_release_b_systemd.sh` procedure now provisions
+   `/etc/aps/aps.env`, preserves old unit files, installs the system units,
+   reloads systemd, and proves the timer is disabled. It must be run by an
+   authorized operator; no password will be requested or stored by this
+   implementation process.
+3. After durability and configuration are established: fast-forward `/opt`,
+   baseline the reviewed migration prefix through
+   `026_irradiation_energy_windows.sql`, apply migration 031, build the
+   repeatable proxy model, run production smoke checks, and execute one
+   attended nightly shadow run.
+4. Enable the new timer only if the shadow run, ledgers, backups, logs,
+   artifacts, mounts, and failure recorder all verify successfully.
 
 ## Release C implementation log
 
@@ -209,15 +260,23 @@ and whether it was offline, disposable-service, or production evidence.
 | 2026-07-13 | Git metadata recovery | Direct SMB diagnosis reported `NT_STATUS_DELETE_PENDING`; separate local Git directory installed; ordinary discovery, full fsck, reversible ref transaction, status, and remote read all passed | Git healthy on this deploy host; recovery branch remains local |
 | 2026-07-13 | Release A exact staged-tree offline suite | 310 collected, 10 deselected, 300 passed; Ruff, `pip check`, compilation, diff whitespace, shell syntax, systemd unit parsing, and CLI smoke checks passed | Foundation repository gates passed without relying on unstaged Release C files |
 | 2026-07-13 | Release A disposable PostgreSQL 15 | 4 integration tests passed against per-test databases: blank/idempotent migration lifecycle, exact historical adoption plus 031, checksum/rollback/retry, and real model/nightly ledgers | Database lifecycle gate passed without production access |
+| 2026-07-14 | Current mixed-tree offline regression | 325 collected, 10 integration/production-smoke tests deselected, 315 passed; focused Ruff architecture scope passed | Release A, the Release B bootstrap, and the still-uncommitted Release C working tree remain green; not production evidence |
+| 2026-07-14 | Release B production discovery | Release backups passed recorded SHA-256 checks; prior restored fingerprints matched current APS and Superset catalog counts; production ledgers absent; deployed `6ac2594` confirmed ancestor of `27d882f` | Adoption boundary established without database mutation |
+| 2026-07-14 | Nightly safety gate | Legacy user timer had repeated failures through 2026-07-14; timer disabled and stopped before next trigger; final state `disabled`/`inactive` | Known-failing unattended mutation prevented pending shadow verification |
+| 2026-07-14 | Release B operator bootstrap | Shell syntax and systemd unit verification passed; non-root execution refused before mutation; 17 focused tests and Ruff passed; boundary test proves the script contains no start, restart, or enable operation | Root bootstrap is reviewable and fail-closed; operator execution remains pending |
 
 ## Open release gates
 
 - The local recovery branch has no upstream. Release commits must be pushed to
-  a durable remote before a release is accepted.
+  a durable remote before a release is accepted. Approval has been granted,
+  but the execution safety layer requires the repository owner to run the
+  documented push command directly.
 - The local safe copy and preserved broken CIFS metadata must be retained until
   those release commits are present on the remote.
 - Data and Superset backups must be restored successfully before production
   mutation.
 - Environment files, credential rotation, database adoption, `/opt`
   deployment, service installation/restart, smoke checks, nightly shadowing,
-  timer enablement, and rollback rehearsal remain unapplied.
+  and timer enablement remain unapplied. Backup checksum and disposable-restore
+  evidence is present and catalog fingerprints match; a final release manifest
+  still needs to bind that evidence to the deployed SHA.
