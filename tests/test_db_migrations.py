@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from aps.db import migrations as migration_module
 from aps.db.migrations import (
     MigrationBaselineSelectionError,
     MigrationChecksumMismatch,
@@ -70,3 +71,8 @@ def test_baseline_selection_requires_an_exact_discovered_prefix(tmp_path: Path):
     ]
     with pytest.raises(MigrationBaselineSelectionError, match="unknown baseline cutoff"):
         select_baseline_migrations(migrations, "002")
+
+
+def test_migration_completion_uses_wall_clock_not_transaction_timestamp():
+    assert "completed_at = clock_timestamp()" in migration_module._MARK_APPLIED_SQL
+    assert "completed_at = clock_timestamp()" in migration_module._MARK_FAILED_SQL

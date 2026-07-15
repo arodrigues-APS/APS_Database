@@ -153,12 +153,15 @@ RETURNING id
 """
 _MARK_BUILD_SUCCEEDED_SQL = """
 UPDATE aps_model_builds
-SET status = 'succeeded', completed_at = now(), object_stats = %s, error = NULL
+-- now() is fixed at transaction start. Model DDL can run for many minutes in
+-- this same transaction, so completion must use the actual wall-clock time.
+SET status = 'succeeded', completed_at = clock_timestamp(),
+    object_stats = %s, error = NULL
 WHERE id = %s
 """
 _MARK_BUILD_FAILED_SQL = """
 UPDATE aps_model_builds
-SET status = 'failed', completed_at = now(), error = %s
+SET status = 'failed', completed_at = clock_timestamp(), error = %s
 WHERE id = %s
 """
 

@@ -116,12 +116,14 @@ SET checksum = EXCLUDED.checksum,
 """
 _MARK_APPLIED_SQL = """
 UPDATE aps_forward_migrations
-SET status = 'applied', completed_at = now(), error = NULL
+-- Migration SQL and this update share one transaction. now() would therefore
+-- report the migration start time rather than its wall-clock completion.
+SET status = 'applied', completed_at = clock_timestamp(), error = NULL
 WHERE filename = %s
 """
 _MARK_FAILED_SQL = """
 UPDATE aps_forward_migrations
-SET status = 'failed', completed_at = now(), error = %s
+SET status = 'failed', completed_at = clock_timestamp(), error = %s
 WHERE filename = %s
 """
 _MARK_BASELINED_SQL = """

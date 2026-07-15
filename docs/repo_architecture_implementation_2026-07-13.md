@@ -195,8 +195,9 @@ checkout, or systemd schedule has been adopted.
 
 ## Release B implementation log
 
-Status: **in progress; source durability is established, and production
-mutation is paused at the privilege/configuration gate**.
+Status: **in progress; system bootstrap, Release B code deployment, forward
+migration adoption, and the first managed proxy build are complete; service
+smoke and attended nightly shadow gates remain**.
 
 Release B discovery and safety actions completed on 2026-07-14:
 
@@ -227,21 +228,61 @@ No production schema, model, application checkout, container, Superset
 metadata, or system service was changed during this discovery. Disabling the
 legacy timer was the only production-state action and is reversible.
 
+Release B production actions completed on 2026-07-15:
+
+- the operator installed the root-owned environment and system units through
+  the guarded bootstrap. The previous web unit was preserved, and the new
+  nightly timer remained `disabled` and `inactive`;
+- local and private-remote branch tips were verified equal at `83e1c67`
+  with a clean source worktree;
+- the production checkout was fast-forwarded from `6ac2594` to the exact
+  Release B boundary `46629d9`; the running Flask process was deliberately
+  not restarted during database adoption;
+- the deployed package was installed into the existing healthy production
+  virtualenv in editable, no-dependency mode. `aps` resolves from
+  `/opt/aps_database/APS_Database/src`, and `pip check` passes;
+- configuration preflight found that the initially provisioned
+  `APS_DB_PASSWORD` did not authenticate. The credential was reconciled
+  directly from the running data-database container without printing it.
+  `/etc/aps/aps.env` and the deployed Superset `.env` are now mode 0600,
+  and the latter has the separately named `APS_DATA_DB_PASSWORD` required
+  by the tracked Compose definition;
+- production configuration validation then passed, with a clean source
+  fingerprint `227f170fe3d97d674b1b4cff601b38a9ec2384ce7877c8df31582ca7c417931a`
+  bound to `46629d9`;
+- a fresh pre-migration backup pair was created and validated:
+  `mosfets-releaseB-pre-migration-20260715T082534Z.dump` (668,298,056
+  bytes, SHA-256 `6233261095ececfc2df248aa85188f9447d18060b5e89616d114d4b2ee9ad545`)
+  and `superset_metadata-releaseB-pre-migration-20260715T082534Z.dump`
+  (24,650,605 bytes, SHA-256
+  `42a3de996a63e4e257b02d10b7b3860f4dbdab848a44fc226c2d47fedb175a6a`);
+- the migration runner baselined the exact reviewed prefix through
+  `026_irradiation_energy_windows.sql` and applied only
+  `031_flask_avalanche_admin.sql`. The six ledger rows, avalanche table,
+  and three metadata columns were verified; and
+- `proxy-analytics` build ID 1 succeeded from clean Release B source with
+  checksum `a3c8d885ea7571a1b33f1778651db3046dffdfd9ac069afe45d26d3901f72cb9`.
+  The attended systemd runtime was 14m18.646s. All five expected relations
+  exist, with 1,307,927 ranked candidates and 8,190 rows in each of the v2
+  and v3 materialized views.
+
+The first production model build exposed a ledger timing defect: its
+`completed_at` used transaction-stable `now()`, so the recorded duration
+was 2.175ms even though the build ran for more than 14 minutes. Scientific
+outputs, status, checksum, source provenance, and object statistics were
+correct. Completion writes for model builds and forward migrations were
+changed to `clock_timestamp()`, with unit and real-PostgreSQL regression
+coverage. The external systemd runtime remains the authoritative duration for
+build ID 1; the corrected code must be deployed before the Release C rebuild.
+
 Remaining Release B gates:
 
-1. This session has no non-interactive sudo authorization. The guarded
-   `scripts/bootstrap_release_b_systemd.sh` procedure now provisions
-   `/etc/aps/aps.env`, preserves old unit files, installs the system units,
-   reloads systemd, and proves the timer is disabled. It must be run by an
-   authorized operator; no password will be requested or stored by this
-   implementation process.
-2. After configuration is established: fast-forward `/opt`,
-   baseline the reviewed migration prefix through
-   `026_irradiation_energy_windows.sql`, apply migration 031, build the
-   repeatable proxy model, run production smoke checks, and execute one
-   attended nightly shadow run.
-3. Enable the new timer only if the shadow run, ledgers, backups, logs,
-   artifacts, mounts, and failure recorder all verify successfully.
+1. Commit and push the wall-clock ledger correction, then complete Release B
+   application/service smoke checks and one attended nightly shadow run.
+2. Verify the shadow run's ledgers, backups, logs, artifacts, mounts, Superset
+   health, service identity, and failure recorder.
+3. Enable the new timer only if all shadow evidence is successful; otherwise
+   leave it disabled and correct the failure first.
 
 ## Release C implementation log
 
@@ -340,23 +381,25 @@ and whether it was offline, disposable-service, or production evidence.
 | 2026-07-14 | Release C full production-snapshot restore/build | PostgreSQL 15 restore succeeded; source fingerprints matched; proxy model build succeeded; 8,190 v3 rows, 2,754 comparison rows/1,300 targets, exact component equality, zero winner violations; gated legacy build refusal and explicitly enabled parity build both passed | Production-sized database gate passed in a disposable service; not deployment evidence |
 | 2026-07-14 | Release C exporter and PostgreSQL lifecycle | Comparison CSV contained 2,754 rows plus header and consistent full provenance; 4 explicitly selected integration tests passed | Export provenance and real lifecycle behavior verified against disposable PostgreSQL |
 | 2026-07-14 | Release C repository regression | 327 default tests and 36 subtests passed, 10 integration/production-smoke tests correctly deselected; all changed Python passed Ruff; the complete source/test tree compiled; `git diff --check` passed | Release C change scope is green; repository-wide Ruff still has 59 pre-existing errors in untouched legacy modules |
+| 2026-07-15 | Release B system/config/deploy boundary | Root bootstrap succeeded; timer remained disabled/inactive; source and remote matched at `83e1c67`; `/opt` fast-forwarded cleanly to `46629d9`; production venv imports editable package 0.2.0 and passes `pip check`; redacted config/source preflights passed | Release B code and runtime boundary established without restarting Flask or starting nightly |
+| 2026-07-15 | Release B fresh rollback point | New APS and Superset custom-format dumps created mode 0600; checksums passed; archive TOCs contained 5,414 and 505 lines; APS source fingerprints remained 5,275/43/8/20/0 | Exact pre-migration rollback artifacts recorded; prior full disposable restore remains the restore rehearsal |
+| 2026-07-15 | Release B migration adoption | Five historical files baselined through 026; only migration 031 applied; ledger checksums/statuses and owned table/columns verified | Forward migration lifecycle adopted successfully in production |
+| 2026-07-15 | Release B production proxy build | Build ID 1 succeeded from clean `46629d9`, checksum `a3c8d885ea75`; systemd runtime 14m18.646s; all expected relations and 1,307,927/8,190/8,190 row counts verified; no lock waiters | Repeatable-model output gate passed; ledger completion timestamp defect discovered and isolated |
+| 2026-07-15 | Ledger wall-clock correction | 329 default tests and 36 subtests passed; scoped Ruff and diff checks passed; 4 disposable PostgreSQL integration tests passed including a delayed-build duration assertion | Correction verified locally; commit/push/deployment remain before Release C production build |
 
 ## Open release gates
 
-- Release A and the Release B bootstrap are on the private remote at
-  `46629d9`. Release C code commit `87b43f9` and the implementation-record
-  commit must be pushed before deployment, and the local safe copy plus
-  preserved broken CIFS metadata must be retained until that succeeds.
-- The guarded sudo bootstrap must create and validate `/etc/aps/aps.env` and
-  install the system units while proving the nightly timer remains disabled.
-- Credential provisioning/rotation, exact migration adoption, `/opt`
-  fast-forward deployment, proxy model build, Flask/service smoke checks, and
-  one attended nightly shadow remain unapplied.
+- The private branch is durable through `83e1c67`; the wall-clock ledger
+  correction and this updated implementation record must be committed and
+  pushed before the next deployment.
+- Release B application/service smoke checks, the failure-recorder check, and
+  one attended nightly shadow remain. The timer is still disabled/inactive.
 - The timer may be enabled only after the shadow run verifies ledgers,
   backups, logs, artifacts, mounts, failure recording, and service identity.
-- Release C must then be deployed as a separate reviewed commit, its registered
-  models built, its Superset dry-runs reviewed before explicit apply, and its
-  dashboard identities and screening-only evidence policy verified.
+- Release C plus the ledger correction must then be deployed as a separate
+  reviewed boundary, its registered models built, its Superset dry-runs
+  reviewed before explicit apply, and its dashboard identities and
+  screening-only evidence policy verified.
 - A final release manifest must bind the backup checksums, deployed Git SHA,
   migration/model ledger rows, Superset reconciliation result, smoke results,
   and rollback point. Only that evidence closes Release C and permits a

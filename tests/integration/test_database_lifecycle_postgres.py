@@ -182,6 +182,7 @@ def test_model_and_pipeline_ledgers_persist_real_transitions(
 ):
     model_sql = tmp_path / "demo_model.sql"
     model_sql.write_text(
+        "SELECT pg_sleep(0.05);"
         "CREATE OR REPLACE VIEW demo_model_view AS SELECT 1 AS value;"
     )
     model = ModelDefinition(
@@ -222,13 +223,14 @@ def test_model_and_pipeline_ledgers_persist_real_transitions(
     with postgres_connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT status, source_fingerprint ->> 'fingerprint'
+            SELECT status, source_fingerprint ->> 'fingerprint',
+                   completed_at - started_at
             FROM aps_model_builds
             WHERE id = %s
             """,
             (build.build_id,),
         )
-        model_status, model_source = cursor.fetchone()
+        model_status, model_source, model_duration = cursor.fetchone()
         cursor.execute(
             """
             SELECT pipeline.status, step.status,
@@ -243,6 +245,7 @@ def test_model_and_pipeline_ledgers_persist_real_transitions(
         pipeline_status, step_status, pipeline_source = cursor.fetchone()
 
     assert (model_status, model_source) == ("succeeded", "integration-source")
+    assert model_duration.total_seconds() >= 0.05
     assert (pipeline_status, step_status, pipeline_source) == (
         "succeeded",
         "succeeded",

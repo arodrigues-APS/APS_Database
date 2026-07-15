@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from aps.db import models as model_module
 from aps.config import ConfigurationError, Settings
 from aps.db.models import ModelDefinition, build_model, model_checksum, model_plan
 
@@ -49,3 +50,10 @@ def test_model_checksum_covers_file_names_and_contents(tmp_path: Path):
     second.write_text("SELECT 3;")
 
     assert model_checksum(model) != original
+
+
+def test_model_completion_uses_wall_clock_not_transaction_timestamp():
+    assert "completed_at = clock_timestamp()" in (
+        model_module._MARK_BUILD_SUCCEEDED_SQL
+    )
+    assert "completed_at = clock_timestamp()" in model_module._MARK_BUILD_FAILED_SQL
