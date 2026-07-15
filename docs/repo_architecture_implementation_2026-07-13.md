@@ -24,6 +24,13 @@ No release is successful merely because repository tests pass. A release is
 successful only when its documented acceptance criteria and recovery gates
 are satisfied.
 
+Overall status on 2026-07-15: **Releases A, B, and C are complete in
+production.** The application and analytical models run from the clean
+Release C code boundary `5157398`; the private branch contains that exact
+boundary; the system nightly timer is enabled for 03:00 Europe/Zurich after a
+successful attended shadow run; and the recovery, model, Superset, viewer,
+application, and scheduler evidence is recorded below.
+
 ## Adopted decisions
 
 - Preserve the one-server monolith and raw psycopg2 architecture.
@@ -195,9 +202,7 @@ checkout, or systemd schedule has been adopted.
 
 ## Release B implementation log
 
-Status: **in progress; system bootstrap, Release B code deployment, forward
-migration adoption, and the first managed proxy build are complete; service
-smoke and attended nightly shadow gates remain**.
+Status: **complete and accepted in production on 2026-07-15**.
 
 Release B discovery and safety actions completed on 2026-07-14:
 
@@ -275,20 +280,41 @@ changed to `clock_timestamp()`, with unit and real-PostgreSQL regression
 coverage. The external systemd runtime remains the authoritative duration for
 build ID 1; the corrected code must be deployed before the Release C rebuild.
 
-Remaining Release B gates:
+Release B acceptance evidence:
 
-1. Commit and push the wall-clock ledger correction, then complete Release B
-   application/service smoke checks and one attended nightly shadow run.
-2. Verify the shadow run's ledgers, backups, logs, artifacts, mounts, Superset
-   health, service identity, and failure recorder.
-3. Enable the new timer only if all shadow evidence is successful; otherwise
-   leave it disabled and correct the failure first.
+- the Flask service restarted successfully on the Release B boundary and its
+  `/devices`, `/irradiation`, `/avalanche`, and `/readme` routes returned 200
+  through the native uWSGI protocol; Superset health returned 200;
+- the failure-recorder probe succeeded without starting the scheduler and
+  wrote a correctly labelled system-service diagnostic record;
+- the first attended nightly attempt became pipeline run 1 and failed closed
+  at `dashboard-baselines` when the configured Superset password returned
+  401. All 13 preceding steps were committed as successful, the failed step
+  and error were recorded, the failure recorder selected the correct log,
+  and the timer remained disabled/inactive;
+- after the operator corrected `APS_SUPERSET_PASS` in the protected service
+  environment, an isolated login preflight succeeded and attended pipeline
+  run 2 completed as `succeeded`: all 33 requested step records are present,
+  32 succeeded, and one optional unavailable step was explicitly skipped;
+- run 2 created readable custom-format backups
+  `mosfets-20260715T095759Z.dump` (667,721,125 bytes) and
+  `superset_metadata-20260715T095759Z.dump` (24,651,836 bytes), both mode
+  0640 and owned by `arodrigues`;
+- the run rebuilt `proxy-analytics` as build ID 2 with the expected Release B
+  checksum `a3c8d885ea75`; the step ledger recorded 911,850ms. The model
+  ledger still exhibited the already-isolated transaction-stable timestamp
+  defect because the shadow deliberately ran the Release B code boundary;
+- the shadow refreshed the production dashboards, exports, and published
+  viewer and completed its retention tasks. The known data-quality reports
+  remained bounded: two unmapped irradiation folders, nine unmatched
+  logbook records, and one invalid avalanche HDF5 capture; and
+- local source, the private remote, and the production checkout were clean at
+  their intended boundaries. Release B was accepted while the new timer was
+  still disabled, allowing Release C to proceed as a separate deployment.
 
 ## Release C implementation log
 
-Status: **repository implementation and production-sized disposable
-verification complete; production release remains blocked on Release B
-acceptance**.
+Status: **complete and accepted in production on 2026-07-15**.
 
 Release C was reviewed and implemented without applying its schema, Superset
 metadata, application code, or services to production. The resulting
@@ -355,11 +381,62 @@ container:
   full Git revision, dirty-state flag, source fingerprint, and Git-available
   flag.
 
-This establishes database compatibility and internal scientific consistency
-for the candidate. It does not establish a production release: Release C must
-be pushed, deployed only after Release B, applied through the registered
-model/dashboard paths, and verified against the release manifest before it can
-be called successful.
+At that stage, the disposable evidence established database compatibility and
+internal scientific consistency for the candidate but did not establish a
+production release. The production rollout and release-manifest verification
+that subsequently closed Release C are recorded below.
+
+Release C production rollout and acceptance:
+
+- the private branch was pushed through `5157398`, which contains Release C
+  plus the wall-clock ledger correction. The guarded deploy verified clean
+  source and target trees and fast-forwarded `/opt` from `46629d9` to the
+  exact committed SHA
+  `5157398a46cfd8a45fdbb23bb9bbf9b4b9e338e4`;
+- production `proxy-analytics` build ID 3 succeeded with checksum
+  `fcf6204f3a8d1fb798c6f690910e532f6248f3306371e498d618256973a37b09`.
+  The corrected ledger recorded 918.992 seconds and the clean Release C code
+  SHA, matching the attended systemd runtime;
+- the registered output inventory contains 1,307,927 ranked candidates,
+  8,190 v2 rows, 8,190 v3 rows, and 2,754 winner-union rows across 1,300
+  targets. There are zero duplicate target/candidate pairs, zero v1/v2/v3
+  winner violations, zero invalid rank percentiles, and zero missing
+  component-penalty rows among the 1,466 rows with an available v3 rank. The
+  maximum component reconstruction error is floating-point noise
+  (`1.42e-14`);
+- the production target transitions match the disposable gate: 1
+  `all_three_same`, 481 `v2_winner_unavailable`, 182 `v3_follows_v2`, and
+  636 `v3_selects_third_candidate`. All 2,754 comparison rows explicitly
+  retain `no_curated_truth`, so the presentation remains screening-only and
+  makes no validation claim;
+- the comparison CSV contains 2,754 data rows plus its header and records the
+  clean Release C revision, source fingerprint, evidence policy, and contract
+  version;
+- Superset dry-run inventory found 13 dashboards and 294 charts. Dashboard
+  IDs 14, 16, 28, and 33 exactly matched their expected archive titles before
+  apply. The guarded apply only set `published=false`; all four are now
+  unpublished, while all nine retained dashboards remain published. The
+  legacy CV/DPT feature gate was asserted disabled before mutation;
+- all retained Release C dashboard builders completed successfully. Dashboard
+  32 now has the title `Proxy Method Readiness & Concordance`; dashboard 25
+  contains 18 visible charts, dashboard 27 contains 15, and the other retained
+  dashboard layouts match their builder contracts. Description backfill for
+  dashboard 22 planned zero changes. Post-apply inventory retained nine true
+  orphan charts for later review and reduced hidden associations from 63 to
+  60 without deleting or detaching charts;
+- the interactive viewer was rebuilt from refreshed Release C exports and
+  atomically published. Generated and published files are each 26,578,617
+  bytes and share SHA-256
+  `8c86689149814c0ebaa7c90656211cf44097f3a191e70c1e05b63ad8217199fa`;
+- `server.service` restarted on the Release C checkout with uWSGI master PID
+  168009. The WSGI application reported ready, and native uWSGI requests to
+  `/devices`, `/irradiation`, `/avalanche`, and `/readme` all returned 200.
+  Superset health returned 200 and Nginx preserved its redirect/authentication
+  boundary; and
+- after every preceding gate passed, `aps-nightly.timer` was enabled and
+  started. It is `enabled` and `active`, did not launch an unnecessary
+  catch-up run, and is scheduled next for 2026-07-16 03:00 CEST. The legacy
+  user timer remains superseded by the installed system timer.
 
 ## Verification ledger
 
@@ -386,21 +463,29 @@ and whether it was offline, disposable-service, or production evidence.
 | 2026-07-15 | Release B migration adoption | Five historical files baselined through 026; only migration 031 applied; ledger checksums/statuses and owned table/columns verified | Forward migration lifecycle adopted successfully in production |
 | 2026-07-15 | Release B production proxy build | Build ID 1 succeeded from clean `46629d9`, checksum `a3c8d885ea75`; systemd runtime 14m18.646s; all expected relations and 1,307,927/8,190/8,190 row counts verified; no lock waiters | Repeatable-model output gate passed; ledger completion timestamp defect discovered and isolated |
 | 2026-07-15 | Ledger wall-clock correction | 329 default tests and 36 subtests passed; scoped Ruff and diff checks passed; 4 disposable PostgreSQL integration tests passed including a delayed-build duration assertion | Correction verified locally; commit/push/deployment remain before Release C production build |
+| 2026-07-15 | Release B failure-path rehearsal | Failure-recorder probe passed; attended run 1 recorded 13 successful steps and the Superset 401 failure at step 14; correct log selected; timer remained disabled/inactive | Authentication failure proved fail-closed and observable; no scheduler enablement occurred |
+| 2026-07-15 | Release B attended shadow acceptance | Superset preflight passed after protected credential correction; run 2 succeeded with 33 records (32 succeeded, 1 optional skipped); fresh APS/Superset backup catalogs were readable; proxy build step ran 911.850s; dashboards, exports, viewer, retention, and failure policy completed | Release B accepted in production; known data-quality warnings recorded as bounded follow-up |
+| 2026-07-15 | Release C guarded deployment and model | Clean fast-forward `46629d9` to `5157398`; build ID 3 succeeded with checksum `fcf6204f3a8d`; corrected ledger duration 918.992s; 8,190 v3 and 2,754 comparison rows/1,300 targets; winner, rank, component, and evidence-policy invariants passed | Release C scientific/model boundary accepted in production |
+| 2026-07-15 | Release C Superset and viewer apply | Dry-run title checks passed for 14/16/28/33; guarded apply unpublished only those IDs; nine retained dashboards stayed published; all retained builders succeeded; 2,754-row export and 26,578,617-byte viewer published with checksum parity | Presentation lifecycle and artifact gates passed without chart/dataset deletion or detachment |
+| 2026-07-15 | Release C application and scheduler cutover | uWSGI restarted on clean `5157398`; four application routes returned 200; Superset returned 200; model/source/viewer parity rechecked; system timer enabled/active with next trigger 2026-07-16 03:00 CEST and nightly service inactive | Releases A-C operationally complete |
 
-## Open release gates
+## Release closure and follow-up
 
-- The private branch is durable through `83e1c67`; the wall-clock ledger
-  correction and this updated implementation record must be committed and
-  pushed before the next deployment.
-- Release B application/service smoke checks, the failure-recorder check, and
-  one attended nightly shadow remain. The timer is still disabled/inactive.
-- The timer may be enabled only after the shadow run verifies ledgers,
-  backups, logs, artifacts, mounts, failure recording, and service identity.
-- Release C plus the ledger correction must then be deployed as a separate
-  reviewed boundary, its registered models built, its Superset dry-runs
-  reviewed before explicit apply, and its dashboard identities and
-  screening-only evidence policy verified.
-- A final release manifest must bind the backup checksums, deployed Git SHA,
-  migration/model ledger rows, Superset reconciliation result, smoke results,
-  and rollback point. Only that evidence closes Release C and permits a
-  production-success report.
+No Release A-C acceptance gate remains open. The production code boundary is
+`5157398`, and this documentation-only closure commit does not require another
+application deployment.
+
+The following are observable follow-up work, not hidden release blockers:
+
+- inspect the first unattended system-timer run after 2026-07-16 03:00 CEST
+  and retain its pipeline, backup, and failure-recorder evidence as routine
+  operations monitoring;
+- resolve or intentionally document the two unmapped irradiation folders,
+  nine unmatched logbook records, and invalid avalanche HDF5 capture;
+- review the nine Superset orphan charts and 60 hidden associations before any
+  future cleanup. Reconciliation deliberately made no deletion or detachment;
+- curate scientific truth labels before treating method-concordance output as
+  validation evidence. All current comparison rows correctly fail closed as
+  `no_curated_truth`; and
+- retain the pre-migration rollback pair and its recorded checksums according
+  to the release retention policy.
