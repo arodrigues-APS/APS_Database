@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 aps = "aps.cli:main"
+aps-damage = "aps.ml.iv_damage_cli:main"
 
 [project.optional-dependencies]
 # Flask/uwsgi lab data server (server.py). Pins reproduce the frozen state
@@ -48,8 +49,7 @@ pipeline = [
     "matplotlib>=3.7",
     "requests",
 ]
-# ML training/validation (post-IV physical prediction, SC↔irradiation
-# equivalence).
+# ML training/validation (prospective IV damage and legacy diagnostics).
 ml = [
     "scikit-learn>=1.3",
     "joblib",
@@ -70,6 +70,7 @@ packages = [
     "aps.ingest",
     "aps.seeds",
     "aps.enrich",
+    "aps.enrich.iv_parameters",
     "aps.proxy",
     "aps.ml",
     "aps.superset",

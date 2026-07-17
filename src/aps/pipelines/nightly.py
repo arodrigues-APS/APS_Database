@@ -9,6 +9,8 @@ Superset, a NAS mount, or production data.
 
 from __future__ import annotations
 
+from contextlib import closing
+
 import importlib.util
 import subprocess
 import sys
@@ -63,9 +65,25 @@ def _clean_source_for_irradiation_seed() -> bool:
 
 
 def _dashboard_device_library_available() -> bool:
-    return importlib.util.find_spec(
-        "aps.superset.create_baselines_dashboard_device_library"
-    ) is not None
+    return importlib.util.find_spec("aps.superset.create_baselines_dashboard_device_library") is not None
+
+
+def _iv_damage_v3_schema_available() -> bool:
+    """Keep nightly safe until forward migrations 032-033 are deployed."""
+    try:
+        from aps.db_config import get_connection
+
+        with closing(get_connection()) as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass(%s), to_regclass(%s)",
+                (
+                    "public.iv_damage_prediction_requests",
+                    "public.iv_damage_decision_eligible_prediction_view",
+                ),
+            )
+            return all(cursor.fetchone())
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -158,9 +176,7 @@ class PostgresRunLedger:
 
         self.conn = conn
         self._json = Json
-        self.source_provenance = dict(
-            source_provenance or collect_source_provenance().as_dict()
-        )
+        self.source_provenance = dict(source_provenance or collect_source_provenance().as_dict())
         self._ensure_tables()
 
     def _ensure_tables(self) -> None:
@@ -377,30 +393,20 @@ def default_steps() -> tuple[Step, ...]:
             depends_on=("ingest-avalanche",),
         ),
         Step(
-            "ml-post-iv-physical-prediction",
-            (
-                "-m",
-                "aps.ml.ml_post_iv_physical_prediction",
-                "--rebuild-sql",
-                "--extract-features",
-                "--build-pairs",
-                "--include-library-pristine",
-                "--train",
-                "--validate",
-                "--validation-mode",
-                "both",
-                "--reference-tier",
-                "both",
-                "--predict-curves",
-            ),
-            "rebuild/train/validate post-IV physical prediction",
-            depends_on=("ingest-baselines", "ingest-irradiation"),
+            "score-iv-damage-v3",
+            ("-m", "aps.ml.iv_damage_cli", "score"),
+            "score pending prospective requests with active released V3 models only",
+            depends_on=("ingest-baselines", "ingest-short-circuit", "ingest-irradiation"),
+            critical=False,
+            enabled=_iv_damage_v3_schema_available,
         ),
         Step(
-            "dashboard-iv-physical-prediction",
-            ("-m", "aps.superset.create_iv_physical_prediction_dashboard"),
-            "reconcile the post-IV physical prediction dashboard",
-            depends_on=("ml-post-iv-physical-prediction",),
+            "dashboard-iv-damage-v3",
+            ("-m", "aps.superset.create_iv_damage_prediction_dashboard"),
+            "reconcile V3 release, validation, abstention, and outcome monitoring",
+            depends_on=("score-iv-damage-v3",),
+            critical=False,
+            enabled=_iv_damage_v3_schema_available,
         ),
         Step(
             "ml-sc-irradiation-equivalence",
@@ -501,12 +507,6 @@ def default_steps() -> tuple[Step, ...]:
             "reconcile the SC/irradiation dashboard",
             depends_on=("ml-sc-irradiation-equivalence",),
         ),
-        Step(
-            "dashboard-sc-irradiation-prediction",
-            ("-m", "aps.superset.create_sc_irrad_prediction_dashboard"),
-            "reconcile the SC/irradiation prediction dashboard",
-            depends_on=("ml-sc-irradiation-equivalence",),
-        ),
     )
 
 
@@ -516,17 +516,9 @@ def _index_steps(steps: Iterable[Step]) -> tuple[Step, ...]:
     if len(names) != len(set(names)):
         raise PipelineError("pipeline step names must be unique")
     known = set(names)
-    unknown_dependencies = {
-        dependency
-        for step in indexed
-        for dependency in step.depends_on
-        if dependency not in known
-    }
+    unknown_dependencies = {dependency for step in indexed for dependency in step.depends_on if dependency not in known}
     if unknown_dependencies:
-        raise PipelineError(
-            "pipeline references unknown dependency: "
-            + ", ".join(sorted(unknown_dependencies))
-        )
+        raise PipelineError("pipeline references unknown dependency: " + ", ".join(sorted(unknown_dependencies)))
     return indexed
 
 
@@ -543,11 +535,11 @@ def select_steps(
     by_name = {step.name: step for step in indexed}
     only_names = tuple(only)
     skip_names = set(skip)
-    unknown = (set(only_names) | skip_names | ({start_from} if start_from else set()) | ({until} if until else set())) - set(by_name)
+    unknown = (
+        set(only_names) | skip_names | ({start_from} if start_from else set()) | ({until} if until else set())
+    ) - set(by_name)
     if unknown:
-        raise PipelineSelectionError(
-            "unknown nightly step(s): " + ", ".join(sorted(unknown))
-        )
+        raise PipelineSelectionError("unknown nightly step(s): " + ", ".join(sorted(unknown)))
     if only_names and (start_from or until):
         raise PipelineSelectionError("--only cannot be combined with --from or --until")
 
@@ -555,11 +547,13 @@ def select_steps(
         requested = set(only_names)
         selected = tuple(step for step in indexed if step.name in requested)
     else:
-        start_index = 0 if start_from is None else next(
-            index for index, step in enumerate(indexed) if step.name == start_from
+        start_index = (
+            0 if start_from is None else next(index for index, step in enumerate(indexed) if step.name == start_from)
         )
-        end_index = len(indexed) - 1 if until is None else next(
-            index for index, step in enumerate(indexed) if step.name == until
+        end_index = (
+            len(indexed) - 1
+            if until is None
+            else next(index for index, step in enumerate(indexed) if step.name == until)
         )
         if end_index < start_index:
             raise PipelineSelectionError("--until must not precede --from")
@@ -635,11 +629,7 @@ def run_pipeline(
     for step in selected:
         step_run_id = ledger.start_step(run_id, step)
         started = monotonic()
-        unavailable = [
-            dependency
-            for dependency in step.depends_on
-            if outcomes.get(dependency) != "succeeded"
-        ]
+        unavailable = [dependency for dependency in step.depends_on if outcomes.get(dependency) != "succeeded"]
         if unavailable:
             error = "required dependency did not succeed: " + ", ".join(unavailable)
             status = "failed" if step.critical else "skipped"
