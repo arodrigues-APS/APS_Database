@@ -130,3 +130,17 @@ def test_nightly_validation_rejects_an_unmounted_source_root(tmp_path: Path):
 
     with pytest.raises(ConfigurationError, match="APS_DATA_ROOT"):
         settings.validate_nightly()
+
+
+def test_iv_damage_artifact_root_is_explicit_and_writable(tmp_path: Path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    settings = Settings.from_environ(
+        {"APS_IV_DAMAGE_ARTIFACT_ROOT": str(root)}
+    )
+
+    assert settings.require_iv_damage_artifact_root(writable=True) == root
+
+    missing = Settings.from_environ({})
+    with pytest.raises(ConfigurationError, match="APS_IV_DAMAGE_ARTIFACT_ROOT"):
+        missing.require_iv_damage_artifact_root()

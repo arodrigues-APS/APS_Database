@@ -33,6 +33,8 @@ def example(prefix, x):
         f"{prefix}-{x}", f"device-{prefix}-{x}", f"session-{prefix}-{x}",
         "irradiation", "delta_vth_v", "C2M", 0.01 * x,
         features(x), ion_species="Xe", manufacturer="Wolfspeed",
+        protocol_signature="protocol-v1",
+        prediction_horizon_s=features(x)["post_measurement_delay_s"],
     )
 
 
@@ -75,7 +77,11 @@ def test_scoring_converts_response_to_post_value_and_enforces_reference_boundary
     assert scored.evidence_status == EvidenceStatus.DECISION_ELIGIBLE
     assert scored.decision_eligible
     assert scored.predicted_post_value == pytest.approx(3.0 + scored.predicted_response)
-    assert scored.feature_completeness == {"complete": True, "missing": []}
+    assert scored.feature_completeness == {
+        "complete": True,
+        "missing": [],
+        "failures": [],
+    }
 
     library = score_request(candidate, request(reference_policy=ReferencePolicy.LIBRARY_SCREENING))
     assert library.evidence_status == EvidenceStatus.SCREENING_ONLY

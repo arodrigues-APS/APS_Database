@@ -21,25 +21,10 @@ from sklearn.linear_model import HuberRegressor
 from sklearn.preprocessing import RobustScaler
 
 from aps.ml.iv_damage_policy import EvidenceStatus, ReferencePolicy
-from aps.ml.iv_damage_readiness import DOMAIN_REQUIRED_FEATURES
-
-
-FEATURE_BOUNDS: Mapping[str, tuple[float | None, float | None]] = {
-    "pre_value": (0.0, None),
-    "beam_energy_mev": (0.0, None),
-    "let_surface": (0.0, None),
-    "range_um": (0.0, None),
-    "fluence_or_dose": (0.0, None),
-    "irradiation_bias_v": (None, None),
-    "post_measurement_delay_s": (0.0, None),
-    "sc_voltage_v": (0.0, None),
-    "sc_duration_us": (0.0, None),
-    "peak_current_a": (0.0, None),
-    "deposited_energy_j": (0.0, None),
-    "pulse_count": (1.0, None),
-    "gate_drive_v": (None, None),
-    "temperature_c": (-273.15, 500.0),
-}
+from aps.ml.iv_damage_readiness import (
+    DOMAIN_REQUIRED_FEATURES,
+    validate_required_features,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +39,8 @@ class DamageExample:
     features: Mapping[str, object]
     ion_species: str | None = None
     manufacturer: str | None = None
+    protocol_signature: str | None = None
+    prediction_horizon_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +52,8 @@ class DamageRequest:
     ion_species: str | None = None
     manufacturer: str | None = None
     reference_policy: str = ReferencePolicy.SAME_DEVICE
+    protocol_signature: str | None = None
+    prediction_horizon_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,34 +76,10 @@ class DamagePrediction:
     neighbor_devices: int = 0
 
 
-def _finite_number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float, np.integer, np.floating))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
-
-
 def validate_request_features(
     *, stress_type: str, features: Mapping[str, object]
 ) -> tuple[str, ...]:
-    try:
-        required = DOMAIN_REQUIRED_FEATURES[stress_type]
-    except KeyError as exc:
-        raise ValueError(f"unsupported stress_type: {stress_type}") from exc
-    reasons: list[str] = []
-    for name in sorted(required):
-        value = features.get(name)
-        if not _finite_number(value):
-            reasons.append(f"missing_or_nonfinite:{name}")
-            continue
-        lower, upper = FEATURE_BOUNDS[name]
-        number = float(value)
-        if lower is not None and number <= lower:
-            reasons.append(f"outside_physical_bounds:{name}")
-        if upper is not None and number > upper:
-            reasons.append(f"outside_physical_bounds:{name}")
-    return tuple(reasons)
+    return validate_required_features(stress_type=stress_type, features=features)
 
 
 class CalibratedDamageModel:
@@ -144,6 +109,8 @@ class CalibratedDamageModel:
             raise ValueError("ood_quantile must be in [0.5, 1)")
         if min_neighbor_devices < 1:
             raise ValueError("min_neighbor_devices must be positive")
+        if min_calibration_groups < 1:
+            raise ValueError("min_calibration_groups must be positive")
         self.stress_type = stress_type
         self.target_type = target_type
         self.estimator_kind = estimator_kind
@@ -161,6 +128,7 @@ class CalibratedDamageModel:
         self._training_numeric: np.ndarray | None = None
         self._training_devices: tuple[str, ...] = ()
         self._known_categories: dict[str, frozenset[str]] = {}
+        self._known_protocol_signatures: frozenset[str] = frozenset()
         self._ood_threshold: float | None = None
         self._conformal_radius: float | None = None
         self._training_device_keys: frozenset[str] = frozenset()
@@ -178,6 +146,10 @@ class CalibratedDamageModel:
 
     def _categories(self, row: DamageExample | DamageRequest) -> dict[str, str]:
         categories = {"device_type": str(row.device_type).strip()}
+        if row.protocol_signature:
+            categories["protocol_signature"] = str(
+                row.protocol_signature
+            ).strip()
         if row.manufacturer:
             categories["manufacturer"] = str(row.manufacturer).strip()
         if self.stress_type == "irradiation":
@@ -212,8 +184,23 @@ class CalibratedDamageModel:
                 raise ValueError("device_type is required")
             if self.stress_type == "irradiation" and not str(row.ion_species or "").strip():
                 raise ValueError("ion_species is required for irradiation")
-            if not _finite_number(row.observed_response):
+            if not str(row.protocol_signature or "").strip():
+                raise ValueError("protocol_signature is required")
+            if (
+                not isinstance(row.observed_response, (int, float, np.integer, np.floating))
+                or isinstance(row.observed_response, bool)
+                or not math.isfinite(float(row.observed_response))
+            ):
                 raise ValueError("observed_response must be finite")
+            delay = row.features.get("post_measurement_delay_s")
+            if self.stress_type == "irradiation" and (
+                row.prediction_horizon_s is None
+                or not math.isfinite(float(row.prediction_horizon_s))
+                or float(row.prediction_horizon_s) != float(delay)
+            ):
+                raise ValueError(
+                    "prediction_horizon_s must equal post_measurement_delay_s"
+                )
 
     def _new_estimator(self) -> HuberRegressor | ExtraTreesRegressor:
         if self.estimator_kind == "huber":
@@ -280,6 +267,9 @@ class CalibratedDamageModel:
         self._known_categories = {
             name: frozenset(values) for name, values in categories.items()
         }
+        self._known_protocol_signatures = frozenset(
+            str(row.protocol_signature).strip() for row in training_rows
+        )
         self._training_device_keys = frozenset(device_keys)
         self._training_session_keys = frozenset(
             row.stress_session_key for row in training_rows
@@ -309,6 +299,24 @@ class CalibratedDamageModel:
             reasons.append("wrong_stress_type")
         if request.target_type != self.target_type:
             reasons.append("wrong_target_type")
+        protocol = str(request.protocol_signature or "").strip()
+        if not protocol:
+            reasons.append("missing_protocol_signature")
+        elif protocol not in self._known_protocol_signatures:
+            reasons.append("unseen_protocol_signature")
+        if self.stress_type == "irradiation":
+            delay = request.features.get("post_measurement_delay_s")
+            horizon = request.prediction_horizon_s
+            if (
+                not isinstance(horizon, (int, float, np.integer, np.floating))
+                or isinstance(horizon, bool)
+                or not math.isfinite(float(horizon))
+            ):
+                reasons.append("missing_or_nonfinite:prediction_horizon_s")
+            elif isinstance(delay, (int, float, np.integer, np.floating)) and (
+                not isinstance(delay, bool) and float(horizon) != float(delay)
+            ):
+                reasons.append("prediction_horizon_conflict")
         categories = self._categories(request)
         if not categories.get("device_type"):
             reasons.append("missing_category:device_type")
@@ -357,7 +365,7 @@ class CalibratedDamageModel:
         )
         if overlap_devices or overlap_sessions:
             raise ValueError("calibration devices and sessions must be independent of training")
-        residuals: list[float] = []
+        residuals_by_device: dict[str, list[float]] = {}
         for row in calibration_rows:
             request = DamageRequest(
                 stress_type=row.stress_type,
@@ -365,19 +373,26 @@ class CalibratedDamageModel:
                 device_type=row.device_type,
                 ion_species=row.ion_species,
                 manufacturer=row.manufacturer,
+                protocol_signature=row.protocol_signature,
+                prediction_horizon_s=row.prediction_horizon_s,
                 features=row.features,
             )
             if self.assess_domain(request).in_domain:
-                residuals.append(abs(self._point_prediction(row) - row.observed_response))
-        if len(residuals) < self.min_calibration_groups:
+                residuals_by_device.setdefault(row.physical_device_key, []).append(
+                    abs(self._point_prediction(row) - row.observed_response)
+                )
+        # The physical device, not repeated sessions, is the independent
+        # calibration unit. A cluster maximum is conservative for repeats.
+        residuals = [max(values) for values in residuals_by_device.values()]
+        if len(residuals_by_device) < self.min_calibration_groups:
             raise ValueError(
-                "too few independent in-domain calibration groups: "
-                f"{len(residuals)} < {self.min_calibration_groups}"
+                "too few independent in-domain calibration devices: "
+                f"{len(residuals_by_device)} < {self.min_calibration_groups}"
             )
         ordered = sorted(residuals)
         rank = math.ceil((len(ordered) + 1) * self.interval_coverage) - 1
         self._conformal_radius = float(ordered[min(rank, len(ordered) - 1)])
-        self.calibration_groups = len(residuals)
+        self.calibration_groups = len(residuals_by_device)
         return self
 
     def predict(self, request: DamageRequest) -> DamagePrediction:
@@ -386,7 +401,12 @@ class CalibratedDamageModel:
         assessment = self.assess_domain(request)
         if not assessment.in_domain:
             invalid = any(
-                reason.startswith(("missing_", "outside_physical_bounds", "wrong_"))
+                reason.startswith(
+                    (
+                        "missing_", "outside_physical_bounds", "wrong_",
+                        "prediction_horizon_conflict",
+                    )
+                )
                 for reason in assessment.reasons
             )
             status = EvidenceStatus.INVALID_INPUT if invalid else EvidenceStatus.OUT_OF_DOMAIN
@@ -436,6 +456,8 @@ class CalibratedDamageModel:
             "known_categories": {
                 name: sorted(values) for name, values in sorted(self._known_categories.items())
             },
+            "known_protocol_signatures": sorted(self._known_protocol_signatures),
+            "prediction_horizon_feature": "post_measurement_delay_s",
         }
         payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         return {**manifest, "manifest_sha256": hashlib.sha256(payload.encode()).hexdigest()}

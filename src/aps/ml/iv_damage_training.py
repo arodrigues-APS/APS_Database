@@ -19,7 +19,8 @@ from aps.ml.iv_damage_model import (
     DamageExample,
     DamageRequest,
 )
-from aps.ml.iv_damage_operations import save_model_artifact
+from aps.ml.iv_damage_dataset import snapshot_member_payload_hash
+from aps.ml.iv_damage_operations import default_artifact_root, save_model_artifact
 from aps.ml.iv_damage_policy import (
     AcceptancePolicy,
     ValidationEvidence,
@@ -40,7 +41,7 @@ from aps.ml.iv_damage_validation import (
     assert_no_group_leakage,
     evaluate_predictions,
 )
-from aps.paths import REPO_ROOT
+from aps.provenance import collect_source_provenance
 
 
 class DamageTrainingError(RuntimeError):
@@ -111,6 +112,8 @@ def _request(example: DamageExample) -> DamageRequest:
         device_type=example.device_type,
         manufacturer=example.manufacturer,
         ion_species=example.ion_species,
+        protocol_signature=example.protocol_signature,
+        prediction_horizon_s=example.prediction_horizon_s,
         features=example.features,
     )
 
@@ -245,73 +248,93 @@ def _snapshot_rows(
     try:
         cursor.execute(
             """
-            SELECT unit.id, unit.unit_key, unit.physical_device_key,
-                   unit.stress_session_key, unit.stress_type, unit.target_type,
-                   unit.device_type, unit.manufacturer, unit.campaign_key, unit.run_key,
-                   unit.ion_species, unit.measurement_protocol_id, unit.response_value,
-                   unit.response_uncertainty, unit.pre_replicate_count,
-                   unit.post_replicate_count, unit.reference_policy,
-                   unit.baseline_reference_group_key, unit.stress_features,
-                   unit.pre_value, unit.quality_status,
-                   assignment.split_role, assignment.fold_number
+            SELECT assignment.response_unit_id, member.frozen_payload,
+                   member.payload_hash, assignment.split_role,
+                   assignment.fold_number
             FROM iv_damage_split_assignments assignment
-            JOIN iv_damage_response_units unit ON unit.id = assignment.response_unit_id
+            JOIN iv_damage_dataset_snapshot_members member
+              ON member.dataset_snapshot_id = assignment.dataset_snapshot_id
+             AND member.response_unit_id = assignment.response_unit_id
             WHERE assignment.dataset_snapshot_id = %s
               AND assignment.split_scheme = %s
-              AND unit.stress_type = %s
-              AND unit.target_type = %s
-            ORDER BY unit.unit_key
+              AND member.frozen_payload ->> 'stress_type' = %s
+              AND member.frozen_payload ->> 'target_type' = %s
+            ORDER BY member.frozen_payload ->> 'unit_key'
             """,
             (snapshot_id, split_scheme, stress_type, target_type),
         )
         result = []
         for row in cursor.fetchall():
-            stress_features = dict(row[18])
-            stress_features["pre_value"] = float(row[19])
+            payload = dict(row[1])
+            if snapshot_member_payload_hash(payload) != row[2]:
+                raise DamageTrainingError(
+                    "frozen snapshot member payload hash mismatch for "
+                    f"response_unit_id={row[0]}"
+                )
+            stress_features = dict(payload["stress_features"])
+            stress_features["pre_value"] = float(payload["pre_value"])
+            protocol_signature = str(payload["measurement_protocol_id"])
+            horizon = (
+                float(stress_features["post_measurement_delay_s"])
+                if payload["stress_type"] == "irradiation"
+                else None
+            )
             damage = DamageExample(
-                response_unit_key=row[1],
-                physical_device_key=row[2],
-                stress_session_key=row[3],
-                stress_type=row[4],
-                target_type=row[5],
-                device_type=row[6],
-                manufacturer=row[7],
-                ion_species=row[10],
-                observed_response=float(row[12]),
+                response_unit_key=payload["unit_key"],
+                physical_device_key=payload["physical_device_key"],
+                stress_session_key=payload["stress_session_key"],
+                stress_type=payload["stress_type"],
+                target_type=payload["target_type"],
+                device_type=payload["device_type"],
+                manufacturer=payload.get("manufacturer"),
+                ion_species=payload.get("ion_species"),
+                protocol_signature=protocol_signature,
+                prediction_horizon_s=horizon,
+                observed_response=float(payload["response_value"]),
                 features=stress_features,
             )
             validation = ValidationUnit(
-                response_unit_key=row[1],
-                physical_device_key=row[2],
-                stress_session_key=row[3],
-                target_type=row[5],
-                observed_response=float(row[12]),
-                run_key=row[9],
-                campaign_key=row[8],
-                ion_species=row[10],
-                baseline_reference_group_key=row[17],
-                device_type=row[6],
+                response_unit_key=payload["unit_key"],
+                physical_device_key=payload["physical_device_key"],
+                stress_session_key=payload["stress_session_key"],
+                target_type=payload["target_type"],
+                observed_response=float(payload["response_value"]),
+                run_key=payload["run_key"],
+                campaign_key=payload["campaign_key"],
+                ion_species=payload.get("ion_species"),
+                baseline_reference_group_key=payload.get(
+                    "baseline_reference_group_key"
+                ),
+                device_type=payload["device_type"],
                 stress_condition_key=str(stress_features.get("stress_condition_key") or "") or None,
             )
             evidence = EvidenceUnit(
-                unit_key=row[1],
-                physical_device_key=row[2],
-                stress_session_key=row[3],
-                stress_type=row[4],
-                target_type=row[5],
-                device_type=row[6],
-                campaign_key=row[8],
-                run_key=row[9],
-                ion_species=row[10],
-                measurement_protocol_id=row[11],
-                response_value=float(row[12]),
-                response_uncertainty=row[13],
-                replicate_count=min(int(row[14]), int(row[15])),
-                split_role=row[21],
+                unit_key=payload["unit_key"],
+                physical_device_key=payload["physical_device_key"],
+                stress_session_key=payload["stress_session_key"],
+                stress_type=payload["stress_type"],
+                target_type=payload["target_type"],
+                device_type=payload["device_type"],
+                campaign_key=payload["campaign_key"],
+                run_key=payload["run_key"],
+                ion_species=payload.get("ion_species"),
+                measurement_protocol_id=protocol_signature,
+                response_value=float(payload["response_value"]),
+                response_uncertainty=payload.get("response_uncertainty"),
+                replicate_count=min(
+                    int(payload["pre_replicate_count"]),
+                    int(payload["post_replicate_count"]),
+                ),
+                split_role=row[3],
                 features=stress_features,
-                quality_status=row[20],
+                quality_status=payload["quality_status"],
             )
-            result.append(SnapshotExample(int(row[0]), damage, validation, evidence, row[8], row[21], row[22]))
+            result.append(
+                SnapshotExample(
+                    int(row[0]), damage, validation, evidence,
+                    payload["campaign_key"], row[3], row[4]
+                )
+            )
         return result
     finally:
         cursor.close()
@@ -381,16 +404,66 @@ def _metrics_meet_policy(metrics: ValidationMetrics, policy: AcceptancePolicy) -
             metrics.supported_fraction >= policy.min_supported_fraction,
             metrics.baseline_improvement is not None
             and metrics.baseline_improvement >= policy.min_baseline_improvement_fraction,
-            metrics.median_absolute_error is not None and metrics.median_absolute_error <= policy.max_median_abs_error,
-            metrics.p90_absolute_error is not None and metrics.p90_absolute_error <= policy.max_p90_abs_error,
+            metrics.median_absolute_error is not None
+            and metrics.median_absolute_error <= policy.max_median_abs_error,
+            metrics.p90_absolute_error is not None
+            and metrics.p90_absolute_error <= policy.max_p90_abs_error,
             metrics.bias is not None and abs(metrics.bias) <= policy.max_abs_bias,
             metrics.catastrophic_error_rate is not None
             and metrics.catastrophic_error_rate <= policy.max_catastrophic_error_rate,
             metrics.interval_coverage is not None
-            and policy.min_interval_coverage <= metrics.interval_coverage <= policy.max_interval_coverage,
-            metrics.mean_interval_width is not None and metrics.mean_interval_width <= policy.max_mean_interval_width,
+            and policy.min_interval_coverage
+            <= metrics.interval_coverage
+            <= policy.max_interval_coverage,
+            metrics.mean_interval_width is not None
+            and metrics.mean_interval_width <= policy.max_mean_interval_width,
         )
     )
+
+
+def _subgroup_validation(
+    evaluation: PartitionEvaluation,
+    rows: Sequence[SnapshotExample],
+    *,
+    catastrophic_error_threshold: float,
+) -> Mapping[str, ValidationMetrics]:
+    """Evaluate external errors for each released physical/protocol subgroup."""
+
+    predictions = {
+        prediction.response_unit_key: prediction
+        for prediction in evaluation.predictions
+    }
+    grouped: dict[tuple[str, str, str], list[PredictionRecord]] = {}
+    for row in rows:
+        prediction = predictions[row.damage.response_unit_key]
+        key = (
+            row.damage.device_type,
+            row.damage.ion_species or "none",
+            str(row.damage.protocol_signature),
+        )
+        grouped.setdefault(key, []).append(
+            PredictionRecord(
+                response_unit_key=prediction.response_unit_key,
+                observed=prediction.observed,
+                predicted=prediction.predicted,
+                baseline_predicted=prediction.baseline_predictions[
+                    evaluation.best_baseline
+                ],
+                interval_lower=prediction.lower,
+                interval_upper=prediction.upper,
+                supported=prediction.predicted is not None,
+            )
+        )
+    return {
+        "|".join(key): evaluate_predictions(
+            records, catastrophic_error_limit=catastrophic_error_threshold
+        )
+        for key, records in sorted(grouped.items())
+    }
+
+
+def _value_or(value: float | None, missing: float) -> float:
+    return missing if value is None else value
 
 
 def train_snapshot_candidate(
@@ -405,8 +478,18 @@ def train_snapshot_candidate(
     release_split_scheme: str = "frozen_release",
     code_sha: str,
     artifact_directory: Path | None = None,
+    source_provenance: Mapping[str, object] | None = None,
 ) -> TrainingRunResult:
     """Train, validate, persist, and leave a candidate awaiting explicit release."""
+
+    provenance = dict(
+        source_provenance or collect_source_provenance().as_dict()
+    )
+    if provenance.get("code_sha") != code_sha or not provenance.get("fingerprint"):
+        raise DamageTrainingError(
+            "source provenance must include a fingerprint matching code_sha"
+        )
+    source_identifier = f"{code_sha}:{provenance['fingerprint']}"
 
     cursor = conn.cursor()
     try:
@@ -483,35 +566,77 @@ def train_snapshot_candidate(
             stress_type=stress_type,
             target_type=target_type,
         )
-        if len(scheme_rows) != len(rows):
-            raise DamageTrainingError(f"{scheme} assignments do not cover the frozen release population")
+        external_ids = {
+            row.response_unit_id for row in rows if row.split_role == "external_test"
+        }
+        expected_diagnostic_ids = {
+            row.response_unit_id for row in rows
+        } - external_ids
+        scheme_ids = {row.response_unit_id for row in scheme_rows}
+        if scheme_ids != expected_diagnostic_ids:
+            raise DamageTrainingError(
+                f"{scheme} assignments must cover only the non-external "
+                "diagnostic population"
+            )
         metrics, predictions = _grouped_cv(scheme_rows, split_scheme=scheme, model_kwargs=model_kwargs)
         grouped_metrics[scheme] = metrics
         grouped_predictions[scheme] = predictions
 
     external_metrics = external_evaluation.metrics
-    subgroup_counts = Counter((row.damage.device_type, row.damage.ion_species or "none") for row in external)
-    required_schemes_pass = all(_metrics_meet_policy(metrics, acceptance) for metrics in grouped_metrics.values())
+    subgroup_metrics = _subgroup_validation(
+        external_evaluation,
+        external,
+        catastrophic_error_threshold=float(catastrophic_threshold),
+    )
+    subgroup_counts = Counter(
+        (
+            row.damage.device_type,
+            row.damage.ion_species or "none",
+            str(row.damage.protocol_signature),
+        )
+        for row in external
+    )
+    required_schemes_pass = all(
+        _metrics_meet_policy(metrics, acceptance)
+        for metrics in grouped_metrics.values()
+    )
+    subgroups_pass = all(
+        _metrics_meet_policy(metrics, acceptance)
+        for metrics in subgroup_metrics.values()
+    )
+    external_pass = _metrics_meet_policy(external_metrics, acceptance)
     evidence = ValidationEvidence(
         training_groups=len(training),
         external_groups=len(external),
         campaigns=len({row.campaign_key for row in rows}),
         smallest_released_subgroup_groups=min(subgroup_counts.values(), default=0),
         supported_fraction=external_metrics.supported_fraction,
-        median_abs_error=external_metrics.median_absolute_error or math.inf,
-        p90_abs_error=external_metrics.p90_absolute_error or math.inf,
+        median_abs_error=_value_or(external_metrics.median_absolute_error, math.inf),
+        p90_abs_error=_value_or(external_metrics.p90_absolute_error, math.inf),
         abs_bias=abs(external_metrics.bias) if external_metrics.bias is not None else math.inf,
-        candidate_mae=external_metrics.mae or math.inf,
-        best_baseline_mae=external_metrics.baseline_mae or math.inf,
-        interval_coverage=external_metrics.interval_coverage or 0.0,
-        mean_interval_width=external_metrics.mean_interval_width or math.inf,
-        catastrophic_error_rate=external_metrics.catastrophic_error_rate or 0.0,
-        external_test_passed=required_schemes_pass,
+        candidate_mae=_value_or(external_metrics.mae, math.inf),
+        best_baseline_mae=_value_or(external_metrics.baseline_mae, math.inf),
+        interval_coverage=_value_or(external_metrics.interval_coverage, 0.0),
+        mean_interval_width=_value_or(external_metrics.mean_interval_width, math.inf),
+        catastrophic_error_rate=_value_or(
+            external_metrics.catastrophic_error_rate, math.inf
+        ),
+        external_test_passed=(
+            external_pass and required_schemes_pass and subgroups_pass
+        ),
         required_features_complete=readiness.checks["required_features"],
         leakage_checks_passed=True,
     )
     gate = evaluate_release(evidence, acceptance)
-    artifact_dir = artifact_directory or (REPO_ROOT / "out" / "iv_damage_models")
+    artifact_root = default_artifact_root().resolve()
+    artifact_dir = (artifact_directory or artifact_root).resolve()
+    try:
+        artifact_dir.relative_to(artifact_root)
+    except ValueError as exc:
+        raise DamageTrainingError(
+            "artifact_directory must be contained under "
+            "APS_IV_DAMAGE_ARTIFACT_ROOT"
+        ) from exc
     artifact = save_model_artifact(
         external_evaluation.model,
         artifact_dir / f"{model_version}.joblib",
@@ -520,15 +645,18 @@ def train_snapshot_candidate(
             "snapshot_version": snapshot_version,
             "snapshot_id": int(snapshot_id),
             "policy_version": policy_version,
-            "code_sha": code_sha,
+            "code_sha": source_identifier,
+            "source_provenance": provenance,
             "release_split_scheme": release_split_scheme,
             "required_grouped_schemes": required_schemes,
+            "measurement_protocol_ids": sorted(
+                external_evaluation.model.artifact_manifest()[
+                    "known_protocol_signatures"
+                ]
+            ),
         },
     )
-    try:
-        relative_artifact = str(artifact.path.relative_to(REPO_ROOT))
-    except ValueError:
-        relative_artifact = str(artifact.path)
+    artifact_path = str(artifact.path)
     validation_metrics = {
         "release_gate_eligible": gate.eligible,
         "release_gate_checks": gate.checks,
@@ -536,6 +664,13 @@ def train_snapshot_candidate(
         "readiness": asdict(readiness),
         "external": asdict(external_metrics),
         "grouped": {name: asdict(metrics) for name, metrics in grouped_metrics.items()},
+        "external_subgroups": {
+            name: {
+                **asdict(metrics),
+                "policy_passed": _metrics_meet_policy(metrics, acceptance),
+            }
+            for name, metrics in subgroup_metrics.items()
+        },
         "best_baseline": external_evaluation.best_baseline,
         "baseline_maes": external_evaluation.baseline_maes,
     }
@@ -544,8 +679,10 @@ def train_snapshot_candidate(
         "platform": platform.platform(),
         "numpy": np.__version__,
         "scikit_learn": sklearn.__version__,
+        "source_provenance": provenance,
     }
     cursor = conn.cursor()
+    commit_attempted = False
     try:
         cursor.execute(
             """
@@ -568,13 +705,25 @@ def train_snapshot_candidate(
                 snapshot_id,
                 policy_id,
                 estimator_kind,
-                Json({"required_features": external_evaluation.model.required_features}),
-                Json(model_kwargs),
-                Json({"stress_type": stress_type, "target_type": target_type}),
+                Json({
+                    "required_features": external_evaluation.model.required_features,
+                    "protocol_signature_required": True,
+                    "prediction_horizon_feature": "post_measurement_delay_s",
+                }),
+                Json({**model_kwargs, "source_provenance": provenance}),
+                Json({
+                    "stress_type": stress_type,
+                    "target_type": target_type,
+                    "measurement_protocol_ids": sorted(
+                        external_evaluation.model.artifact_manifest()[
+                            "known_protocol_signatures"
+                        ]
+                    ),
+                }),
                 Json(validation_metrics),
-                code_sha,
+                source_identifier,
                 Json(environment),
-                relative_artifact,
+                artifact_path,
                 artifact.checksum,
                 "validated" if gate.eligible else "candidate",
                 gate.eligible,
@@ -620,9 +769,18 @@ def train_snapshot_candidate(
         for scheme, values in grouped_predictions.items():
             for fold, prediction in values:
                 persist(scheme, "external_test", fold, prediction)
+        commit_attempted = True
         conn.commit()
     except Exception:
         conn.rollback()
+        # Before commit starts, this exact path is known to be an orphan and
+        # can be removed. A commit exception is ambiguous, so preserve the
+        # artifact for operator reconciliation instead of risking data loss.
+        if not commit_attempted:
+            try:
+                artifact.path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
     finally:
         cursor.close()
@@ -631,7 +789,7 @@ def train_snapshot_candidate(
         model_version,
         gate.eligible,
         gate.reasons,
-        relative_artifact,
+        artifact_path,
         artifact.checksum,
         external_metrics,
         grouped_metrics,

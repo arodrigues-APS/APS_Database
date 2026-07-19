@@ -77,6 +77,11 @@ def test_split_fails_when_independent_components_cannot_support_requested_cv():
         assign_grouped_folds(units, "leave_campaign", n_splits=2)
 
 
+def test_required_grouping_key_never_silently_falls_back_to_device():
+    with pytest.raises(ValueError, match="leave_condition requires"):
+        assign_grouped_folds([unit("a"), unit("b")], "leave_condition", n_splits=2)
+
+
 def test_split_is_deterministic_and_manifest_is_persistence_ready():
     units = [unit(str(index)) for index in range(8)]
     first = assign_grouped_folds(units, "leave_device", n_splits=4, seed=17)

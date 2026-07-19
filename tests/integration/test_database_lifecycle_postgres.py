@@ -12,6 +12,7 @@ from psycopg2.extensions import parse_dsn
 import aps.db.models as model_module
 from aps.config import Settings
 from aps.db.migrations import (
+    discover_migrations,
     MigrationBaselineRequired,
     MigrationChecksumMismatch,
     MigrationExecutionError,
@@ -109,7 +110,11 @@ def test_existing_database_adopts_exact_history_then_applies_new_migration(
     )
 
     assert result.baselined[-1] == "026_irradiation_energy_windows.sql"
-    assert result.applied == ("031_flask_avalanche_admin.sql",)
+    expected_forward = tuple(
+        migration.filename for migration in discover_migrations(SCHEMA_DIR)
+        if migration.filename > "026_irradiation_energy_windows.sql"
+    )
+    assert result.applied == expected_forward
     with postgres_connection.cursor() as cursor:
         cursor.execute(
             """

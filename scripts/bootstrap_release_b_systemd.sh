@@ -125,6 +125,7 @@ required_keys=(
   APS_FLASK_SECRET_KEY
   APS_DATA_ROOT
   APS_NAS_ROOT
+  APS_IV_DAMAGE_ARTIFACT_ROOT
   APS_ENABLE_LEGACY_CV_DPT
   APS_WEB_TOOLS_DIR
 )
@@ -139,6 +140,7 @@ legacy_cv="$(require_configured_key APS_ENABLE_LEGACY_CV_DPT)"
 
 require_service_directory APS_DATA_ROOT read
 require_service_directory APS_NAS_ROOT read
+require_service_directory APS_IV_DAMAGE_ARTIFACT_ROOT write
 require_service_directory APS_WEB_TOOLS_DIR write
 
 systemd-analyze verify "${REPO_ROOT}/server_config/server.service" "${REPO_ROOT}/server_config/aps-nightly.service" "${REPO_ROOT}/server_config/aps-nightly.timer" "${REPO_ROOT}/server_config/aps-nightly-failure-record@.service"

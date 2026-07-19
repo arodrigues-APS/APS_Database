@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from numbers import Real
 from dataclasses import asdict, dataclass
 from typing import Mapping, Sequence
 
@@ -54,17 +55,57 @@ class PredictionRequest:
             )
         ):
             raise ValueError("request identity and protocol fields are required")
-        if not math.isfinite(float(self.pre_value)):
+        if (
+            not isinstance(self.pre_value, Real)
+            or isinstance(self.pre_value, bool)
+            or not math.isfinite(float(self.pre_value))
+        ):
             raise ValueError("pre_value must be finite")
         if self.pre_uncertainty is not None and (
-            not math.isfinite(float(self.pre_uncertainty)) or self.pre_uncertainty < 0
+            not isinstance(self.pre_uncertainty, Real)
+            or isinstance(self.pre_uncertainty, bool)
+            or not math.isfinite(float(self.pre_uncertainty))
+            or self.pre_uncertainty < 0
         ):
             raise ValueError("pre_uncertainty must be finite and nonnegative")
-        if self.requested_prediction_horizon_s is not None and (
-            not math.isfinite(float(self.requested_prediction_horizon_s))
-            or self.requested_prediction_horizon_s < 0
+        if self.target_type == "log_rdson_ratio" and self.pre_value <= 0:
+            raise ValueError("pre-stress Rds(on) must be positive")
+        features = dict(self.stress_features)
+        horizon = self.requested_prediction_horizon_s
+        feature_horizon = features.get("post_measurement_delay_s")
+        if self.stress_type == "irradiation":
+            if horizon is None and feature_horizon is None:
+                raise ValueError(
+                    "irradiation requests require prediction_horizon_s "
+                    "(post_measurement_delay_s)"
+                )
+            if horizon is None:
+                horizon = feature_horizon
+            elif feature_horizon is None:
+                features["post_measurement_delay_s"] = horizon
+            else:
+                try:
+                    conflict = float(horizon) != float(feature_horizon)
+                except (TypeError, ValueError):
+                    conflict = True
+                if conflict:
+                    raise ValueError(
+                        "prediction_horizon_s must equal "
+                        "stress_features.post_measurement_delay_s"
+                    )
+        if horizon is not None and (
+            isinstance(horizon, bool)
+            or not isinstance(horizon, (int, float))
+            or not math.isfinite(float(horizon))
+            or float(horizon) <= 0
         ):
-            raise ValueError("requested_prediction_horizon_s must be finite and nonnegative")
+            raise ValueError("requested_prediction_horizon_s must be finite and positive")
+        object.__setattr__(self, "stress_features", features)
+        object.__setattr__(
+            self,
+            "requested_prediction_horizon_s",
+            None if horizon is None else float(horizon),
+        )
 
 
 def _canonical_json(value: object) -> str:

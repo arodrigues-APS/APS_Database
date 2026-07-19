@@ -30,24 +30,25 @@ DATASETS = {
     "validation": "iv_damage_validation_summary_view",
     "monitoring": "iv_damage_prediction_monitoring_view",
     "eligible": "iv_damage_decision_eligible_prediction_view",
+    "backlog": "iv_damage_prediction_backlog_view",
 }
 
 DATASET_COLUMNS = {
     "models": {
-        "model_version", "model_name", "stress_type", "target_type", "algorithm",
+        "id", "model_version", "model_name", "stress_type", "target_type", "algorithm",
         "release_status", "created_at", "validated_at", "released_at",
         "policy_version", "acceptance_policy_approved", "snapshot_version",
         "snapshot_hash", "snapshot_rows", "independent_group_count",
         "is_active_release", "validation_metrics", "released_domain",
     },
     "validation": {
-        "model_run_id", "split_scheme", "split_role", "stress_type", "target_type",
+        "model_run_id", "model_version", "split_scheme", "split_role", "stress_type", "target_type",
         "device_type", "ion_species", "support_status", "independent_units",
         "physical_devices", "campaigns", "mean_abs_error", "median_abs_error",
         "p90_abs_error", "mean_bias", "interval_coverage",
     },
     "monitoring": {
-        "prediction_id", "model_run_id", "request_id", "request_key", "stress_type",
+        "prediction_id", "model_run_id", "model_version", "request_id", "request_key", "stress_type",
         "target_type", "device_type", "support_status", "evidence_status", "in_domain",
         "decision_eligible", "ood_score", "ood_threshold", "predicted_response",
         "predicted_response_lower", "predicted_response_upper", "observed_response",
@@ -61,6 +62,11 @@ DATASET_COLUMNS = {
         "evidence_status", "in_domain", "validation_gate_passed", "decision_eligible",
         "ood_score", "ood_threshold", "model_version", "algorithm", "activated_at",
         "created_at", "reference_policy",
+    },
+    "backlog": {
+        "request_id", "request_key", "physical_device_key", "device_type",
+        "measurement_protocol_id", "stress_type", "target_type", "request_status",
+        "requested_prediction_horizon_s", "request_source", "created_at", "request_age",
     },
 }
 
@@ -89,6 +95,7 @@ GUIDANCE = {
     TABS["operations"][1]: (
         "### Predictions and abstentions\n\n"
         "The status chart includes out-of-domain, insufficient-evidence, and invalid requests. "
+        "The backlog chart separately shows pending requests that have no prediction yet. "
         "The eligible table is sourced from the canonical database view and therefore contains "
         "only active-release, validation-gated, same-device, in-domain predictions."
     ),
@@ -108,6 +115,7 @@ DESCRIPTIONS = {
     "IV Damage V3 — Validation Support": "Independent held-out response units by in-domain or abstention status. Unsupported units remain in the displayed denominator.",
     "IV Damage V3 — Interval Coverage": "Empirical held-out interval-hit fraction by split and domain subgroup. It is marginal validation coverage, not a posterior probability for one prediction.",
     "IV Damage V3 — Scoring Status": "Prospective request results by support and evidence status, including abstentions. Counts are prediction requests, not independent outcome observations.",
+    "IV Damage V3 — Pending Request Backlog": "Pending requests that do not yet have any prediction. These remain visible when no active model exists or scoring fails, so an empty scoring chart is not mistaken for an empty queue.",
     "IV Damage V3 — Decision-Eligible Predictions": "Canonical active-release, same-device, in-domain predictions only. Response and post-value intervals retain target-specific units and model/release provenance.",
     "IV Damage V3 — Outcome Coverage": "Prospective predictions split by outcome matched/unmatched. Accuracy statistics use matched outcomes only; this chart keeps the missing-outcome denominator visible.",
     "IV Damage V3 — Prospective Residuals": "One matched prospective outcome per prediction request, with response residual, interval hit, OOD diagnostics, and timestamps. It is not retrospective training-fold evidence.",
@@ -148,19 +156,21 @@ def chart_definitions(ids: dict[str, int]) -> list[dict]:
         dict(name="IV Damage V3 — Models by Release State", ds="models", tab="release", viz="echarts_timeseries_bar", width=12, height=38,
              params=bar("release_status", [metric("model runs", "COUNT(*)")], groupby=["stress_type", "target_type"])),
         dict(name="IV Damage V3 — Grouped Validation Summary", ds="validation", tab="validation", viz="table", width=12, height=42,
-             params=table(["model_run_id", "split_scheme", "split_role", "stress_type", "target_type", "device_type", "ion_species", "support_status", "independent_units", "physical_devices", "campaigns", "mean_abs_error", "median_abs_error", "p90_abs_error", "mean_bias", "interval_coverage"])),
+             params=table(["model_run_id", "model_version", "split_scheme", "split_role", "stress_type", "target_type", "device_type", "ion_species", "support_status", "independent_units", "physical_devices", "campaigns", "mean_abs_error", "median_abs_error", "p90_abs_error", "mean_bias", "interval_coverage"])),
         dict(name="IV Damage V3 — Validation Error", ds="validation", tab="validation", viz="echarts_timeseries_bar", width=6, height=42,
-             params=bar("split_scheme", [metric("median absolute error", "MAX(median_abs_error)"), metric("P90 absolute error", "MAX(p90_abs_error)")], groupby=["split_role", "target_type"])),
+             params=bar("split_scheme", [metric("median absolute error", "MAX(median_abs_error)"), metric("P90 absolute error", "MAX(p90_abs_error)")], groupby=["model_version", "split_role", "stress_type", "target_type", "device_type", "ion_species", "support_status"])),
         dict(name="IV Damage V3 — Validation Support", ds="validation", tab="validation", viz="echarts_timeseries_bar", width=6, height=42,
-             params={**bar("split_scheme", [metric("independent units", "SUM(independent_units)")], groupby=["support_status", "split_role"]), "stack": True}),
+             params={**bar("split_scheme", [metric("independent units", "SUM(independent_units)")], groupby=["model_version", "stress_type", "target_type", "support_status", "split_role"]), "stack": True}),
         dict(name="IV Damage V3 — Interval Coverage", ds="validation", tab="validation", viz="echarts_timeseries_bar", width=12, height=38,
-             params=bar("split_scheme", [metric("interval coverage", "AVG(interval_coverage)")], groupby=["split_role", "target_type", "device_type"])),
+             params=bar("split_scheme", [metric("interval coverage", "MAX(interval_coverage)")], groupby=["model_version", "split_role", "stress_type", "target_type", "device_type", "ion_species", "support_status"])),
+        dict(name="IV Damage V3 — Pending Request Backlog", ds="backlog", tab="operations", viz="echarts_timeseries_bar", width=12, height=34,
+             params={**bar("request_status", [metric("pending requests", "COUNT(DISTINCT request_id)")], groupby=["stress_type", "target_type", "device_type"]), "stack": True}),
         dict(name="IV Damage V3 — Scoring Status", ds="monitoring", tab="operations", viz="echarts_timeseries_bar", width=12, height=38,
-             params={**bar("support_status", [metric("prediction requests", "COUNT(DISTINCT request_id)")], groupby=["evidence_status", "stress_type", "target_type"]), "stack": True}),
+             params={**bar("support_status", [metric("prediction requests", "COUNT(DISTINCT request_id)")], groupby=["model_version", "evidence_status", "stress_type", "target_type"]), "stack": True}),
         dict(name="IV Damage V3 — Decision-Eligible Predictions", ds="eligible", tab="operations", viz="table", width=12, height=52,
              params=table(["request_key", "model_version", "stress_type", "target_type", "device_type", "physical_device_key", "pre_value", "predicted_response", "predicted_response_lower", "predicted_response_upper", "predicted_post_value", "predicted_post_lower", "predicted_post_upper", "ood_score", "ood_threshold", "activated_at", "created_at"])),
         dict(name="IV Damage V3 — Outcome Coverage", ds="monitoring", tab="outcomes", viz="table", width=12, height=34,
-             params=table([], metrics=[metric("predictions", "COUNT(DISTINCT prediction_id)"), metric("matched outcomes", "COUNT(DISTINCT request_id) FILTER (WHERE observed_response IS NOT NULL)"), metric("unmatched outcomes", "COUNT(DISTINCT request_id) FILTER (WHERE observed_response IS NULL)")], groupby=["stress_type", "target_type", "device_type"])),
+             params=table([], metrics=[metric("predictions", "COUNT(DISTINCT prediction_id)"), metric("matched outcomes", "COUNT(DISTINCT request_id) FILTER (WHERE observed_response IS NOT NULL)"), metric("unmatched outcomes", "COUNT(DISTINCT request_id) FILTER (WHERE observed_response IS NULL)")], groupby=["model_version", "stress_type", "target_type", "device_type"])),
         dict(name="IV Damage V3 — Prospective Residuals", ds="monitoring", tab="outcomes", viz="table", width=12, height=54,
              params={**table(["request_key", "model_run_id", "stress_type", "target_type", "device_type", "predicted_response", "predicted_response_lower", "predicted_response_upper", "observed_response", "residual", "abs_residual", "interval_hit", "ood_score", "created_at", "matched_at"]), "adhoc_filters": [{"expressionType": "SQL", "sqlExpression": "observed_response IS NOT NULL", "clause": "WHERE"}]}),
     ]
@@ -190,7 +200,8 @@ def native_filters(catalog: list[dict], ids: dict[str, int]) -> list[dict]:
     return [
         _filter(stress, "Stress Type", [(ids[key], "stress_type") for key in shared], all_ids, all_ids),
         _filter(target, "Target", [(ids[key], "target_type") for key in shared], all_ids, all_ids, [stress]),
-        _filter("NATIVE_FILTER-ivdamage-device", "Device Type", [(ids[key], "device_type") for key in ("validation", "monitoring", "eligible")], scope({"validation", "monitoring", "eligible"}), all_ids, [stress, target]),
+        _filter("NATIVE_FILTER-ivdamage-model", "Model Version", [(ids[key], "model_version") for key in ("models", "validation", "monitoring", "eligible")], scope({"models", "validation", "monitoring", "eligible"}), all_ids, [stress, target]),
+        _filter("NATIVE_FILTER-ivdamage-device", "Device Type", [(ids[key], "device_type") for key in ("validation", "monitoring", "eligible", "backlog")], scope({"validation", "monitoring", "eligible", "backlog"}), all_ids, [stress, target]),
         _filter("NATIVE_FILTER-ivdamage-split", "Validation Split", [(ids["validation"], "split_scheme")], scope({"validation"}), all_ids, [stress, target]),
         _filter("NATIVE_FILTER-ivdamage-release", "Release Status", [(ids["models"], "release_status")], scope({"models"}), all_ids, [stress, target]),
     ]
@@ -207,7 +218,7 @@ def verify_views() -> None:
             raise RuntimeError(
                 "V3 damage-prediction database model is not prepared (missing: "
                 + ", ".join(missing)
-                + "). Apply forward migrations through schema/033 before deploying the dashboard."
+                + "). Apply forward migrations through schema/034 before deploying the dashboard."
             )
 
 

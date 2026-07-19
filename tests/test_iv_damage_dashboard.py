@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_dashboard_uses_only_v3_governed_views():
     assert DATASETS["eligible"] == "iv_damage_decision_eligible_prediction_view"
     assert all("iv_physical" not in view for view in DATASETS.values())
+    assert DATASETS["backlog"] == "iv_damage_prediction_backlog_view"
 
 
 def test_every_chart_has_scientific_description_and_known_columns():
@@ -52,6 +53,15 @@ def test_filter_targets_exist_on_targeted_datasets():
         for target in dashboard_filter["targets"]:
             dataset = reverse[target["datasetId"]]
             assert target["column"]["name"] in DATASET_COLUMNS[dataset]
+
+
+def test_validation_charts_do_not_combine_subgroup_quantiles_or_coverage():
+    definitions = chart_definitions({key: index for index, key in enumerate(DATASETS)})
+    error = next(row for row in definitions if row["name"].endswith("Validation Error"))
+    coverage = next(row for row in definitions if row["name"].endswith("Interval Coverage"))
+    assert {"model_version", "stress_type", "device_type", "ion_species", "support_status"} <= set(error["params"]["groupby"])
+    assert {"model_version", "stress_type", "device_type", "ion_species", "support_status"} <= set(coverage["params"]["groupby"])
+    assert all("AVG(interval_coverage)" not in metric["sqlExpression"] for metric in coverage["params"]["metrics"])
 
 
 def test_downstream_migration_consumes_canonical_view_without_destructive_sql():

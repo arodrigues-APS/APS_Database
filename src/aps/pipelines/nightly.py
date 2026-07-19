@@ -69,16 +69,20 @@ def _dashboard_device_library_available() -> bool:
 
 
 def _iv_damage_v3_schema_available() -> bool:
-    """Keep nightly safe until forward migrations 032-033 are deployed."""
+    """Keep nightly safe until the certified scalar/curve schema is deployed."""
     try:
         from aps.db_config import get_connection
 
         with closing(get_connection()) as conn, conn.cursor() as cursor:
             cursor.execute(
-                "SELECT to_regclass(%s), to_regclass(%s)",
+                "SELECT to_regclass(%s), to_regclass(%s), to_regclass(%s), "
+                "to_regclass(%s), to_regclass(%s)",
                 (
                     "public.iv_damage_prediction_requests",
                     "public.iv_damage_decision_eligible_prediction_view",
+                    "public.iv_damage_prediction_backlog_view",
+                    "public.iv_damage_curve_prediction_requests",
+                    "public.iv_damage_curve_release_gate_view",
                 ),
             )
             return all(cursor.fetchone())
@@ -394,17 +398,25 @@ def default_steps() -> tuple[Step, ...]:
         ),
         Step(
             "score-iv-damage-v3",
-            ("-m", "aps.ml.iv_damage_cli", "score"),
-            "score pending prospective requests with active released V3 models only",
+            ("-m", "aps.ml.iv_damage_predictor_cli", "score-scalar-all"),
+            "score scalar shadow and active decision models without shadow request consumption",
+            depends_on=("ingest-baselines", "ingest-short-circuit", "ingest-irradiation"),
+            critical=False,
+            enabled=_iv_damage_v3_schema_available,
+        ),
+        Step(
+            "score-iv-damage-curves-v3",
+            ("-m", "aps.ml.iv_damage_predictor_cli", "score-curves"),
+            "score certified functional-curve shadow and decision deployments",
             depends_on=("ingest-baselines", "ingest-short-circuit", "ingest-irradiation"),
             critical=False,
             enabled=_iv_damage_v3_schema_available,
         ),
         Step(
             "dashboard-iv-damage-v3",
-            ("-m", "aps.superset.create_iv_damage_prediction_dashboard"),
-            "reconcile V3 release, validation, abstention, and outcome monitoring",
-            depends_on=("score-iv-damage-v3",),
+            ("-m", "aps.superset.create_iv_damage_prediction_dashboard_v3"),
+            "reconcile certified scalar, projection, and full-curve monitoring",
+            depends_on=("ingest-baselines", "ingest-short-circuit", "ingest-irradiation"),
             critical=False,
             enabled=_iv_damage_v3_schema_available,
         ),

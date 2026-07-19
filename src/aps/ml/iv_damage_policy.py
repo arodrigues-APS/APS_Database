@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
+from numbers import Real
+from typing import Mapping
 
 
 class ReleaseStatus(StrEnum):
@@ -61,6 +63,179 @@ TARGET_CONTRACTS = {
         response_definition="ln(post_rdson_mohm / pre_rdson_mohm)",
     ),
 }
+
+
+class ClaimPolicyError(ValueError):
+    """A curve or projection claim policy is absent, partial, or nonphysical."""
+
+
+CURVE_CLAIM_POLICY_FIELDS = frozenset({
+    "curve_grid_points",
+    "curve_pca_components",
+    "curve_ridge_alpha",
+    "curve_interval_coverage",
+    "curve_min_development_curves",
+    "curve_min_development_devices",
+    "curve_min_external_curves",
+    "curve_min_external_devices",
+    "curve_max_mean_mae_a",
+    "curve_max_p90_error_a",
+    "curve_max_normalized_rmse",
+    "curve_min_band_coverage",
+})
+
+PROJECTION_CLAIM_POLICY_FIELDS = frozenset({
+    "projection_min_development_curves",
+    "projection_min_development_devices",
+    "projection_min_external_curves",
+    "projection_min_external_devices",
+    "projection_max_mean_mae_a",
+    "projection_max_p90_error_a",
+    "projection_max_normalized_rmse",
+    "projection_min_band_coverage",
+})
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        isinstance(value, Real)
+        and not isinstance(value, bool)
+        and isfinite(float(value))
+    )
+
+
+def _positive_integer(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 1
+    )
+
+
+def _require_complete_claim(
+    requirements: Mapping[str, object],
+    fields: frozenset[str],
+    claim: str,
+    *,
+    required: bool,
+) -> bool:
+    present = fields.intersection(requirements)
+    if not present and not required:
+        return False
+    missing = fields - present
+    if missing:
+        raise ClaimPolicyError(
+            f"{claim} claim policy is incomplete; missing: "
+            + ", ".join(sorted(missing))
+        )
+    return True
+
+
+def validate_curve_claim_requirements(
+    requirements: Mapping[str, object],
+    *,
+    required: bool = False,
+) -> None:
+    """Validate the complete policy block for learned functional curves."""
+    if not _require_complete_claim(
+        requirements, CURVE_CLAIM_POLICY_FIELDS, "full-curve", required=required,
+    ):
+        return
+    integer_fields = (
+        "curve_grid_points",
+        "curve_pca_components",
+        "curve_min_development_curves",
+        "curve_min_development_devices",
+        "curve_min_external_curves",
+        "curve_min_external_devices",
+    )
+    if any(not _positive_integer(requirements[name]) for name in integer_fields):
+        raise ClaimPolicyError(
+            "full-curve grid, component, curve, and device counts must be positive integers"
+        )
+    grid_points = int(requirements["curve_grid_points"])
+    components = int(requirements["curve_pca_components"])
+    if grid_points < 8 or components > grid_points:
+        raise ClaimPolicyError(
+            "curve_grid_points must be at least 8 and curve_pca_components cannot exceed it"
+        )
+    if (
+        int(requirements["curve_min_development_devices"])
+        > int(requirements["curve_min_development_curves"])
+        or int(requirements["curve_min_external_devices"])
+        > int(requirements["curve_min_external_curves"])
+    ):
+        raise ClaimPolicyError("full-curve device minima cannot exceed curve minima")
+    ridge_alpha = requirements["curve_ridge_alpha"]
+    if not _finite_number(ridge_alpha) or float(ridge_alpha) < 0.0:
+        raise ClaimPolicyError("curve_ridge_alpha must be finite and nonnegative")
+    interval = requirements["curve_interval_coverage"]
+    if not _finite_number(interval) or not 0.5 < float(interval) < 1.0:
+        raise ClaimPolicyError("curve_interval_coverage must be between 0.5 and 1")
+    for name in (
+        "curve_max_mean_mae_a",
+        "curve_max_p90_error_a",
+        "curve_max_normalized_rmse",
+    ):
+        value = requirements[name]
+        if not _finite_number(value) or float(value) < 0.0:
+            raise ClaimPolicyError(f"{name} must be finite and nonnegative")
+    band_coverage = requirements["curve_min_band_coverage"]
+    if (
+        not _finite_number(band_coverage)
+        or not 0.0 <= float(band_coverage) <= float(interval)
+    ):
+        raise ClaimPolicyError(
+            "curve_min_band_coverage must be between zero and curve_interval_coverage"
+        )
+
+
+def validate_projection_claim_requirements(
+    requirements: Mapping[str, object],
+    *,
+    required: bool = False,
+) -> None:
+    """Validate the complete policy block for deterministic curve projection."""
+    if not _require_complete_claim(
+        requirements,
+        PROJECTION_CLAIM_POLICY_FIELDS,
+        "deterministic-projection",
+        required=required,
+    ):
+        return
+    integer_fields = (
+        "projection_min_development_curves",
+        "projection_min_development_devices",
+        "projection_min_external_curves",
+        "projection_min_external_devices",
+    )
+    if any(not _positive_integer(requirements[name]) for name in integer_fields):
+        raise ClaimPolicyError(
+            "projection curve and device counts must be positive integers"
+        )
+    if (
+        int(requirements["projection_min_development_devices"])
+        > int(requirements["projection_min_development_curves"])
+        or int(requirements["projection_min_external_devices"])
+        > int(requirements["projection_min_external_curves"])
+    ):
+        raise ClaimPolicyError("projection device minima cannot exceed curve minima")
+    for name in (
+        "projection_max_mean_mae_a",
+        "projection_max_p90_error_a",
+        "projection_max_normalized_rmse",
+    ):
+        value = requirements[name]
+        if not _finite_number(value) or float(value) < 0.0:
+            raise ClaimPolicyError(f"{name} must be finite and nonnegative")
+    band_coverage = requirements["projection_min_band_coverage"]
+    if (
+        not _finite_number(band_coverage)
+        or not 0.0 <= float(band_coverage) <= 1.0
+    ):
+        raise ClaimPolicyError(
+            "projection_min_band_coverage must be between zero and one"
+        )
 
 
 @dataclass(frozen=True)

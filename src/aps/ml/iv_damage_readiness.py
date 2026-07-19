@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from math import isfinite
+from numbers import Real
 from typing import Mapping
 
 
@@ -34,6 +35,27 @@ DOMAIN_REQUIRED_FEATURES = {
         }
     ),
 }
+
+# Lower bounds are exclusive unless the feature is listed as inclusive. Keep
+# this contract here so readiness and runtime scoring cannot disagree about
+# whether an evidence row/request is physically valid.
+FEATURE_BOUNDS: Mapping[str, tuple[float | None, float | None]] = {
+    "pre_value": (0.0, None),
+    "beam_energy_mev": (0.0, None),
+    "let_surface": (0.0, None),
+    "range_um": (0.0, None),
+    "fluence_or_dose": (0.0, None),
+    "irradiation_bias_v": (None, None),
+    "post_measurement_delay_s": (0.0, None),
+    "sc_voltage_v": (0.0, None),
+    "sc_duration_us": (0.0, None),
+    "peak_current_a": (0.0, None),
+    "deposited_energy_j": (0.0, None),
+    "pulse_count": (1.0, None),
+    "gate_drive_v": (None, None),
+    "temperature_c": (-273.15, 500.0),
+}
+INCLUSIVE_LOWER_BOUNDS = frozenset({"pulse_count"})
 
 
 @dataclass(frozen=True)
@@ -98,22 +120,44 @@ class ReadinessReport:
     missing_feature_counts: Mapping[str, int]
 
 
-def _present(value: object) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (int, float)):
-        return isfinite(float(value))
-    return True
+def _finite_number(value: object) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool) and isfinite(float(value))
+
+
+def validate_required_features(
+    *, stress_type: str, features: Mapping[str, object]
+) -> tuple[str, ...]:
+    """Return canonical missing/non-finite/physical-bound feature failures."""
+
+    try:
+        required = DOMAIN_REQUIRED_FEATURES[stress_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported stress_type: {stress_type}") from exc
+    reasons: list[str] = []
+    for name in sorted(required):
+        value = features.get(name)
+        if not _finite_number(value):
+            reasons.append(f"missing_or_nonfinite:{name}")
+            continue
+        number = float(value)
+        lower, upper = FEATURE_BOUNDS[name]
+        if lower is not None:
+            outside_lower = (
+                number < lower if name in INCLUSIVE_LOWER_BOUNDS else number <= lower
+            )
+            if outside_lower:
+                reasons.append(f"outside_physical_bounds:{name}")
+        if upper is not None and number > upper:
+            reasons.append(f"outside_physical_bounds:{name}")
+        if name == "pulse_count" and not number.is_integer():
+            reasons.append("outside_physical_bounds:pulse_count")
+    return tuple(sorted(set(reasons)))
 
 
 def missing_required_features(unit: EvidenceUnit) -> tuple[str, ...]:
-    try:
-        required = DOMAIN_REQUIRED_FEATURES[unit.stress_type]
-    except KeyError as exc:
-        raise ValueError(f"unsupported stress_type: {unit.stress_type}") from exc
-    return tuple(sorted(name for name in required if not _present(unit.features.get(name))))
+    return validate_required_features(
+        stress_type=unit.stress_type, features=unit.features
+    )
 
 
 def assess_readiness(
@@ -146,7 +190,7 @@ def assess_readiness(
     for unit in independent:
         missing = missing_required_features(unit)
         if missing:
-            missing_counts.update(missing)
+            missing_counts.update(reason.split(":", 1)[-1] for reason in missing)
         else:
             complete_groups += 1
 
@@ -155,7 +199,11 @@ def assess_readiness(
     feature_fraction = complete_groups / total if total else 0.0
     largest_share = max(campaign_counts.values(), default=0) / total if total else 0.0
     external = sum(unit.split_role == "external_test" for unit in independent)
-    calibration = sum(unit.split_role == "calibration" for unit in independent)
+    calibration = len({
+        unit.physical_device_key
+        for unit in independent
+        if unit.split_role == "calibration"
+    })
     response_values = {float(unit.response_value) for unit in independent}
     checks = {
         "no_duplicate_independent_groups": not conflicting_groups,

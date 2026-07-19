@@ -24,6 +24,8 @@ def row(prefix, x):
         f"{prefix}-{x}", f"device-{prefix}-{x}", f"session-{prefix}-{x}",
         "irradiation", "delta_vth_v", "C2M", 0.01 + 0.002 * x,
         features(x), ion_species="Xe", manufacturer="Wolfspeed",
+        protocol_signature="protocol",
+        prediction_horizon_s=features(x)["post_measurement_delay_s"],
     )
     validation = ValidationUnit(
         damage.response_unit_key, damage.physical_device_key, damage.stress_session_key,

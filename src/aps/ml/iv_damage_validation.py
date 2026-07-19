@@ -121,8 +121,12 @@ def protected_tokens(unit: ValidationUnit, scheme: str) -> tuple[str, ...]:
         "leave_ion": unit.ion_species,
     }
     value = scheme_values[scheme]
-    if value:
-        tokens.append(f"{scheme}:{value}")
+    if not str(value or "").strip():
+        raise ValueError(
+            f"{scheme} requires a non-empty grouping key for "
+            f"{unit.response_unit_key}"
+        )
+    tokens.append(f"{scheme}:{value}")
     return tuple(sorted(set(tokens)))
 
 

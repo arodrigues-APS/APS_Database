@@ -21,7 +21,11 @@ def request(**overrides):
         "pre_value": 2.0,
         "pre_uncertainty": 0.01,
         "reference_policy": "same_device",
-        "stress_features": {"ion_species": "Ni", "fluence_or_dose": 1e8},
+        "stress_features": {
+            "ion_species": "Ni",
+            "fluence_or_dose": 1e8,
+            "post_measurement_delay_s": 60.0,
+        },
         "request_source": "unit-test",
     }
     values.update(overrides)
@@ -29,11 +33,26 @@ def request(**overrides):
 
 
 def test_forward_migration_discovers_v3_schema_after_031():
-    names = [migration.filename for migration in discover_migrations()]
-    assert names[-3:] == [
+    names = [
+        migration.filename for migration in discover_migrations()
+        if migration.filename >= "031_flask_avalanche_admin.sql"
+    ]
+    assert names == [
         "031_flask_avalanche_admin.sql",
         "032_iv_damage_prediction.sql",
         "033_iv_damage_downstream.sql",
+        "034_iv_damage_hardening.sql",
+        "034_iv_damage_z_curve_append_only_compat.sql",
+        "035_iv_damage_certified_curves.sql",
+        "036_iv_damage_certification_guards.sql",
+        "037_iv_damage_curve_operations.sql",
+        "038_iv_damage_authoritative_writer_guards.sql",
+        "039_iv_damage_dashboard_contracts.sql",
+        "040_iv_damage_scalar_shadow.sql",
+        "041_iv_damage_promotion_guard.sql",
+        "042_iv_damage_session_and_projection_release.sql",
+        "043_iv_damage_multi_model_outcomes.sql",
+        "044_iv_damage_release_observability.sql",
     ]
 
 
@@ -57,8 +76,21 @@ def test_request_rejects_any_post_outcome_feature():
 
 def test_request_key_is_stable_and_sensitive_to_inputs():
     first = request()
+    assert first.requested_prediction_horizon_s == 60.0
     assert request_key(first) == request_key(first)
     assert request_key(first) != request(pre_value=2.1)
+
+
+def test_request_rejects_conflicting_prediction_horizon():
+    with pytest.raises(ValueError, match="must equal"):
+        request(requested_prediction_horizon_s=30.0)
+
+
+def test_request_rejects_boolean_or_nonphysical_pre_values():
+    with pytest.raises(ValueError, match="pre_value must be finite"):
+        request(pre_value=True)
+    with pytest.raises(ValueError, match=r"Rds\(on\) must be positive"):
+        request(target_type="log_rdson_ratio", pre_value=0.0)
 
 
 def test_dataset_hash_is_order_independent_but_provenance_sensitive():

@@ -4,6 +4,7 @@ from aps.ml.iv_damage_dataset import (
     DatasetSnapshotError,
     DatasetUnit,
     plan_dataset_snapshot,
+    snapshot_member_payload_hash,
 )
 
 
@@ -46,7 +47,18 @@ def test_snapshot_plan_freezes_roles_and_all_required_grouped_schemes():
         "frozen_release", "leave_device", "leave_condition", "leave_campaign"
     }
     assert all(row.fold_number is None for row in by_scheme["frozen_release"])
-    assert all(row.split_role == "train" for row in by_scheme["leave_device"])
+    assert all(row.split_role == "grouped_test" for row in by_scheme["leave_device"])
+    assert plan.domain_summary["grouped_diagnostic_role"] == "grouped_test"
+    external_ids = {
+        row.response_unit_id for row in by_scheme["frozen_release"]
+        if row.split_role == "external_test"
+    }
+    assert all(
+        not external_ids.intersection(row.response_unit_id for row in assignments)
+        for scheme, assignments in by_scheme.items()
+        if scheme != "frozen_release"
+    )
+    assert plan.domain_summary["external_excluded_from_grouped_diagnostics"] is True
 
 
 def test_snapshot_plan_rejects_campaign_overlap_and_group_leakage():
@@ -72,3 +84,11 @@ def test_snapshot_plan_fails_when_grouped_diagnostic_is_not_supported():
             units, external_campaigns=["external"], calibration_campaigns=["cal"],
             n_splits=3,
         )
+
+
+def test_frozen_member_payload_hash_is_canonical_and_tamper_sensitive():
+    first = {"unit_key": "u-1", "features": {"b": 2, "a": 1}}
+    reordered = {"features": {"a": 1, "b": 2}, "unit_key": "u-1"}
+    changed = {**first, "unit_key": "u-2"}
+    assert snapshot_member_payload_hash(first) == snapshot_member_payload_hash(reordered)
+    assert snapshot_member_payload_hash(first) != snapshot_member_payload_hash(changed)

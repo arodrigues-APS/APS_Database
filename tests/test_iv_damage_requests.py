@@ -40,7 +40,11 @@ def prospective():
         measurement_protocol_id="protocol-v1", stress_type="irradiation",
         target_type="delta_vth_v", pre_value=3.0, pre_uncertainty=0.01,
         reference_policy="same_device",
-        stress_features={"ion_species": "Xe", "beam_energy_mev": 100},
+        stress_features={
+            "ion_species": "Xe", "beam_energy_mev": 100,
+            "post_measurement_delay_s": 60.0,
+        },
+        requested_prediction_horizon_s=60.0,
         request_source="unit-test", requested_by="tester",
     )
 

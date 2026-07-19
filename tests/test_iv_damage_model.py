@@ -38,6 +38,8 @@ def example(prefix, x):
         manufacturer="Wolfspeed",
         observed_response=response(x),
         features=features(x),
+        protocol_signature="protocol-v1",
+        prediction_horizon_s=features(x)["post_measurement_delay_s"],
     )
 
 
@@ -49,6 +51,8 @@ def request(x, **changes):
         "ion_species": "Xe",
         "manufacturer": "Wolfspeed",
         "features": features(x),
+        "protocol_signature": "protocol-v1",
+        "prediction_horizon_s": features(x)["post_measurement_delay_s"],
     }
     values.update(changes)
     return DamageRequest(**values)
@@ -108,6 +112,15 @@ def test_calibration_is_independent_and_has_minimum_supported_groups():
     with pytest.raises(ValueError, match="too few"):
         model.calibrate([example("cal", 4.2), example("cal", 5.2)])
 
+    repeated_device = [
+        DamageExample(
+            **{**example("repeat", x).__dict__, "physical_device_key": "one-device"}
+        )
+        for x in (4.2, 5.2, 6.2)
+    ]
+    with pytest.raises(ValueError, match="calibration devices"):
+        model.calibrate(repeated_device)
+
 
 def test_unseen_category_and_far_numeric_point_abstain():
     model = fitted_model()
@@ -130,6 +143,26 @@ def test_invalid_request_abstains_with_invalid_input_status():
     prediction = model.predict(request(8, features=broken))
     assert prediction.evidence_status == EvidenceStatus.INVALID_INPUT
     assert prediction.predicted_response is None
+
+
+def test_protocol_and_prediction_horizon_are_part_of_domain_assessment():
+    model = fitted_model()
+    protocol = model.predict(request(8, protocol_signature="protocol-v2"))
+    assert protocol.evidence_status == EvidenceStatus.OUT_OF_DOMAIN
+    assert "unseen_protocol_signature" in protocol.reasons
+
+    horizon = model.predict(request(8, prediction_horizon_s=999))
+    assert horizon.evidence_status == EvidenceStatus.INVALID_INPUT
+    assert "prediction_horizon_conflict" in horizon.reasons
+
+
+def test_single_short_circuit_pulse_is_physically_valid():
+    sc_features = {
+        "pre_value": 1.0, "sc_voltage_v": 100.0, "sc_duration_us": 1.0,
+        "peak_current_a": 10.0, "deposited_energy_j": 0.1,
+        "pulse_count": 1, "gate_drive_v": 15.0, "temperature_c": 25.0,
+    }
+    assert validate_request_features(stress_type="sc", features=sc_features) == ()
 
 
 def test_library_reference_can_be_scored_but_never_decision_eligible():
@@ -156,6 +189,15 @@ def test_model_rejects_duplicate_units_and_too_few_physical_devices():
     ]
     with pytest.raises(ValueError, match="too few independent"):
         model.fit(same_device)
+
+
+def test_model_requires_a_positive_unique_device_calibration_minimum():
+    with pytest.raises(ValueError, match="min_calibration_groups"):
+        CalibratedDamageModel(
+            stress_type="irradiation",
+            target_type="delta_vth_v",
+            min_calibration_groups=0,
+        )
 
 
 def test_artifact_manifest_is_complete_and_deterministic():

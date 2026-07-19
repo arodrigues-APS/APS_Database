@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Mapping, Sequence
 
 from psycopg2.extras import Json, execute_values
@@ -15,6 +17,7 @@ from aps.ml.iv_damage_validation import (
     assert_no_group_leakage,
     assign_grouped_folds,
 )
+from aps.provenance import collect_source_provenance
 
 
 class DatasetSnapshotError(RuntimeError):
@@ -146,12 +149,18 @@ def plan_dataset_snapshot(
         )
         for unit in units
     ]
+    # The external campaign is a single-use release holdout. It must never be
+    # rotated through grouped-CV training or calibration folds.
+    diagnostic_units = [
+        unit for unit in units if role_by_key[unit.unit_key] != "external_test"
+    ]
+    diagnostic_validation_units = [unit.validation_unit() for unit in diagnostic_units]
     for scheme in grouped_schemes:
         try:
             folds = assign_grouped_folds(
-                validation_units, scheme, n_splits=n_splits, seed=seed
+                diagnostic_validation_units, scheme, n_splits=n_splits, seed=seed
             )
-            assert_no_group_leakage(validation_units, folds, scheme)
+            assert_no_group_leakage(diagnostic_validation_units, folds, scheme)
         except ValueError as exc:
             raise DatasetSnapshotError(f"cannot create {scheme} diagnostic: {exc}") from exc
         by_key = {row.response_unit_key: row for row in folds}
@@ -161,10 +170,10 @@ def plan_dataset_snapshot(
                 unit.unit_key,
                 scheme,
                 by_key[unit.unit_key].fold,
-                "train",
+                "grouped_test",
                 by_key[unit.unit_key].component_key,
             )
-            for unit in units
+            for unit in diagnostic_units
         )
     summary = {
         "response_units": len(units),
@@ -180,6 +189,9 @@ def plan_dataset_snapshot(
             for campaign in sorted(known_campaigns)
         },
         "grouped_schemes": list(grouped_schemes),
+        "grouped_diagnostic_response_units": len(diagnostic_units),
+        "grouped_diagnostic_role": "grouped_test",
+        "external_excluded_from_grouped_diagnostics": True,
         "n_splits": n_splits,
         "seed": seed,
     }
@@ -187,12 +199,50 @@ def plan_dataset_snapshot(
 
 
 SOURCE_QUERY = """
-SELECT id, unit_key, physical_device_key, stress_session_key, target_type,
-       response_value, campaign_key, run_key, device_type, ion_species,
+SELECT id, unit_key, physical_device_key, stress_session_key, stress_type,
+       target_type, response_value, campaign_key, run_key, device_type,
+       manufacturer, ion_species,
        baseline_reference_group_key, stress_features, measurement_protocol_id,
        pre_observation_ids, post_observation_ids, pre_value, post_value,
        response_uncertainty, pre_replicate_count, post_replicate_count,
-       reference_policy, required_features_complete, quality_status
+       reference_policy, required_features_complete, quality_status,
+       pre_uncertainty, post_uncertainty, quality_reasons, created_at,
+       pre_measured_at, post_measured_at,
+       (
+           SELECT jsonb_agg(
+               jsonb_build_object(
+                   'observation_id', observation.id,
+                   'observation_key', observation.observation_key,
+                   'metadata_id', observation.metadata_id,
+                   'metric_name', observation.metric_name,
+                   'value', observation.value,
+                   'unit', observation.unit,
+                   'uncertainty', observation.uncertainty,
+                   'accepted_point_count', observation.accepted_point_count,
+                   'replicate_group_key', observation.replicate_group_key,
+                   'method_version', method.method_version,
+                   'config_version', method.config_version,
+                   'method_configuration', method.configuration,
+                   'method_approved', method.approved,
+                   'method_approved_by', method.approved_by,
+                   'method_approved_at', method.approved_at,
+                   'measurement_protocol_id', observation.measurement_protocol_id,
+                   'source_fingerprint', observation.source_fingerprint,
+                   'diagnostics', observation.diagnostics,
+                   'quality_status', observation.quality_status,
+                   'quality_reasons', observation.quality_reasons,
+                   'measured_at', observation.measured_at,
+                   'extracted_at', observation.extracted_at
+               ) ORDER BY observation.id
+           )
+           FROM iv_damage_metric_observations observation
+           JOIN iv_damage_extraction_methods method
+             ON method.id = observation.extraction_method_id
+           WHERE observation.id = ANY(
+               iv_damage_response_units.pre_observation_ids
+               || iv_damage_response_units.post_observation_ids
+           )
+       ) AS observation_provenance
 FROM iv_damage_response_units
 WHERE stress_type = %(stress_type)s
   AND target_type = %(target_type)s
@@ -201,6 +251,13 @@ WHERE stress_type = %(stress_type)s
   AND required_features_complete
 ORDER BY unit_key
 """
+
+
+def snapshot_member_payload_hash(payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _load_units(conn, *, stress_type: str, target_type: str) -> list[DatasetUnit]:
@@ -212,25 +269,44 @@ def _load_units(conn, *, stress_type: str, target_type: str) -> list[DatasetUnit
         )
         units = []
         for row in cursor.fetchall():
-            features = dict(row[11])
+            features = dict(row[13])
             record = {
                 "unit_key": row[1], "physical_device_key": row[2],
-                "stress_session_key": row[3], "target_type": row[4],
-                "response_value": row[5], "campaign_key": row[6], "run_key": row[7],
-                "device_type": row[8], "ion_species": row[9],
-                "baseline_reference_group_key": row[10], "stress_features": features,
-                "measurement_protocol_id": row[12], "pre_observation_ids": row[13],
-                "post_observation_ids": row[14], "pre_value": row[15], "post_value": row[16],
-                "response_uncertainty": row[17], "pre_replicate_count": row[18],
-                "post_replicate_count": row[19], "reference_policy": row[20],
+                "stress_session_key": row[3], "stress_type": row[4],
+                "target_type": row[5], "response_value": float(row[6]),
+                "campaign_key": row[7], "run_key": row[8],
+                "device_type": row[9], "manufacturer": row[10],
+                "ion_species": row[11], "baseline_reference_group_key": row[12],
+                "stress_features": features, "measurement_protocol_id": row[14],
+                "pre_observation_ids": row[15], "post_observation_ids": row[16],
+                "pre_value": float(row[17]), "post_value": float(row[18]),
+                "response_uncertainty": (
+                    float(row[19]) if row[19] is not None else None
+                ),
+                "pre_replicate_count": int(row[20]),
+                "post_replicate_count": int(row[21]),
+                "reference_policy": row[22],
+                "required_features_complete": bool(row[23]),
+                "quality_status": row[24],
+                "pre_uncertainty": (
+                    float(row[25]) if row[25] is not None else None
+                ),
+                "post_uncertainty": (
+                    float(row[26]) if row[26] is not None else None
+                ),
+                "quality_reasons": list(row[27]),
+                "response_unit_created_at": row[28].isoformat(),
+                "pre_measured_at": row[29].isoformat(),
+                "post_measured_at": row[30].isoformat(),
+                "observation_provenance": list(row[31] or []),
             }
             units.append(
                 DatasetUnit(
                     response_unit_id=int(row[0]), unit_key=row[1],
                     physical_device_key=row[2], stress_session_key=row[3],
-                    target_type=row[4], observed_response=float(row[5]),
-                    campaign_key=row[6], run_key=row[7], device_type=row[8],
-                    ion_species=row[9], baseline_reference_group_key=row[10],
+                    target_type=row[5], observed_response=float(row[6]),
+                    campaign_key=row[7], run_key=row[8], device_type=row[9],
+                    ion_species=row[11], baseline_reference_group_key=row[12],
                     stress_condition_key=str(features.get("stress_condition_key") or "") or None,
                     record=record,
                 )
@@ -257,8 +333,50 @@ def create_dataset_snapshot(
     ),
     n_splits: int = 5,
     seed: int = 0,
+    source_provenance: Mapping[str, object] | None = None,
 ) -> DatasetSnapshotResult:
+    provenance = dict(
+        source_provenance or collect_source_provenance().as_dict()
+    )
+    if (
+        provenance.get("code_sha") != source_code_sha
+        or not provenance.get("fingerprint")
+    ):
+        raise DatasetSnapshotError(
+            "source provenance must include a fingerprint matching source_code_sha"
+        )
+    source_identifier = f"{source_code_sha}:{provenance['fingerprint']}"
     units = _load_units(conn, stress_type=stress_type, target_type=target_type)
+    observed_versions: dict[str, set[str]] = {}
+    for unit in units:
+        for observation in unit.record["observation_provenance"]:
+            if not observation["method_approved"]:
+                raise DatasetSnapshotError(
+                    "snapshot includes an observation from an unapproved "
+                    f"extraction method: {observation['observation_key']}"
+                )
+            observed_versions.setdefault(observation["metric_name"], set()).add(
+                f"{observation['method_version']}/{observation['config_version']}"
+            )
+    mixed = {
+        metric: versions
+        for metric, versions in observed_versions.items()
+        if len(versions) != 1
+    }
+    if mixed:
+        raise DatasetSnapshotError(
+            "snapshot mixes extraction configurations for metric(s): "
+            + ", ".join(sorted(mixed))
+        )
+    authoritative_versions = {
+        metric: next(iter(versions))
+        for metric, versions in observed_versions.items()
+    }
+    if dict(extraction_method_versions) != authoritative_versions:
+        raise DatasetSnapshotError(
+            "extraction_method_versions do not match frozen observations: "
+            f"expected {authoritative_versions!r}"
+        )
     plan = plan_dataset_snapshot(
         units,
         external_campaigns=external_campaigns,
@@ -272,7 +390,7 @@ def create_dataset_snapshot(
         unit_records=[unit.record for unit in units],
         extraction_versions=extraction_method_versions,
         source_query=query_identity,
-        source_code_sha=source_code_sha,
+        source_code_sha=source_identifier,
     )
     cursor = conn.cursor()
     try:
@@ -287,12 +405,37 @@ def create_dataset_snapshot(
             """,
             (
                 snapshot_version, checksum, Json(dict(extraction_method_versions)),
-                query_identity, source_code_sha, len(units),
+                query_identity, source_identifier, len(units),
                 len({(unit.physical_device_key, unit.stress_session_key, unit.target_type) for unit in units}),
-                Json({**plan.domain_summary, "stress_type": stress_type, "target_type": target_type}),
+                Json({
+                    **plan.domain_summary,
+                    "stress_type": stress_type,
+                    "target_type": target_type,
+                    "source_provenance": provenance,
+                }),
             ),
         )
         snapshot_id = int(cursor.fetchone()[0])
+        execute_values(
+            cursor,
+            """
+            INSERT INTO iv_damage_dataset_snapshot_members (
+                dataset_snapshot_id, response_unit_id, frozen_payload, payload_hash
+            ) VALUES %s
+            """,
+            [
+                (
+                    snapshot_id,
+                    unit.response_unit_id,
+                    Json(
+                        dict(unit.record),
+                        dumps=lambda value: json.dumps(value, default=str),
+                    ),
+                    snapshot_member_payload_hash(unit.record),
+                )
+                for unit in units
+            ],
+        )
         execute_values(
             cursor,
             """
