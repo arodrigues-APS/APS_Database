@@ -44,6 +44,8 @@ EXAMPLES_DB = os.getenv("EXAMPLES_DB")
 ENABLE_PROXY_FIX = True
 
 SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
+# Set only while running `superset re-encrypt-secrets`, then remove it.
+PREVIOUS_SECRET_KEY = os.getenv("SUPERSET_PREVIOUS_SECRET_KEY") or None
 
 # The SQLAlchemy connection string.
 SQLALCHEMY_DATABASE_URI = (
