@@ -1,10 +1,10 @@
 """Forward-only structural migration support.
 
 This module deliberately does not reuse aps.common.apply_schema. The latter
-remains a compatibility helper for the historical idempotent schema bundle,
-where an edited file is allowed to run again. New structural migrations need
-the opposite contract: a filename can be recorded once, and changing its
-content after application must stop the release.
+only owns unnumbered compatibility SQL plus explicitly selected
+pipeline-owned assets, where an edited file is allowed to run again. Numbered
+non-pipeline assets have the opposite contract: a filename can be recorded
+once, and changing its content after application must stop the release.
 
 The runner is intentionally generic while the repository completes the
 incremental move from schema/ into dedicated migration assets. Files in
@@ -153,6 +153,18 @@ def is_pipeline_owned(sql_text: str) -> bool:
     return PIPELINE_SCHEMA_MARKER in sql_text[:500]
 
 
+def is_forward_migration_asset(filename: str | Path, sql_text: str) -> bool:
+    """Return whether an SQL file is owned exclusively by the forward runner.
+
+    Keep this predicate shared with the legacy ``apply_schema`` compatibility
+    helper. If those paths classify the same file differently, ingestion can
+    replay an already-applied forward migration during a nightly run.
+    """
+    return bool(_MIGRATION_NAME.match(Path(filename).name)) and not is_pipeline_owned(
+        sql_text
+    )
+
+
 def discover_migrations(directory: Path | str | None = None) -> tuple[Migration, ...]:
     """Discover numbered, non-pipeline SQL assets in deterministic order.
 
@@ -168,10 +180,8 @@ def discover_migrations(directory: Path | str | None = None) -> tuple[Migration,
 
     migrations = []
     for path in sorted(root.glob("*.sql")):
-        if not _MIGRATION_NAME.match(path.name):
-            continue
         sql_text = path.read_text()
-        if is_pipeline_owned(sql_text):
+        if not is_forward_migration_asset(path.name, sql_text):
             continue
         migrations.append(
             Migration(

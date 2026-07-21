@@ -9,9 +9,20 @@ from aps.db.migrations import (
     RecordedMigration,
     assert_plan_is_safe,
     discover_migrations,
+    is_forward_migration_asset,
     plan_migrations,
     select_baseline_migrations,
 )
+
+
+def test_forward_asset_classification_matches_ownership_contract():
+    assert is_forward_migration_asset("001_core.sql", "SELECT 1;")
+    assert is_forward_migration_asset("1000_core.sql", "SELECT 1;")
+    assert not is_forward_migration_asset("core.sql", "SELECT 1;")
+    assert not is_forward_migration_asset(
+        "002_model.sql",
+        "-- apply_schema: pipeline-owned\nSELECT 1;",
+    )
 
 
 def test_discovery_selects_only_numbered_non_pipeline_assets(tmp_path: Path):

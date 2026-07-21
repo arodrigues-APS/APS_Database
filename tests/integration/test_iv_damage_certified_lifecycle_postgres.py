@@ -10,6 +10,7 @@ from psycopg2.extensions import parse_dsn
 from psycopg2.extras import Json
 import pytest
 
+from aps.common import apply_schema
 from aps.ml.iv_damage_evidence import (
     AcceptancePolicySpec,
     approve_acceptance_policy,
@@ -128,6 +129,39 @@ def test_full_damage_migration_chain_is_transactional_and_rolls_back(postgres_co
         "SELECT to_regclass('iv_damage_model_runs'), to_regclass('iv_damage_curve_model_runs')"
     )
     assert cursor.fetchone() == (None, None)
+    cursor.close()
+
+
+def test_legacy_apply_schema_does_not_replay_forward_damage_migrations(
+    postgres_connection, tmp_path: Path
+):
+    cursor = postgres_connection.cursor()
+    _base_schema(cursor)
+    _apply(cursor)
+    postgres_connection.commit()
+
+    for migration in MIGRATIONS:
+        (tmp_path / migration.name).write_text(migration.read_text())
+    (tmp_path / "legacy_repeatable.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS legacy_repeatable_probe (id INTEGER);\n"
+    )
+
+    apply_schema(postgres_connection, schema_dir=tmp_path)
+    apply_schema(
+        postgres_connection, include_pipeline=True, schema_dir=tmp_path
+    )
+
+    cursor.execute(
+        """
+        SELECT to_regclass('iv_damage_curve_model_runs'),
+               to_regclass('legacy_repeatable_probe')
+        """
+    )
+    assert all(cursor.fetchone())
+    cursor.execute(
+        "SELECT DISTINCT filename FROM schema_migrations ORDER BY filename"
+    )
+    assert cursor.fetchall() == [("legacy_repeatable.sql",)]
     cursor.close()
 
 

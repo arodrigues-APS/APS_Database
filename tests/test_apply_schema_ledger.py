@@ -5,6 +5,7 @@ from aps import common
 
 
 PLAIN_SQL = "CREATE TABLE IF NOT EXISTS demo (id INT);\n"
+FORWARD_SQL = "CREATE TABLE forward_only (id INT);\n"
 PIPELINE_SQL = (
     "-- apply_schema: pipeline-owned\n"
     "CREATE TABLE IF NOT EXISTS pipeline_demo (id INT);\n"
@@ -70,7 +71,8 @@ class ApplySchemaLedgerTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.schema_dir = Path(self._tmp.name)
-        (self.schema_dir / "001_core.sql").write_text(PLAIN_SQL)
+        (self.schema_dir / "legacy_core.sql").write_text(PLAIN_SQL)
+        (self.schema_dir / "001_forward.sql").write_text(FORWARD_SQL)
         (self.schema_dir / "002_pipeline.sql").write_text(PIPELINE_SQL)
 
     def tearDown(self):
@@ -92,7 +94,7 @@ class ApplySchemaLedgerTests(unittest.TestCase):
         cur = conn.cursors[0]
         self.assertEqual(
             cur.inserts,
-            [("001_core.sql", common.schema_checksum(PLAIN_SQL))],
+            [("legacy_core.sql", common.schema_checksum(PLAIN_SQL))],
         )
         self.assertEqual(cur.touches, [])
 
@@ -103,6 +105,17 @@ class ApplySchemaLedgerTests(unittest.TestCase):
         cur = conn.cursors[0]
         self.assertNotIn(PIPELINE_SQL, cur.executed_sql)
         self.assertNotIn("002_pipeline.sql", conn.ledger)
+
+    def test_numbered_forward_migration_is_always_skipped(self):
+        conn = FakeConn()
+        common.apply_schema(
+            conn, include_pipeline=True, schema_dir=self.schema_dir
+        )
+
+        cur = conn.cursors[0]
+        self.assertNotIn(FORWARD_SQL, cur.executed_sql)
+        self.assertNotIn("001_forward.sql", conn.ledger)
+        self.assertIn(PIPELINE_SQL, cur.executed_sql)
 
     def test_included_pipeline_file_executed_and_recorded(self):
         conn = FakeConn()
@@ -125,17 +138,17 @@ class ApplySchemaLedgerTests(unittest.TestCase):
         second = conn.cursors[1]
         self.assertEqual(second.inserts, [])
         self.assertEqual(len(second.touches), 1)
-        self.assertEqual(len(conn.ledger["001_core.sql"]), 1)
+        self.assertEqual(len(conn.ledger["legacy_core.sql"]), 1)
 
     def test_edited_file_gets_a_new_ledger_row(self):
         conn = FakeConn()
         common.apply_schema(conn, schema_dir=self.schema_dir)
-        (self.schema_dir / "001_core.sql").write_text(
+        (self.schema_dir / "legacy_core.sql").write_text(
             PLAIN_SQL + "-- edited\n"
         )
         common.apply_schema(conn, schema_dir=self.schema_dir)
 
-        self.assertEqual(len(conn.ledger["001_core.sql"]), 2)
+        self.assertEqual(len(conn.ledger["legacy_core.sql"]), 2)
         second = conn.cursors[1]
         self.assertEqual(second.touches, [])
 
@@ -167,7 +180,8 @@ class SchemaStatusTests(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.schema_dir = Path(self._tmp.name)
-        (self.schema_dir / "001_core.sql").write_text(PLAIN_SQL)
+        (self.schema_dir / "legacy_core.sql").write_text(PLAIN_SQL)
+        (self.schema_dir / "001_forward.sql").write_text(FORWARD_SQL)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -193,7 +207,7 @@ class SchemaStatusTests(unittest.TestCase):
         applied = common.schema_checksum(PLAIN_SQL)
         conn = self._status_conn(
             [
-                ("001_core.sql", applied, "2026-07-09"),
+                ("legacy_core.sql", applied, "2026-07-09"),
                 ("gone.sql", "deadbeef", "2026-01-01"),
             ]
         )
@@ -201,13 +215,16 @@ class SchemaStatusTests(unittest.TestCase):
             (name, state)
             for name, state, _ in common.schema_status(conn, schema_dir=self.schema_dir)
         )
-        self.assertEqual(status["001_core.sql"], "in_sync")
+        self.assertEqual(status["legacy_core.sql"], "in_sync")
+        self.assertEqual(status["001_forward.sql"], "forward_migration")
         self.assertEqual(status["gone.sql"], "missing_file")
 
     def test_edited_since_apply(self):
-        conn = self._status_conn([("001_core.sql", "stale", "2026-07-09")])
+        conn = self._status_conn([("legacy_core.sql", "stale", "2026-07-09")])
         status = common.schema_status(conn, schema_dir=self.schema_dir)
-        self.assertEqual(status[0][1], "edited_since_apply")
+        states = {name: state for name, state, _ in status}
+        self.assertEqual(states["legacy_core.sql"], "edited_since_apply")
+        self.assertEqual(states["001_forward.sql"], "forward_migration")
 
     def test_empty_ledger_reports_never_recorded(self):
         class BrokenCursor(FakeCursor):
@@ -222,7 +239,13 @@ class SchemaStatusTests(unittest.TestCase):
 
         conn = BrokenConn()
         status = common.schema_status(conn, schema_dir=self.schema_dir)
-        self.assertEqual(status, [("001_core.sql", "never_recorded", None)])
+        self.assertEqual(
+            status,
+            [
+                ("001_forward.sql", "forward_migration", None),
+                ("legacy_core.sql", "never_recorded", None),
+            ],
+        )
         self.assertEqual(conn.rollbacks, 1)
 
 

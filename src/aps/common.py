@@ -6,7 +6,6 @@ duplication.  Both scripts import from here instead of maintaining their
 own copies.
 """
 
-import os
 import re
 import hashlib
 from pathlib import Path
@@ -14,9 +13,8 @@ from pathlib import Path
 
 # ── Schema migrations ───────────────────────────────────────────────────────
 
+from aps.db.migrations import is_forward_migration_asset, is_pipeline_owned
 from aps.paths import SCHEMA_DIR
-
-PIPELINE_SCHEMA_MARKER = "apply_schema: pipeline-owned"
 
 # Ledger of what apply_schema actually executed, and when.  One row per
 # (filename, content version): a re-apply of unchanged SQL only touches
@@ -53,9 +51,6 @@ SCHEMA_LEDGER_STATUS_SQL = (
 )
 
 
-def _is_pipeline_owned(sql_text):
-    return PIPELINE_SCHEMA_MARKER in sql_text[:500]
-
 
 def schema_checksum(sql_text):
     return hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
@@ -73,11 +68,12 @@ def _record_schema_apply(cur, filename, sql_text):
 
 def apply_schema(conn, include_pipeline=False, schema_dir=None):
     """
-    Apply schema/*.sql in lexicographic order.
+    Apply compatibility-owned schema/*.sql in lexicographic order.
 
-    Files are idempotent (CREATE TABLE IF NOT EXISTS + DO $$ ALTER TABLE
-    ... ADD COLUMN ... EXCEPTION WHEN duplicate_column $$) so calling
-    this at startup is safe.  SQL files marked with
+    Numbered non-pipeline assets are immutable forward migrations and are
+    skipped unconditionally; only ``aps db migrate`` may execute them. The
+    remaining unnumbered files are repeatable compatibility SQL. Files marked
+    with
     ``apply_schema: pipeline-owned`` are skipped by default because they
     depend on ingestion-populated tables and are applied by their owning
     pipeline scripts.  Pass True to include every pipeline-owned file, or
@@ -102,7 +98,9 @@ def apply_schema(conn, include_pipeline=False, schema_dir=None):
         cur.execute(SCHEMA_LEDGER_TABLE_SQL)
         for sql_path in sorted(schema_dir.glob("*.sql")):
             sql_text = sql_path.read_text()
-            if _is_pipeline_owned(sql_text):
+            if is_forward_migration_asset(sql_path.name, sql_text):
+                continue
+            if is_pipeline_owned(sql_text):
                 if include_pipeline is True:
                     pass
                 elif sql_path.name not in pipeline_files:
@@ -121,11 +119,12 @@ def schema_status(conn, schema_dir=None):
     """
     Compare schema/*.sql on disk against the schema_migrations ledger.
 
-    Returns a list of (filename, state, last_applied_at) where state is one
-    of: in_sync (latest recorded checksum matches disk), edited_since_apply
-    (file changed after its last recorded apply), never_recorded (no ledger
-    row — never applied through apply_schema on this database), or
-    missing_file (ledger row exists but the file is gone from schema/).
+    Returns a list of (filename, state, last_applied_at) where state is one of:
+    forward_migration (owned by ``aps db migrate``), in_sync (latest recorded
+    checksum matches disk), edited_since_apply (file changed after its last
+    recorded apply), never_recorded (no ledger row — never applied through
+    apply_schema on this database), or missing_file (ledger row exists but the
+    file is gone from schema/).
     """
     schema_dir = Path(schema_dir) if schema_dir is not None else SCHEMA_DIR
     cur = conn.cursor()
@@ -142,11 +141,15 @@ def schema_status(conn, schema_dir=None):
     on_disk = sorted(schema_dir.glob("*.sql")) if schema_dir.is_dir() else []
     for sql_path in on_disk:
         name = sql_path.name
+        sql_text = sql_path.read_text()
+        if is_forward_migration_asset(name, sql_text):
+            results.append((name, "forward_migration", None))
+            continue
         if name not in recorded:
             results.append((name, "never_recorded", None))
             continue
         checksum, applied_at = recorded[name]
-        if schema_checksum(sql_path.read_text()) == checksum:
+        if schema_checksum(sql_text) == checksum:
             results.append((name, "in_sync", applied_at))
         else:
             results.append((name, "edited_since_apply", applied_at))
@@ -547,13 +550,18 @@ def sweep_stats(headers, rows, map_fn):
         vd = mapped.get('v_drain')
         idv = mapped.get('i_drain')
         if isinstance(vd, (int, float)):
-            if vd_min is None or vd < vd_min: vd_min = vd
-            if vd_max is None or vd > vd_max: vd_max = vd
+            if vd_min is None or vd < vd_min:
+                vd_min = vd
+            if vd_max is None or vd > vd_max:
+                vd_max = vd
         if isinstance(idv, (int, float)):
-            if id_min is None or idv < id_min: id_min = idv
-            if id_max is None or idv > id_max: id_max = idv
+            if id_min is None or idv < id_min:
+                id_min = idv
+            if id_max is None or idv > id_max:
+                id_max = idv
             av = abs(idv)
-            if id_abs_max is None or av > id_abs_max: id_abs_max = av
+            if id_abs_max is None or av > id_abs_max:
+                id_abs_max = av
         n += 1
     return {
         'vd_min': vd_min, 'vd_max': vd_max,
@@ -600,7 +608,8 @@ def _cli(argv=None):
     Schema utility CLI.
 
     Default action prints the ledger status of every schema/*.sql file.
-    --apply runs apply_schema (core files only unless --include-pipeline).
+    --apply runs apply_schema for compatibility files and optionally selected
+    pipeline-owned files. Numbered forward migrations are always excluded.
     """
     import argparse
 
@@ -609,7 +618,7 @@ def _cli(argv=None):
     )
     parser.add_argument(
         "--apply", action="store_true",
-        help="apply schema files (default: only report ledger status)",
+        help="apply compatibility schema files (default: only report status)",
     )
     parser.add_argument(
         "--include-pipeline", nargs="*", metavar="FILE",

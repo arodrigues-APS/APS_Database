@@ -47,11 +47,15 @@ Dashboard builders never apply these files.
 031_flask_avalanche_admin.sql is the first post-adoption forward migration. It
 moves avalanche administration DDL out of Flask request handling.
 
-`common.apply_schema(conn)` remains a compatibility helper for historical
-idempotent/source-table bundles while DDL ownership is migrated incrementally.
-It skips files marked `-- apply_schema: pipeline-owned` unless a legacy
-caller explicitly opts in. Do not use this behavior for new forward migrations
-or expensive derived models.
+`common.apply_schema(conn)` remains a compatibility helper for unnumbered
+historical idempotent/source-table bundles while DDL ownership is migrated
+incrementally. It unconditionally skips numbered, non-pipeline files because
+only `aps db migrate` may execute forward migrations. It also skips files
+marked `-- apply_schema: pipeline-owned` unless a legacy caller explicitly
+opts in. Even `--include-pipeline` cannot cause a forward migration to run.
+
+This means a blank database must be prepared with `aps db migrate` before an
+ingestion command runs. Ingestion is not a structural migration mechanism.
 
 ## Ledger
 
@@ -62,8 +66,11 @@ a sha256 checksum; re-applying unchanged SQL only bumps `last_applied_at`,
 while edited SQL gets a new row.  This makes "was 025 applied to this
 database, and which version?" answerable from the database itself.
 
-- Status report (per file: `in_sync` / `edited_since_apply` /
-  `never_recorded` / `missing_file`), and optional apply:
+- Compatibility status reports numbered assets as `forward_migration` and
+  reports compatibility/pipeline assets as `in_sync` /
+  `edited_since_apply` / `never_recorded` / `missing_file`. Use
+  `aps db status` for the authoritative applied state of forward migrations.
+  Status and optional compatibility apply:
 
       python -m aps.common            # status only
       python -m aps.common --apply
