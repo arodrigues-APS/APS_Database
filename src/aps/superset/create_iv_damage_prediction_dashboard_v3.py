@@ -24,10 +24,17 @@ dashboard.GUIDANCE["TAB-v3-curve-projections"] = (
 )
 
 _base_definitions = dashboard.definitions
+_VISIBLE_TAB_KEYS = (
+    "research_scalar",
+    "research_curve",
+    "research_residual",
+    "research_limits",
+    "activation",
+)
 
 
 def _complete_definitions() -> list[dict]:
-    return [
+    complete = [
         *_base_definitions(),
         dict(
             name="V3 Curve — Projection Certification Gate",
@@ -67,9 +74,16 @@ def _complete_definitions() -> list[dict]:
             ]),
         ),
     ]
+    return [definition for definition in complete if definition["tab"] in _VISIBLE_TAB_KEYS]
 
 
 dashboard.definitions = _complete_definitions
+dashboard.TABS = {key: dashboard.TABS[key] for key in _VISIBLE_TAB_KEYS}
+dashboard.TABS["research_scalar"] = ("Scalar Results", "TAB-v3-research-scalar")
+dashboard.TABS["research_curve"] = ("Curve Explorer", "TAB-v3-research-curve")
+dashboard.TABS["research_residual"] = ("Residual Diagnostics", "TAB-v3-research-residual")
+dashboard.TABS["research_limits"] = ("Data Quality & Limitations", "TAB-v3-research-limits")
+dashboard.TABS["activation"] = ("Certified Readiness", "TAB-v3-activation-readiness")
 
 
 def main() -> None:

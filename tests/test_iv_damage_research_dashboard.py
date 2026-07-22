@@ -1,7 +1,7 @@
 from aps.superset import create_iv_damage_prediction_dashboard_v3 as complete
 
 
-def test_dashboard_34_contract_leads_with_research_and_preserves_certified_tabs():
+def test_dashboard_34_contract_leads_with_research_and_keeps_one_readiness_tab():
     dashboard = complete.dashboard
     assert dashboard.DASHBOARD_TITLE == "IV Damage Predictor V3 — Research Predictions & Certified Readiness"
     assert dashboard.DASHBOARD_SLUG == "iv-damage-predictor-v3"
@@ -13,8 +13,7 @@ def test_dashboard_34_contract_leads_with_research_and_preserves_certified_tabs(
     ]
     assert "research_overview" not in dashboard.TABS
     assert "activation" in dashboard.TABS
-    assert "curve_prediction" in dashboard.TABS
-    assert "curve_projection" in dashboard.TABS
+    assert len(dashboard.TABS) == 5
 
 
 def test_research_charts_never_mix_certified_datasets_or_claims():

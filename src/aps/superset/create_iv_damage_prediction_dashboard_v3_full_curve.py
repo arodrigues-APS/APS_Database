@@ -526,6 +526,12 @@ def verify_views() -> None:
 def reconcile_chart_membership(session, dashboard_id: int, chart_ids: list[int]) -> None:
     """Preserve old charts but remove stale V3 dashboard associations."""
     desired = set(chart_ids)
+    response = session.get(f"{SUPERSET_URL}/api/v1/dashboard/{dashboard_id}/charts")
+    if not response.ok:
+        raise RuntimeError(f"could not inspect dashboard membership: {response.status_code}")
+    current = {
+        int(value.get("id") if isinstance(value, dict) else value) for value in response.json().get("result", [])
+    }
     for chart_id in sorted(desired):
         response = session.put(
             f"{SUPERSET_URL}/api/v1/chart/{chart_id}",
@@ -533,7 +539,7 @@ def reconcile_chart_membership(session, dashboard_id: int, chart_ids: list[int])
         )
         if not response.ok:
             raise RuntimeError(f"could not associate chart {chart_id}: {response.status_code}")
-    for chart_id in range(495, 505):
+    for chart_id in sorted(current | set(range(495, 505))):
         if chart_id in desired:
             continue
         response = session.get(f"{SUPERSET_URL}/api/v1/chart/{chart_id}")
@@ -591,58 +597,15 @@ def create_dashboard() -> int | None:
         GUIDANCE,
     )
     all_charts = [item["chart_id"] for item in catalog]
-    scalar_charts = [
-        item["chart_id"]
-        for item in catalog
-        if item["ds"].startswith("scalar") or item["ds"] in {"backlog", "activation"}
-    ]
-    curve_charts = [item["chart_id"] for item in catalog if item["ds"].startswith("curve")]
-    curve_prediction_charts = [item["chart_id"] for item in catalog if item["ds"] == "curve_prediction"]
-    research_charts = [item["chart_id"] for item in catalog if item["ds"].startswith("research")]
     research_curve_charts = [
         item["chart_id"] for item in catalog if item["ds"] in {"research_curve", "research_curve_metrics"}
     ]
     filters = [
         _native_filter(
-            "FILTER-v3-research-snapshot",
-            "Research Snapshot",
-            [(dataset_ids["research_status"], "snapshot_version")],
-            research_charts,
-            all_charts,
-            multi=False,
-        ),
-        _native_filter(
             "FILTER-v3-research-pair",
             "Research Pair (single)",
             [(dataset_ids["research_curve"], "pair_key")],
             research_curve_charts,
-            all_charts,
-            multi=False,
-        ),
-        _native_filter(
-            "FILTER-v3-stress", "Stress Type", [(dataset_ids["activation"], "stress_type")], all_charts, all_charts
-        ),
-        _native_filter(
-            "FILTER-v3-target",
-            "Scalar Target (single)",
-            [(dataset_ids["activation"], "target_type")],
-            scalar_charts,
-            all_charts,
-            multi=False,
-        ),
-        _native_filter(
-            "FILTER-v3-family",
-            "Curve Family (single)",
-            [(dataset_ids["activation"], "curve_family")],
-            curve_charts,
-            all_charts,
-            multi=False,
-        ),
-        _native_filter(
-            "FILTER-v3-request",
-            "Curve Request (single)",
-            [(dataset_ids["curve_prediction"], "request_key")],
-            curve_prediction_charts,
             all_charts,
             multi=False,
         ),
