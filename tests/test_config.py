@@ -97,6 +97,14 @@ def test_redacted_summary_never_contains_secret_values():
     assert summary["superset_connect_timeout_seconds"] == 5.0
 
 
+def test_iv_damage_governance_root_is_explicit_and_checked(tmp_path: Path):
+    root = tmp_path / "governance"
+    root.mkdir()
+    settings = Settings.from_environ({"APS_IV_DAMAGE_GOVERNANCE_ROOT": str(root)})
+    assert settings.require_iv_damage_governance_root(writable=True) == root
+    assert settings.redacted_summary()["iv_damage_governance_root"] == str(root)
+
+
 def test_nightly_validation_checks_secrets_and_mounted_roots(tmp_path: Path):
     data_root = tmp_path / "data"
     nas_root = tmp_path / "nas"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 from pathlib import Path
 import uuid
@@ -11,10 +12,23 @@ from psycopg2.extras import Json
 import pytest
 
 from aps.common import apply_schema
+from aps.enrich.iv_parameters.contracts import ExtractionConfig
 from aps.ml.iv_damage_evidence import (
     AcceptancePolicySpec,
+    DamageEvidenceError,
     approve_acceptance_policy,
+    approve_extraction_method,
     create_acceptance_policy,
+    register_extraction_method,
+)
+from aps.ml.iv_damage_manifest import (
+    EvidenceManifestError,
+    apply_evidence,
+    approve_evidence,
+    evidence_status,
+    plan_evidence,
+    sha256,
+    write_plan,
 )
 
 
@@ -23,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = tuple(
     path for path in sorted((ROOT / "schema").glob("*.sql"))
     if path.name >= "032_iv_damage_prediction.sql"
-    and path.name <= "044_iv_damage_release_observability.sql"
+    and path.name <= "045_iv_damage_activation_readiness.sql"
 )
 
 
@@ -520,4 +534,418 @@ def test_authoritative_evidence_certification_shadow_and_promotion_guards(postgr
         """,
         (model_id,),
     )
+    postgres_connection.commit()
+
+
+def test_activation_readiness_is_populated_before_any_evidence(postgres_connection):
+    with postgres_connection.cursor() as cursor:
+        _base_schema(cursor)
+        _apply(cursor)
+        cursor.execute(
+            """
+            SELECT claim_type, evidence_count, prediction_count, blocking_stage
+            FROM iv_damage_claim_activation_status_view
+            ORDER BY claim_type, stress_type, target_type NULLS LAST, curve_family NULLS LAST
+            """
+        )
+        rows = cursor.fetchall()
+        assert len(rows) == 8
+        assert sum(row[0] == "scalar" for row in rows) == 4
+        assert sum(row[0] == "curve" for row in rows) == 4
+        assert all(row[1:] == (0, 0, "evidence") for row in rows)
+        cursor.execute("SELECT count(*) FROM iv_damage_scalar_prediction_provenance_view")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SAVEPOINT same_actor")
+        with pytest.raises(errors.CheckViolation):
+            cursor.execute(
+                """
+                INSERT INTO iv_damage_evidence_batches (
+                    batch_key, manifest_version, plan_sha, manifest, plan_report,
+                    prepared_by, prepared_at, approved_by, approved_at
+                ) VALUES ('batch', 1, %s, '{}'::jsonb, '{}'::jsonb,
+                          'same-actor', clock_timestamp(), 'same-actor', clock_timestamp())
+                """, ("a" * 64,),
+            )
+        cursor.execute("ROLLBACK TO SAVEPOINT same_actor")
+    postgres_connection.commit()
+
+
+def _manifest_from_raw_measurements(postgres_connection):
+    features = {
+        "beam_energy_mev": 100.0,
+        "let_surface": 10.0,
+        "range_um": 20.0,
+        "fluence_or_dose": 1.0e9,
+        "irradiation_bias_v": 0.0,
+        "temperature_c": 25.0,
+        "post_measurement_delay_s": 3600.0,
+        "prediction_horizon_s": 3600.0,
+        "stress_condition_key": "ca-100mev",
+    }
+    acquisitions = []
+    observations = []
+    measurement_times = (
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T01:00:00+00:00",
+        "2026-01-02T00:00:00+00:00",
+        "2026-01-02T01:00:00+00:00",
+    )
+    thresholds = (2.0, 2.1, 2.5, 2.6)
+    with postgres_connection.cursor() as cursor:
+        for index, (measured_at, threshold) in enumerate(
+            zip(measurement_times, thresholds, strict=True),
+            start=1,
+        ):
+            file_hash = f"{index:064x}"
+            cursor.execute(
+                """
+                INSERT INTO baselines_metadata (
+                    device_id, device_type, manufacturer, file_hash
+                ) VALUES ('device-1', 'IFX-Trench', 'Infineon', %s)
+                RETURNING id
+                """,
+                (file_hash,),
+            )
+            metadata_id = int(cursor.fetchone()[0])
+            raw_rows = []
+            for point_index, (v_gate, current) in enumerate(
+                (
+                    (threshold - 1.0, 1.0e-4),
+                    (threshold, 1.0e-3),
+                    (threshold + 1.0, 1.0e-2),
+                )
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO baselines_measurements (
+                        metadata_id, point_index, v_gate, v_drain, i_drain
+                    ) VALUES (%s, %s, %s, 0.1, %s)
+                    RETURNING id
+                    """,
+                    (metadata_id, point_index, v_gate, current),
+                )
+                point_id = int(cursor.fetchone()[0])
+                raw_rows.append(
+                    {
+                        "point_index": point_index,
+                        "v_gate": float(v_gate),
+                        "v_drain": 0.1,
+                        "i_drain": float(current),
+                        "point_id": point_id,
+                    }
+                )
+            acquisition_key = f"acq-{index}"
+            acquisitions.append(
+                {
+                    "item_key": f"acquisition-{index}",
+                    "acquisition_key": acquisition_key,
+                    "metadata_id": metadata_id,
+                    "physical_device_key": "device-1",
+                    "measurement_protocol_id": "idvg-vth-fixed-1h-v1",
+                    "curve_family": "IdVg",
+                    "measured_at": measured_at,
+                    "identity_source": "metadata_exact",
+                    "source_relation": "baselines_metadata",
+                    "source_checksum": file_hash,
+                }
+            )
+            phase = "pre" if index <= 2 else "post"
+            observations.append(
+                {
+                    "item_key": f"observation-{index}",
+                    "acquisition_key": acquisition_key,
+                    "replicate_group_key": f"device-1-{phase}",
+                    "source_relation": "baselines_measurements",
+                    "source_checksum": sha256(
+                        [
+                            {
+                                key: value
+                                for key, value in row.items()
+                                if key != "point_id"
+                            }
+                            for row in raw_rows
+                        ]
+                    ),
+                    "source_row_ids": [
+                        row["point_id"] for row in raw_rows
+                    ],
+                }
+            )
+    postgres_connection.commit()
+    return {
+        "manifest_version": 1,
+        "batch_key": "irradiation-dvth-history-001",
+        "prepared_by": "scientist-a",
+        "prepared_at": "2026-01-04T00:00:00+00:00",
+        "source_cutoff": "2026-01-03T00:00:00+00:00",
+        "claim": {
+            "stress_type": "irradiation",
+            "target_type": "delta_vth_v",
+            "intended_split_role": "train",
+            "reference_policy": "same_device",
+            "measurement_protocol_id": "idvg-vth-fixed-1h-v1",
+            "prediction_horizon_s": 3600.0,
+            "fixed_horizon": True,
+        },
+        "extraction_config": {
+            "config_version": "vth-fixed-1h-v1",
+            "target_type": "delta_vth_v",
+            "target_current_a": 0.001,
+            "required_vds_v": 0.1,
+        },
+        "acquisitions": acquisitions,
+        "stress_sessions": [
+            {
+                "item_key": "stress-session-1",
+                "stress_session_key": "stress-1",
+                "physical_device_key": "device-1",
+                "stress_type": "irradiation",
+                "campaign_key": "campaign-1",
+                "run_key": "run-1",
+                "stress_condition_key": "ca-100mev",
+                "stress_features": features,
+                "identity_source": "campaign_registry",
+            }
+        ],
+        "observations": observations,
+        "response_units": [
+            {
+                "item_key": "response-1",
+                "unit_key": "unit-1",
+                "physical_device_key": "device-1",
+                "stress_session_key": "stress-1",
+                "stress_type": "irradiation",
+                "target_type": "delta_vth_v",
+                "device_type": "IFX-Trench",
+                "manufacturer": "Infineon",
+                "measurement_protocol_id": "idvg-vth-fixed-1h-v1",
+                "campaign_key": "campaign-1",
+                "run_key": "run-1",
+                "ion_species": "Ca",
+                "pre_observation_keys": [
+                    "observation-1",
+                    "observation-2",
+                ],
+                "post_observation_keys": [
+                    "observation-3",
+                    "observation-4",
+                ],
+                "stress_features": features,
+                "reference_policy": "same_device",
+                "minimum_replicates": 2,
+            }
+        ],
+    }
+
+
+def test_manifest_plan_approval_failure_resume_apply_and_immutability(
+    postgres_connection,
+    tmp_path: Path,
+):
+    with postgres_connection.cursor() as cursor:
+        _base_schema(cursor)
+        _apply(cursor)
+    postgres_connection.commit()
+    manifest = _manifest_from_raw_measurements(postgres_connection)
+
+    invalid = deepcopy(manifest)
+    invalid["observations"][0]["source_checksum"] = "0" * 64
+    invalid_report = plan_evidence(postgres_connection, invalid)
+    assert not invalid_report["admissible"]
+    assert {
+        exclusion["reason"] for exclusion in invalid_report["exclusions"]
+    } == {"measurement_checksum_mismatch"}
+
+    report = plan_evidence(postgres_connection, manifest)
+    assert report["admissible"]
+    assert report["collection_deficits"] == {
+        "training_groups": 29,
+        "calibration_groups": 10,
+        "calibration_devices": 10,
+        "sealed_external_groups": 30,
+        "external_devices": 10,
+    }
+    calibration_manifest = deepcopy(manifest)
+    calibration_manifest["claim"]["intended_split_role"] = "calibration"
+    calibration_report = plan_evidence(
+        postgres_connection, calibration_manifest
+    )
+    assert calibration_report["collection_deficits"] == {
+        "training_groups": 30,
+        "calibration_groups": 9,
+        "calibration_devices": 9,
+        "sealed_external_groups": 30,
+        "external_devices": 10,
+    }
+    plan_path = write_plan(
+        report,
+        tmp_path,
+        tmp_path / "evidence-report.json",
+    )
+    assert plan_path.is_file()
+
+    with pytest.raises(
+        EvidenceManifestError,
+        match="different actor",
+    ):
+        approve_evidence(
+            postgres_connection,
+            governance_root=tmp_path,
+            batch_key=manifest["batch_key"],
+            expected_plan_sha=report["manifest_sha"],
+            actor=manifest["prepared_by"],
+        )
+
+    approved = approve_evidence(
+        postgres_connection,
+        governance_root=tmp_path,
+        batch_key=manifest["batch_key"],
+        expected_plan_sha=report["manifest_sha"],
+        actor="scientist-b",
+    )
+    assert approved["status"] == "approved"
+    assert not approved["idempotent"]
+
+    competing_params = parse_dsn(os.environ["APS_TEST_POSTGRES_DSN"])
+    competing_params["dbname"] = postgres_connection.info.dbname
+    competing = psycopg2.connect(**competing_params)
+    try:
+        with competing.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_advisory_lock(
+                    hashtextextended(%s, 0)
+                )
+                """,
+                (manifest["batch_key"],),
+            )
+        competing.commit()
+        with pytest.raises(
+            EvidenceManifestError,
+            match="already being applied",
+        ):
+            apply_evidence(
+                postgres_connection,
+                batch_key=manifest["batch_key"],
+                expected_plan_sha=report["manifest_sha"],
+                actor="operator-a",
+                source_provenance={"git_commit": "test"},
+            )
+    finally:
+        with competing.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_advisory_unlock(
+                    hashtextextended(%s, 0)
+                )
+                """,
+                (manifest["batch_key"],),
+            )
+        competing.commit()
+        competing.close()
+
+    with pytest.raises(
+        DamageEvidenceError,
+        match="not registered",
+    ):
+        apply_evidence(
+            postgres_connection,
+            batch_key=manifest["batch_key"],
+            expected_plan_sha=report["manifest_sha"],
+            actor="operator-a",
+            source_provenance={"git_commit": "test"},
+        )
+    failed = evidence_status(postgres_connection, manifest["batch_key"])
+    assert failed["status"] == "failed"
+    assert {
+        (row["item_type"], row["status"], row["count"])
+        for row in failed["item_counts"]
+    } == {
+        ("acquisition", "applied", 4),
+        ("stress_session", "applied", 1),
+        ("observation", "failed", 1),
+        ("observation", "pending", 3),
+        ("response_unit", "pending", 1),
+    }
+
+    config = ExtractionConfig(**manifest["extraction_config"])
+    register_extraction_method(postgres_connection, config)
+    approve_extraction_method(
+        postgres_connection,
+        method_version="iv-parameters-v3.0",
+        config_version=config.config_version,
+        metric_name="vth_v",
+        approved_by="scientist-c",
+    )
+
+    applied = apply_evidence(
+        postgres_connection,
+        batch_key=manifest["batch_key"],
+        expected_plan_sha=report["manifest_sha"],
+        actor="operator-a",
+        source_provenance={"git_commit": "test"},
+    )
+    assert applied == {
+        "batch_id": approved["batch_id"],
+        "status": "applied",
+        "idempotent": False,
+    }
+    repeated = apply_evidence(
+        postgres_connection,
+        batch_key=manifest["batch_key"],
+        expected_plan_sha=report["manifest_sha"],
+        actor="operator-a",
+        source_provenance={"git_commit": "test"},
+    )
+    assert repeated["idempotent"]
+
+    with postgres_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM iv_damage_acquisitions),
+                (SELECT count(*) FROM iv_damage_metric_observations),
+                (SELECT count(*) FROM iv_damage_response_units),
+                (SELECT response_value FROM iv_damage_response_units)
+            """
+        )
+        acquisition_count, observation_count, response_count, response = (
+            cursor.fetchone()
+        )
+        assert (acquisition_count, observation_count, response_count) == (
+            4,
+            4,
+            1,
+        )
+        assert response == pytest.approx(0.5)
+
+        cursor.execute("SAVEPOINT immutable_manifest")
+        with pytest.raises(
+            errors.RaiseException,
+            match="manifest identity and payload are immutable",
+        ):
+            cursor.execute(
+                """
+                UPDATE iv_damage_evidence_batches
+                SET manifest = manifest || '{"tampered": true}'::jsonb
+                WHERE batch_key = %s
+                """,
+                (manifest["batch_key"],),
+            )
+        cursor.execute("ROLLBACK TO SAVEPOINT immutable_manifest")
+
+        cursor.execute("SAVEPOINT immutable_item")
+        with pytest.raises(
+            errors.RaiseException,
+            match="item identity and payload are immutable",
+        ):
+            cursor.execute(
+                """
+                UPDATE iv_damage_evidence_batch_items
+                SET payload_sha = %s
+                WHERE batch_id = %s
+                """,
+                ("f" * 64, approved["batch_id"]),
+            )
+        cursor.execute("ROLLBACK TO SAVEPOINT immutable_item")
     postgres_connection.commit()

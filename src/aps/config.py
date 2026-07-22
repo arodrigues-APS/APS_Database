@@ -159,6 +159,7 @@ class Settings:
     data_root: Path | None
     nas_root: Path | None
     iv_damage_artifact_root: Path | None
+    iv_damage_governance_root: Path | None
     enable_legacy_cv_dpt: bool
 
     @classmethod
@@ -205,6 +206,9 @@ class Settings:
             nas_root=_path_value(values.get("APS_NAS_ROOT")),
             iv_damage_artifact_root=_path_value(
                 values.get("APS_IV_DAMAGE_ARTIFACT_ROOT")
+            ),
+            iv_damage_governance_root=_path_value(
+                values.get("APS_IV_DAMAGE_GOVERNANCE_ROOT")
             ),
             enable_legacy_cv_dpt=_boolean(
                 values, "APS_ENABLE_LEGACY_CV_DPT", False
@@ -260,6 +264,14 @@ class Settings:
             writable=writable,
         )
 
+    def require_iv_damage_governance_root(self, *, writable: bool = False) -> Path:
+        """Return the durable root for signed plans and governance records."""
+        return require_directory(
+            self.iv_damage_governance_root,
+            "APS_IV_DAMAGE_GOVERNANCE_ROOT",
+            writable=writable,
+        )
+
     def require_legacy_cv_dpt_enabled(self) -> None:
         """Refuse the legacy snapshot feature unless it is explicitly enabled."""
         if not self.enable_legacy_cv_dpt:
@@ -296,6 +308,10 @@ class Settings:
             "iv_damage_artifact_root": (
                 str(self.iv_damage_artifact_root)
                 if self.iv_damage_artifact_root else None
+            ),
+            "iv_damage_governance_root": (
+                str(self.iv_damage_governance_root)
+                if self.iv_damage_governance_root else None
             ),
             "enable_legacy_cv_dpt": self.enable_legacy_cv_dpt,
         }

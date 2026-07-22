@@ -20,6 +20,8 @@ DASHBOARD_TITLE = "IV Damage Predictor V3 — Certified Scalar & Full Curves"
 DASHBOARD_SLUG = "iv-damage-predictor-v3"
 
 DATASETS = {
+    "activation": "iv_damage_claim_activation_status_view",
+    "scalar_prediction": "iv_damage_scalar_prediction_provenance_view",
     "scalar_gate": "iv_damage_release_gate_check_view",
     "scalar_validation": "iv_damage_validation_summary_view",
     "scalar_time": "iv_damage_temporal_monitoring_view",
@@ -31,6 +33,7 @@ DATASETS = {
 }
 
 TABS = {
+    "activation": ("Activation Readiness", "TAB-v3-activation-readiness"),
     "scalar_gate": ("Scalar Release Gates", "TAB-v3-scalar-gates"),
     "scalar_validation": ("Scalar Validation", "TAB-v3-scalar-validation"),
     "scalar_monitoring": ("Scalar Prospective", "TAB-v3-scalar-monitoring"),
@@ -41,6 +44,11 @@ TABS = {
 }
 
 GUIDANCE = {
+    TABS["activation"][1]: (
+        "### Why the dashboard can be empty\n\nEvery scalar and curve claim appears here even with zero evidence. "
+        "The blocking stage is the next governed lifecycle step; empty charts never imply a working model. "
+        "Shadow predictions are research screening outputs and are never decision eligible."
+    ),
     TABS["scalar_gate"][1]: (
         "### Scalar claim boundary\n\nDevelopment, selection, one-time external certification, "
         "shadow monitoring, and decision release are independent gates. A green development gate alone "
@@ -114,6 +122,10 @@ def definitions() -> list[dict]:
              params=table(["model_version", "stress_type", "target_type", "response_unit", "release_status", "policy_version", "policy_approved", "candidate_selected", "external_certification_present", "external_certification_passed", "active_shadow", "active_decision_release", "certified_at", "acceptance_requirements", "latest_monitoring_passed", "latest_monitoring_at", "latest_monitoring_checks", "latest_monitoring_metrics"])),
         dict(name="V3 Scalar — ΔVth Validation Error (V)", ds="scalar_validation", tab="scalar_validation", viz="echarts_timeseries_bar", width=6, height=42,
              params=bar("split_scheme", [metric("median |error| (V)", "MAX(median_abs_error)"), metric("P90 |error| (V)", "MAX(p90_abs_error)")], ["model_version", "evaluation_kind", "split_role"], sql_filter="target_type = 'delta_vth_v'")),
+        dict(name="V3 Activation — Claim Readiness", ds="activation", tab="activation", viz="table", width=12, height=48,
+             params=table(["claim_type", "stress_type", "target_type", "curve_family", "response_unit", "evidence_count", "method_count", "policy_count", "snapshot_count", "model_count", "certification_count", "shadow_count", "decision_count", "request_count", "prediction_count", "outcome_count", "blocking_stage", "next_action"])),
+        dict(name="V3 Scalar — Shadow Prediction Provenance (SCREENING ONLY)", ds="scalar_prediction", tab="scalar_monitoring", viz="table", width=12, height=42,
+             params=table(["request_key", "model_version", "physical_device_key", "stress_type", "target_type", "response_unit", "measurement_protocol_id", "requested_prediction_horizon_s", "deployment_mode", "support_status", "evidence_status", "predicted_response", "predicted_response_lower", "predicted_response_upper", "ood_score", "ood_threshold", "decision_eligible", "usage_label", "created_at"])),
         dict(name="V3 Scalar — log-RDS(on) Validation Error (ln ratio)", ds="scalar_validation", tab="scalar_validation", viz="echarts_timeseries_bar", width=6, height=42,
              params=bar("split_scheme", [metric("median |error| (ln ratio)", "MAX(median_abs_error)"), metric("P90 |error| (ln ratio)", "MAX(p90_abs_error)")], ["model_version", "evaluation_kind", "split_role"], sql_filter="target_type = 'log_rdson_ratio'")),
         dict(name="V3 Scalar — Weekly Prospective Monitoring", ds="scalar_time", tab="scalar_monitoring", viz="table", width=12, height=42,
@@ -161,8 +173,48 @@ def verify_views() -> None:
         raise RuntimeError(
             "certified scalar/full-curve schema is incomplete (missing: "
             + ", ".join(missing)
-            + "). Apply forward migrations through schema/044."
+            + "). Apply forward migrations through schema/045."
         )
+
+
+def reconcile_chart_membership(session, dashboard_id: int, chart_ids: list[int]) -> None:
+    """Preserve old charts but remove stale V3 dashboard associations."""
+    desired = set(chart_ids)
+    for chart_id in sorted(desired):
+        response = session.put(
+            f"{SUPERSET_URL}/api/v1/chart/{chart_id}",
+            json={"dashboards": [dashboard_id]},
+        )
+        if not response.ok:
+            raise RuntimeError(f"could not associate chart {chart_id}: {response.status_code}")
+    for chart_id in range(495, 505):
+        if chart_id in desired:
+            continue
+        response = session.get(f"{SUPERSET_URL}/api/v1/chart/{chart_id}")
+        if response.status_code == 404:
+            continue
+        if not response.ok:
+            raise RuntimeError(f"could not inspect legacy chart {chart_id}: {response.status_code}")
+        dashboards = response.json().get("result", {}).get("dashboards", [])
+        retained = []
+        for value in dashboards:
+            value = value.get("id") if isinstance(value, dict) else value
+            if int(value) != dashboard_id:
+                retained.append(int(value))
+        response = session.put(f"{SUPERSET_URL}/api/v1/chart/{chart_id}", json={"dashboards": retained})
+        if not response.ok:
+            raise RuntimeError(f"could not disassociate legacy chart {chart_id}: {response.status_code}")
+    response = session.get(
+        f"{SUPERSET_URL}/api/v1/dashboard/{dashboard_id}/charts"
+    )
+    if not response.ok:
+        raise RuntimeError(f"could not verify dashboard membership: {response.status_code}")
+    actual = {
+        int(value.get("id") if isinstance(value, dict) else value)
+        for value in response.json().get("result", [])
+    }
+    if actual != desired:
+        raise RuntimeError(f"dashboard membership mismatch: expected={sorted(desired)} actual={sorted(actual)}")
 
 
 def create_dashboard() -> int | None:
@@ -191,26 +243,20 @@ def create_dashboard() -> int | None:
         [(TABS[key][0], TABS[key][1], tabs[key]) for key in TABS], GUIDANCE,
     )
     all_charts = [item["chart_id"] for item in catalog]
-    scalar_charts = [item["chart_id"] for item in catalog if item["ds"].startswith("scalar") or item["ds"] == "backlog"]
+    scalar_charts = [item["chart_id"] for item in catalog if item["ds"].startswith("scalar") or item["ds"] in {"backlog", "activation"}]
     curve_charts = [item["chart_id"] for item in catalog if item["ds"].startswith("curve")]
     curve_prediction_charts = [item["chart_id"] for item in catalog if item["ds"] == "curve_prediction"]
-    curve_family_datasets = [
-        key for key in dataset_ids if key.startswith("curve_")
-    ]
     filters = [
-        _native_filter("FILTER-v3-stress", "Stress Type", [(dataset_ids[key], "stress_type") for key in DATASETS], all_charts, all_charts),
-        _native_filter("FILTER-v3-target", "Scalar Target (single)", [(dataset_ids[key], "target_type") for key in ("scalar_gate", "scalar_validation", "scalar_time", "backlog")], scalar_charts, all_charts, multi=False),
-        _native_filter("FILTER-v3-family", "Curve Family (single)", [(dataset_ids[key], "curve_family") for key in curve_family_datasets], curve_charts, all_charts, multi=False),
+        _native_filter("FILTER-v3-stress", "Stress Type", [(dataset_ids["activation"], "stress_type")], all_charts, all_charts),
+        _native_filter("FILTER-v3-target", "Scalar Target (single)", [(dataset_ids["activation"], "target_type")], scalar_charts, all_charts, multi=False),
+        _native_filter("FILTER-v3-family", "Curve Family (single)", [(dataset_ids["activation"], "curve_family")], curve_charts, all_charts, multi=False),
         _native_filter("FILTER-v3-request", "Curve Request (single)", [(dataset_ids["curve_prediction"], "request_key")], curve_prediction_charts, all_charts, multi=False),
     ]
     metadata = build_json_metadata(all_charts, filters)
     metadata["cross_filters_enabled"] = False
     dashboard_id = create_or_update_dashboard(session, DASHBOARD_TITLE, layout, metadata, slug=DASHBOARD_SLUG)
     if dashboard_id:
-        for chart_id in all_charts:
-            response = session.put(f"{SUPERSET_URL}/api/v1/chart/{chart_id}", json={"dashboards": [dashboard_id]})
-            if not response.ok:
-                raise RuntimeError(f"could not associate chart {chart_id}: {response.status_code}")
+        reconcile_chart_membership(session, dashboard_id, all_charts)
     return dashboard_id
 
 

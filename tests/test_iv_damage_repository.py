@@ -53,6 +53,7 @@ def test_forward_migration_discovers_v3_schema_after_031():
         "042_iv_damage_session_and_projection_release.sql",
         "043_iv_damage_multi_model_outcomes.sql",
         "044_iv_damage_release_observability.sql",
+        "045_iv_damage_activation_readiness.sql",
     ]
 
 

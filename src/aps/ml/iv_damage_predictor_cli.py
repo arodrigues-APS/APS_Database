@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict
 from datetime import datetime
 import json
+from pathlib import Path
 import sys
 
 from psycopg2 import Error as DatabaseError
@@ -33,6 +34,14 @@ from aps.ml.iv_damage_curves import CurveEvidenceError
 from aps.ml.iv_damage_curve_training import CurveTrainingError
 from aps.ml.iv_damage_curve_operations import CurveOperationError
 from aps.ml.iv_damage_evidence import DamageEvidenceError
+from aps.ml.iv_damage_manifest import (
+    EvidenceManifestError,
+    apply_evidence,
+    approve_evidence,
+    evidence_status,
+    plan_evidence,
+    write_plan,
+)
 from aps.ml.iv_damage_projection_validation import ProjectionValidationError
 from aps.provenance import collect_source_provenance, require_clean_production_source
 
@@ -42,6 +51,9 @@ SCALAR_COMMANDS = {
     "start-scalar-shadow", "score-scalar-shadow", "score-scalar-all",
     "assess-scalar-shadow",
     "promote-scalar", "record-scalar-outcomes",
+}
+EVIDENCE_COMMANDS = {
+    "evidence-plan", "evidence-approve", "evidence-apply", "evidence-status",
 }
 
 
@@ -105,6 +117,22 @@ def build_parser() -> argparse.ArgumentParser:
     promote = subparsers.add_parser("promote-scalar")
     promote.add_argument("--model-version", required=True)
     promote.add_argument("--actor", required=True)
+
+    evidence_plan = subparsers.add_parser(
+        "evidence-plan",
+        help="audit a manifest without mutating PostgreSQL and persist its canonical plan",
+    )
+    evidence_plan.add_argument("--manifest", required=True)
+    evidence_plan.add_argument("--report-json", type=Path, required=True)
+
+    for name in ("evidence-approve", "evidence-apply"):
+        evidence = subparsers.add_parser(name)
+        evidence.add_argument("--batch-key", required=True)
+        evidence.add_argument("--expected-plan-sha", required=True)
+        evidence.add_argument("--actor", required=True)
+
+    evidence_status_parser = subparsers.add_parser("evidence-status")
+    evidence_status_parser.add_argument("--batch-key", required=True)
     return parser
 
 
@@ -116,6 +144,38 @@ def _timestamp(value: str) -> datetime:
 
 
 def dispatch(args: argparse.Namespace):
+    if args.command in EVIDENCE_COMMANDS:
+        settings = get_settings()
+        source = collect_source_provenance()
+        if args.command in {"evidence-approve", "evidence-apply"}:
+            require_clean_production_source(
+                settings, source, operation=f"aps-damage-predictor {args.command}"
+            )
+        with get_connection() as connection:
+            if args.command == "evidence-plan":
+                manifest = curve_cli._object(args.manifest, "evidence manifest")
+                report = plan_evidence(connection, manifest)
+                plan_path = write_plan(
+                    report,
+                    settings.require_iv_damage_governance_root(writable=True),
+                    args.report_json,
+                )
+                return {**report, "canonical_plan_path": str(plan_path)}
+            if args.command == "evidence-approve":
+                return approve_evidence(
+                    connection,
+                    governance_root=settings.require_iv_damage_governance_root(),
+                    batch_key=args.batch_key, expected_plan_sha=args.expected_plan_sha,
+                    actor=args.actor,
+                )
+            if args.command == "evidence-apply":
+                return apply_evidence(
+                    connection,
+                    batch_key=args.batch_key, expected_plan_sha=args.expected_plan_sha,
+                    actor=args.actor, source_provenance=source.as_dict(),
+                )
+            return evidence_status(connection, args.batch_key)
+
     if args.command not in SCALAR_COMMANDS:
         return curve_cli.dispatch(args)
     source = collect_source_provenance()
@@ -124,7 +184,6 @@ def dispatch(args: argparse.Namespace):
     )
     with get_connection() as connection:
         if args.command == "train-scalar-development":
-            from pathlib import Path
             return asdict(train_scalar_development_candidate(
                 connection, snapshot_version=args.snapshot_version,
                 policy_version=args.policy_version, model_version=args.model_version,
@@ -185,6 +244,7 @@ def main(argv=None) -> int:
         DamageOperationError, CurveEvidenceError, CurveTrainingError,
         CurveOperationError, DamageEvidenceError, ProjectionValidationError,
         OSError, TypeError, ValueError,
+        EvidenceManifestError,
         json.JSONDecodeError,
     ) as exc:
         print(f"aps-damage-predictor: error: {exc}", file=sys.stderr)

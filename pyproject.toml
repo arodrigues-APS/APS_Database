@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 aps = "aps.cli:main"
 aps-damage = "aps.ml.iv_damage_cli:main"
+aps-damage-predictor = "aps.ml.iv_damage_predictor_cli:main"
 
 [project.optional-dependencies]
 # Flask/uwsgi lab data server (server.py). Pins reproduce the frozen state
