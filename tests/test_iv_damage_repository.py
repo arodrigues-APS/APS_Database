@@ -34,7 +34,8 @@ def request(**overrides):
 
 def test_forward_migration_discovers_v3_schema_after_031():
     names = [
-        migration.filename for migration in discover_migrations()
+        migration.filename
+        for migration in discover_migrations()
         if migration.filename >= "031_flask_avalanche_admin.sql"
     ]
     assert names == [
@@ -54,6 +55,7 @@ def test_forward_migration_discovers_v3_schema_after_031():
         "043_iv_damage_multi_model_outcomes.sql",
         "044_iv_damage_release_observability.sql",
         "045_iv_damage_activation_readiness.sql",
+        "046_iv_damage_research_prediction.sql",
     ]
 
 
