@@ -53,7 +53,7 @@ def definitions() -> list[dict]:
         dict(
             name="V3 Research — Snapshot Status (SCREENING/RESEARCH ONLY)",
             ds="research_status",
-            tab="research_overview",
+            tab="research_limits",
             viz="table",
             width=12,
             height=34,
@@ -77,7 +77,7 @@ def definitions() -> list[dict]:
         dict(
             name="V3 Research — Cohort and Missingness",
             ds="research_cohort",
-            tab="research_overview",
+            tab="research_limits",
             viz="table",
             width=12,
             height=40,

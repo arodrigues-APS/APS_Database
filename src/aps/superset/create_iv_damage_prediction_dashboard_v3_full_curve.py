@@ -41,7 +41,6 @@ DATASETS = {
 }
 
 TABS = {
-    "research_overview": ("Research Overview", "TAB-v3-research-overview"),
     "research_scalar": ("Research Scalar Validation", "TAB-v3-research-scalar"),
     "research_curve": ("Research Curve Explorer", "TAB-v3-research-curve"),
     "research_residual": ("Residual Shape Diagnostics", "TAB-v3-research-residual"),
@@ -57,11 +56,8 @@ TABS = {
 }
 
 GUIDANCE = {
-    TABS["research_overview"][1]: (
-        "### RETROSPECTIVE RESEARCH ONLY — NOT DECISION ELIGIBLE\n\nHistorical out-of-fold predictions use unknown/heterogeneous measurement horizons. Post curves are joined only after prediction as held-out truth. These results are exploratory, not certified, released, shadow-deployed, prospective, or fixed-horizon evidence."
-    ),
     TABS["research_scalar"][1]: (
-        "### SCREENING/RESEARCH ONLY\n\nEvery prediction is grouped out of fold. Device-macro denominators are primary; leave-run and leave-campaign limitations remain visible."
+        "### RETROSPECTIVE SCREENING/RESEARCH ONLY — NOT DECISION ELIGIBLE\n\nEvery prediction is grouped out of fold. Device-macro denominators are primary; leave-run and leave-campaign limitations remain visible. Post curves are joined only after prediction as held-out truth."
     ),
     TABS["research_curve"][1]: (
         "### HISTORICAL OUT-OF-FOLD RESEARCH CURVES — NOT DECISION ELIGIBLE\n\nActual historical post is validation truth, never a prediction input. Filter to one pair, model, and validation scheme before interpreting an overlay."
@@ -70,7 +66,7 @@ GUIDANCE = {
         "### RESIDUAL-SHAPE RESEARCH DIAGNOSTIC\n\nThe deterministic curve uses an out-of-fold predicted ΔVth. Residual PCA and regressors are fitted only on outer training devices; unsupported correction falls back to deterministic projection."
     ),
     TABS["research_limits"][1]: (
-        "### CLAIM LIMITATIONS\n\nMeasurement horizon is unknown/heterogeneous; fluence is missing in the primary cohort; repeated files are not established replicates; operational identities require continued audit."
+        "### CLAIM LIMITATIONS AND AUDIT DETAILS\n\nSnapshot and cohort tables are retained here for traceability. Measurement horizon is unknown/heterogeneous; fluence is missing in the primary cohort; repeated files are not established replicates; operational identities require continued audit."
     ),
     TABS["activation"][1]: (
         "### Why the dashboard can be empty\n\nEvery scalar and curve claim appears here even with zero evidence. "

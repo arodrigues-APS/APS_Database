@@ -5,13 +5,13 @@ def test_dashboard_34_contract_leads_with_research_and_preserves_certified_tabs(
     dashboard = complete.dashboard
     assert dashboard.DASHBOARD_TITLE == "IV Damage Predictor V3 — Research Predictions & Certified Readiness"
     assert dashboard.DASHBOARD_SLUG == "iv-damage-predictor-v3"
-    assert list(dashboard.TABS)[:5] == [
-        "research_overview",
+    assert list(dashboard.TABS)[:4] == [
         "research_scalar",
         "research_curve",
         "research_residual",
         "research_limits",
     ]
+    assert "research_overview" not in dashboard.TABS
     assert "activation" in dashboard.TABS
     assert "curve_prediction" in dashboard.TABS
     assert "curve_projection" in dashboard.TABS
@@ -32,7 +32,6 @@ def test_research_charts_never_mix_certified_datasets_or_claims():
 def test_every_research_tab_has_visible_nondecision_guidance():
     dashboard = complete.dashboard
     for key in (
-        "research_overview",
         "research_scalar",
         "research_curve",
         "research_residual",
