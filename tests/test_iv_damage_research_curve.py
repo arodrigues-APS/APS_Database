@@ -42,6 +42,20 @@ def test_unsupported_grid_refuses_extrapolation():
         )
 
 
+def test_projection_accepts_only_floating_point_endpoint_roundoff():
+    pair = audit_pair(make_pair(1, device="d1", run="r1", campaign="c1"))
+    pre_points = pair.candidate.pre_points
+    pre_x = np.asarray([point.v_gate_v for point in pre_points])
+    shift = -0.15658410708334802
+    projected_grid = np.asarray([pre_x.min() + shift, pre_x.max() + shift])
+
+    result = deterministic_projection(pre_points, projected_grid, shift)
+
+    assert result == pytest.approx([pre_points[0].i_drain_a, pre_points[-1].i_drain_a])
+    with pytest.raises(ResearchContractError, match="extrapolate"):
+        deterministic_projection(pre_points, [projected_grid[0] - 1e-9, projected_grid[1]], shift)
+
+
 def test_hybrid_uses_predicted_not_observed_scalar_shift():
     training = [
         audit_pair(make_pair(i, device=f"d{i}", run=f"r{i}", campaign=f"c{i}", shift=0.02 * i)) for i in range(1, 5)

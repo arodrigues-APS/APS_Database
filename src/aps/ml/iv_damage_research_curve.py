@@ -85,9 +85,16 @@ def partial_interpolate_curve(
 def interpolate_curve(points: Sequence[ResearchPoint], grid_v: Sequence[float]) -> np.ndarray:
     x, y = _xy(points)
     grid = np.asarray(grid_v, dtype=float)
-    if grid.min() < x.min() or grid.max() > x.max():
+    # ``supported_grid`` constructs endpoints by adding the shift and the
+    # projection subtracts it again. Those inverse floating-point operations
+    # can differ from the measured endpoint by a few ulps. Treat only that
+    # numerical round-off as supported; retain the fail-closed behavior for
+    # any material extrapolation.
+    scale = max(float(np.max(np.abs(x))), float(np.max(np.abs(grid))), 1.0)
+    tolerance = np.finfo(float).eps * scale * 16.0
+    if grid.min() < x.min() - tolerance or grid.max() > x.max() + tolerance:
         raise ResearchContractError("curve interpolation would extrapolate")
-    return np.interp(grid, x, y)
+    return np.interp(np.clip(grid, x.min(), x.max()), x, y)
 
 
 def deterministic_projection(
