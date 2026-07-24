@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create the "Baselines" dashboard in Apache Superset via its REST API.
+Create the "Baselines – Raw Campaigns" dashboard in Apache Superset via its REST API.
 
 Dashboard design
 ================
@@ -68,7 +68,7 @@ create_chart = partial(create_documented_chart, create_api_chart)
 def build_dashboard_layout(charts):
     """Build position_json from (chart_id, uuid, name, width, height) tuples."""
     return build_tabbed_layout(
-        "Baselines", "bl",
+        "Baselines – Raw Campaigns", "bl",
         [("Raw Measurement Explorer", "TAB-baselines-explorer", charts)],
         {"*": DASHBOARD_GUIDANCE["baselines"]},
     )
@@ -267,7 +267,7 @@ def build_native_filters(chart_ids, overview_chart_id, meta_ds_id,
 
 def main():
     print("=" * 70)
-    print("Creating Baselines Dashboard in Apache Superset")
+    print("Creating Baselines – Raw Campaigns Dashboard in Apache Superset")
     print("=" * 70)
 
     # 1. Authenticate
@@ -650,7 +650,7 @@ def main():
     )
     json_metadata = build_json_metadata(chart_ids_only, native_filters)
     dash_id = create_or_update_dashboard(
-        session, "Baselines", position_json, json_metadata,
+        session, "Baselines – Raw Campaigns", position_json, json_metadata,
         slug="baselines",
     )
 
