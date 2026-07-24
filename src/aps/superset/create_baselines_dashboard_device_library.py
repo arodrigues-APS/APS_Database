@@ -69,6 +69,16 @@ from aps.superset.superset_api import (get_session, find_database, find_or_creat
 from aps.db_config import SUPERSET_URL
 
 
+# V_Drain bin width (volts) used to smooth the mean IdVd output curves.
+# The underlying view bins V_drain at 0.1 V; at that resolution the set of
+# devices/runs populating each bin changes step-to-step (runs terminate and
+# sample V_drain on slightly offset grids), so the group mean jitters.
+# Re-pooling into wider bins is a genuine device-weighted box average — it
+# stabilises the contributing set without inventing values, unlike a cosmetic
+# spline. Applied to the IdVd mean and ±1σ charts only (not IdVg/Vth/3rd-Q).
+IDVD_VDRAIN_BIN_V = 0.5
+
+
 BOXPLOT_PARAMS_SQL = """WITH
 /* Per-device parameter values for box-and-whisker plots.
    Reuses the same extraction logic as device_calculated_params but stops
@@ -701,7 +711,7 @@ def main():
                      metric_expr=("SUM(avg_i_drain * n_devices) "
                                   "/ NULLIF(SUM(n_devices), 0)"),
                      metric_label="Mean I_Drain (A)",
-                     log_y=False, series_limit=0):
+                     log_y=False, series_limit=0, x_coarsen=None):
         """
         Parameters
         ----------
@@ -710,6 +720,10 @@ def main():
         bias_round : int       – rounding divisor for the bias column
                                  (1 = integer, 5 = 5 V steps, etc.)
         cat        : str       – measurement_category value
+        x_coarsen  : float|None – if set, re-pool the x-axis into bins of this
+                                 width (V). The metric stays the device-weighted
+                                 mean, so this is a genuine box average across
+                                 the finer sub-bins, not a cosmetic smooth.
         """
         groupby = ["device_type"]
         if bias_col:
@@ -723,8 +737,14 @@ def main():
                 "label": bias_col.replace("_bin", " (V)"),
             })
 
+        x_axis_spec = (x_axis if not x_coarsen else {
+            "expressionType": "SQL",
+            "sqlExpression": f"ROUND({x_axis} / {x_coarsen}) * {x_coarsen}",
+            "label": f"{x_axis}_coarse",
+        })
+
         params = {
-            "x_axis": x_axis,
+            "x_axis": x_axis_spec,
             "time_grain_sqla": None,
             "x_axis_sort_asc": True,
             "metrics": [{
@@ -767,7 +787,7 @@ def main():
                           lower_expr=None,
                           upper_label="+1\u03c3 I_Drain (A)",
                           lower_label="\u22121\u03c3 I_Drain (A)",
-                          log_y=False, series_limit=0):
+                          log_y=False, series_limit=0, x_coarsen=None):
         """Like curve_params but with two metrics: upper and lower ±1σ bounds."""
         upper_expr = (upper_expr if upper_expr is not None else
                       "SUM(upper_i_drain * n_devices) "
@@ -787,8 +807,14 @@ def main():
                 "label": bias_col.replace("_bin", " (V)"),
             })
 
+        x_axis_spec = (x_axis if not x_coarsen else {
+            "expressionType": "SQL",
+            "sqlExpression": f"ROUND({x_axis} / {x_coarsen}) * {x_coarsen}",
+            "label": f"{x_axis}_coarse",
+        })
+
         params = {
-            "x_axis": x_axis,
+            "x_axis": x_axis_spec,
             "time_grain_sqla": None,
             "x_axis_sort_asc": True,
             "metrics": [
@@ -912,6 +938,7 @@ def main():
                 x_title="V_Drain (V)",
                 y_title="I_Drain (A)",
                 series_limit=10,
+                x_coarsen=IDVD_VDRAIN_BIN_V,
             ),
             12, 60,
         ),
@@ -1130,6 +1157,7 @@ def main():
                 x_title="V_Drain (V)",
                 y_title="I_Drain (A)",
                 series_limit=10,
+                x_coarsen=IDVD_VDRAIN_BIN_V,
             ),
             12, 60,
         ),

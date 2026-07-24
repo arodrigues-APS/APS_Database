@@ -30,5 +30,10 @@ py3/
 # Secrets / environment files
 .env
 
+
+#AI context
+CLAUDE.md
+
+
 # Superset Docker runtime (not your config)
 superset/docker/
