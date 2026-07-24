@@ -381,15 +381,13 @@ DEPLETION_RATIO_REFERENCE_LINE = [
 DEPLETION_X_BOUNDS = [0.0, 1.0]
 
 
-TAB_READINESS = "Verdict & Actions"
+TAB_READINESS = "Verdict & Next Actions"
 TAB_CANDIDATE = "v1 · Waveform ranker"
 TAB_MECHANISTIC = "v2 · Energy ranker"
 TAB_V3 = "v3 · Combined vector"
 TAB_CONCORDANCE = "Concordance & Curation"
-TAB_PHYSICS = "Physics Context"
-TAB_RAW = "Raw / QA"
-# Legacy chart definitions below still use this name; it now routes to Physics.
-TAB_DIAGNOSTICS = TAB_PHYSICS
+# Raw/QA folded in here (2026-07-22 redesign): one forensic tab instead of two.
+TAB_PHYSICS = "Physics & Raw"
 TAB_ORDER = [
     TAB_READINESS,
     TAB_CANDIDATE,
@@ -397,7 +395,6 @@ TAB_ORDER = [
     TAB_V3,
     TAB_CONCORDANCE,
     TAB_PHYSICS,
-    TAB_RAW,
 ]
 TAB_IDS = {
     TAB_READINESS: "TAB-proxy-readiness",
@@ -406,7 +403,6 @@ TAB_IDS = {
     TAB_V3: "TAB-proxy-v3",
     TAB_CONCORDANCE: "TAB-proxy-concordance",
     TAB_PHYSICS: "TAB-proxy-physics",
-    TAB_RAW: "TAB-proxy-raw",
 }
 MARKDOWN_PANELS = [
     {
@@ -444,25 +440,20 @@ MARKDOWN_PANELS = [
         "tab": TAB_CONCORDANCE,
         "code": (
             "### Agreement and human review\n\n"
-            "Exact rank-1 agreement is intentionally strict. Enrichment asks a "
-            "different question: where the v2 winner lies in the energy-free "
-            "signature ordering. Review queues remain unvalidated until a "
-            "curated measured post-IV label supplies reviewer, basis, and date."
+            "Read the **Method-Agreement Map** below first: bottom-left points "
+            "are strong candidates (both methods rank them highly), far-right "
+            "points are method disagreements to curate. Exact rank-1 agreement "
+            "(the KPI) is intentionally strict; enrichment asks the softer "
+            "question of where the v2 winner lies in the energy-free signature "
+            "ordering. Review queues remain unvalidated until a curated "
+            "measured post-IV label supplies reviewer, basis, and date.\n\n"
+            "[Open the interactive damage-signature viewer for per-record "
+            "identity and 3-D concordance]"
+            "(https://rawdata.aps.ee.ethz.ch/data/www/tools/"
+            "damage-signature-3d/index.html)"
         ),
         "width": 12,
-        "height": 5,
-    },
-    {
-        "tab": TAB_RAW,
-        "code": (
-            "### Forensic QA and export\n\n"
-            "These wide tables preserve evidence and provenance for drill-through "
-            "and export. They are not the primary decision surface. Row limits "
-            "apply to the on-screen table; narrow filters before interpreting "
-            "absence or downloading a cohort."
-        ),
-        "width": 12,
-        "height": 5,
+        "height": 6,
     },
     {
         "tab": TAB_CANDIDATE,
@@ -473,14 +464,7 @@ MARKDOWN_PANELS = [
             "manual truth labeling; do not read distance, waveform similarity, "
             "or energy overlap as validation by itself. A row is `validated` "
             "only in v2 after a curated `proxy_truth_labels` entry marks the pair "
-            "`equivalent` with `label_basis = measured_post_iv`."
-        ),
-        "width": 12,
-        "height": 5,
-    },
-    {
-        "tab": TAB_CANDIDATE,
-        "code": (
+            "`equivalent` with `label_basis = measured_post_iv`.\n\n"
             "### Read distance *with* evidence coverage\n\n"
             "`damage_signature_distance` is a **screening distance**, not a "
             "proxy-equivalence score. It is only comparable **within the same "
@@ -496,7 +480,7 @@ MARKDOWN_PANELS = [
             "to rank candidates."
         ),
         "width": 12,
-        "height": 6,
+        "height": 10,
     },
     {
         "tab": TAB_PHYSICS,
@@ -508,20 +492,18 @@ MARKDOWN_PANELS = [
             "thresholds**. Terminal electrical energy measures the energy "
             "**released** during the observed waveform window. These are "
             "separate quantities with different units and should not be merged "
-            "into one scalar."
-        ),
-        "width": 12,
-        "height": 6,
-    },
-    {
-        "tab": TAB_PHYSICS,
-        "code": (
+            "into one scalar.\n\n"
             "[Open the interactive damage-signature and energy viewer]"
             "(https://rawdata.aps.ee.ethz.ch/data/www/tools/"
-            "damage-signature-3d/index.html)"
+            "damage-signature-3d/index.html)\n\n"
+            "### Forensic QA and export\n\n"
+            "The wide tables below preserve evidence and provenance for "
+            "drill-through and export. They are not the primary decision "
+            "surface. Row limits apply to the on-screen table; narrow filters "
+            "before interpreting absence or downloading a cohort."
         ),
         "width": 12,
-        "height": 3,
+        "height": 10,
     },
     {
         "tab": TAB_V3,
@@ -790,7 +772,7 @@ def build_dashboard_layout(charts, markdown_panels=None):
     for cid, cuuid, cname, width, height, tab in charts:
         if cid is None:
             continue
-        tab = tab or TAB_RAW
+        tab = tab or TAB_PHYSICS
         items_by_tab.setdefault(tab, []).append(
             {
                 "kind": "chart",
@@ -955,12 +937,36 @@ def build_chart_catalog(chart_defs, chart_ids):
 
 
 def build_native_filters(all_chart_ids, dataset_ids, chart_catalog):
-    """Build a small, tab-specific native-filter set from actual chart inputs.
+    """Build a small, dashboard-wide native-filter set from actual chart inputs.
 
-    Device is the only global semantic filter. Each analytical tab then gets no
-    more than four controls. A chart enters a scope only when both its real
-    dataset and its tab support the filter; moved curation queues therefore no
-    longer inherit filters from their former tabs.
+    2026-07-22 redesign: Target Event / Candidate Source / Match Scope are
+    merged into one filter per concept covering every method tab, replacing a
+    private Event/Source/Scope/Claim quadruplet per v1/v2/v3/Review tab. The
+    pre-redesign filters already co-targeted `candidates` + `candidates_v2` +
+    `concordance_enrichment` for these three concepts (and `candidates_v2` +
+    `candidate_boundary.source` for source), so those pairings sharing one
+    value domain is evidenced by the prior deployment. `candidates_v3` and
+    `candidate_summary` joining the merge is new. Candidate Source (the one
+    also reaching `candidate_boundary.source`, so the most likely of the
+    three to disagree) was checked live at 2026-07-22 first deploy: a
+    GROUP BY across all six target columns found exactly two values,
+    `avalanche` and `sc`, both present with identical spelling in every one
+    of the six views (row counts differ a lot by view, e.g. candidate_boundary
+    has as few as 4-16 rows for a value vs thousands elsewhere, but zero is
+    the only count that would actually blank a chart, and none were zero) --
+    confirmed safe. Target Event and Match Scope were not separately checked;
+    if either misbehaves, split it back out using this same query pattern
+    (GROUP BY value, COUNT(*) per target dataset/column, UNION ALL, diff the
+    value sets) to find which view disagrees.
+    Claim Status stays split: v2 and the curated enrichment view share
+    statuses including `validated`, but v1's `proxy_claim_status` never
+    reaches `validated` (that requires a v2 truth label), so merging it would
+    apply a `validated` selection to v1 charts and blank them. v1's claim
+    status remains readable via its column and the existing "Claim Status by
+    Scope" bar instead of a dedicated filter. The v1-only Evidence Class
+    filter is dropped for the same reason every other single-tab filter was
+    cut: the column and its dedicated evidence-class chart already carry that
+    read without spending rail space on a filter used nowhere else.
     """
     all_ids = [int(chart_id) for chart_id in all_chart_ids if chart_id is not None]
     catalog_ids = [row["chart_id"] for row in chart_catalog]
@@ -1033,20 +1039,25 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_catalog):
     }
     device_scope = scoped(dataset_keys=device_target_map)
 
-    v1_datasets = {"candidates", "candidate_summary"}
-    v1_event_scope = scoped(tabs={TAB_CANDIDATE}, dataset_keys=v1_datasets)
-    v1_candidate_scope = scoped(tabs={TAB_CANDIDATE}, dataset_keys={"candidates"})
-
-    v2_scope = scoped(tabs={TAB_MECHANISTIC}, dataset_keys={"candidates_v2"})
-    v2_source_scope = scoped(
-        tabs={TAB_MECHANISTIC},
-        dataset_keys={"candidates_v2", "candidate_boundary"},
+    # Shared across every method + curation tab. candidate_summary carries its
+    # own copy of these three columns (a cohort-level rollup of `candidates`,
+    # not a join), so it needs its own targets alongside `candidates` itself.
+    method_tabs = {TAB_CANDIDATE, TAB_MECHANISTIC, TAB_V3, TAB_CONCORDANCE}
+    rank_dataset_keys = {
+        "candidates", "candidate_summary", "candidates_v2", "candidates_v3",
+        "concordance_enrichment",
+    }
+    event_scope = scoped(tabs=method_tabs, dataset_keys=rank_dataset_keys)
+    source_scope = scoped(
+        tabs=method_tabs, dataset_keys=rank_dataset_keys | {"candidate_boundary"}
     )
+    match_scope_scope = scoped(tabs=method_tabs, dataset_keys=rank_dataset_keys)
 
-    v3_scope = scoped(tabs={TAB_V3}, dataset_keys={"candidates_v3"})
-
-    curation_datasets = {"candidates", "candidates_v2", "concordance_enrichment"}
-    curation_scope = scoped(tabs={TAB_CONCORDANCE}, dataset_keys=curation_datasets)
+    # Claim Status stays scoped to v2 + Concordance only; see docstring.
+    claim_scope = scoped(
+        tabs={TAB_MECHANISTIC, TAB_CONCORDANCE},
+        dataset_keys={"candidates_v2", "concordance_enrichment"},
+    )
 
     physics_scope = scoped(tabs={TAB_PHYSICS}, dataset_keys={"context"})
 
@@ -1060,131 +1071,54 @@ def build_native_filters(all_chart_ids, dataset_ids, chart_catalog):
             ],
             device_scope,
         ),
-        # v1: four controls on the v1 tab.
         make_filter(
-            "NATIVE_FILTER-proxy-v1-event",
-            "v1 Target Event",
+            "NATIVE_FILTER-proxy-target-event",
+            "Target Event",
             [
                 target("candidates", "target_event_type"),
                 target("candidate_summary", "target_event_type"),
+                target("candidates_v2", "target_event_type"),
+                target("candidates_v3", "target_event_type"),
+                target("concordance_enrichment", "target_event_type"),
             ],
-            v1_event_scope,
+            event_scope,
         ),
         make_filter(
-            "NATIVE_FILTER-proxy-v1-source",
-            "v1 Candidate Source",
+            "NATIVE_FILTER-proxy-candidate-source",
+            "Candidate Source",
             [
                 target("candidates", "candidate_source"),
                 target("candidate_summary", "candidate_source"),
-            ],
-            v1_event_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v1-claim",
-            "v1 Claim Status",
-            [
-                target("candidates", "proxy_claim_status"),
-                target("candidate_summary", "proxy_claim_status"),
-            ],
-            v1_event_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v1-evidence",
-            "v1 Evidence Class",
-            [target("candidates", "damage_signature_evidence_class")],
-            v1_candidate_scope,
-        ),
-        # v2: source also controls the candidate-boundary gap chart.
-        make_filter(
-            "NATIVE_FILTER-proxy-v2-event",
-            "v2 Target Event",
-            [target("candidates_v2", "target_event_type")],
-            v2_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v2-source",
-            "v2 Candidate Source",
-            [
                 target("candidates_v2", "candidate_source"),
                 target("candidate_boundary", "source"),
-            ],
-            v2_source_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v2-scope",
-            "v2 Match Scope",
-            [target("candidates_v2", "match_scope")],
-            v2_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v2-claim",
-            "v2 Claim Status",
-            [target("candidates_v2", "proxy_claim_status")],
-            v2_scope,
-        ),
-        # v3: three controls on the v3 tab.
-        make_filter(
-            "NATIVE_FILTER-proxy-v3-event",
-            "v3 Target Event",
-            [target("candidates_v3", "target_event_type")],
-            v3_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v3-source",
-            "v3 Candidate Source",
-            [target("candidates_v3", "candidate_source")],
-            v3_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-v3-scope",
-            "v3 Match Scope",
-            [target("candidates_v3", "match_scope")],
-            v3_scope,
-        ),
-        # Concordance filters deliberately target all three datasets used by
-        # the tab: the v1 queue, v2 queues, and enrichment/conflict views.
-        make_filter(
-            "NATIVE_FILTER-proxy-concordance-event",
-            "Review Target Event",
-            [
-                target("candidates", "target_event_type"),
-                target("candidates_v2", "target_event_type"),
-                target("concordance_enrichment", "target_event_type"),
-            ],
-            curation_scope,
-        ),
-        make_filter(
-            "NATIVE_FILTER-proxy-concordance-source",
-            "Review Candidate Source",
-            [
-                target("candidates", "candidate_source"),
-                target("candidates_v2", "candidate_source"),
+                target("candidates_v3", "candidate_source"),
                 target("concordance_enrichment", "v2_pick_source"),
             ],
-            curation_scope,
+            source_scope,
         ),
         make_filter(
-            "NATIVE_FILTER-proxy-concordance-scope",
-            "Review Match Scope",
+            "NATIVE_FILTER-proxy-match-scope",
+            "Match Scope",
             [
                 target("candidates", "match_scope"),
+                target("candidate_summary", "match_scope"),
                 target("candidates_v2", "match_scope"),
+                target("candidates_v3", "match_scope"),
                 target("concordance_enrichment", "v2_match_scope"),
             ],
-            curation_scope,
+            match_scope_scope,
         ),
         make_filter(
-            "NATIVE_FILTER-proxy-concordance-claim",
-            "Review Claim Status",
+            "NATIVE_FILTER-proxy-claim-status",
+            "Claim Status",
             [
-                target("candidates", "proxy_claim_status"),
                 target("candidates_v2", "proxy_claim_status"),
                 target("concordance_enrichment", "v2_proxy_claim_status"),
             ],
-            curation_scope,
+            claim_scope,
         ),
-        # Physics context: three controls. LET remains available in chart hover
-        # and Raw/QA without consuming another dashboard-level filter.
+        # Physics & Raw: three controls, scoped to the `context` dataset (the
+        # merged-in Raw tables that read `context` pick these up for free).
         make_filter(
             "NATIVE_FILTER-proxy-context-source",
             "Context Source",
@@ -1225,57 +1159,39 @@ def build_chart_defs(dataset_ids):
         "device_families_with_irradiation_post_iv_overlap",
         "candidate_device_types",
     ]
+    # 2026-07-22 redesign: trimmed to the columns that carry a decision or
+    # verdict; the dropped fields (uid_uis_waveform_files count,
+    # irradiation-events-with-overlap subtotal) remain queryable from the
+    # view directly and are not needed to read the gate/blocker verdict itself.
     readiness_cols = [
         "device_type_label",
         "proxy_readiness_status",
         "gate_zero_candidate",
         "sc_waveform_files",
-        "uid_uis_waveform_files",
         "irradiation_events",
         "electrical_proxy_waveform_plus_post_iv_files",
-        "irradiation_events_with_waveform_plus_post_iv",
         "comparable_damage_axis_count",
-    ]
-    next_measurement_cols = [
-        "planning_rank",
-        "plan_action_type",
-        "measurement_device_type",
-        "measurement_plan",
-        "affected_target_count",
-        "expected_unlock",
     ]
     experiment_plan_cols = [
         "planning_rank",
         "planning_priority_tier",
         "plan_action_type",
         "measurement_device_type",
-        "measurement_plan",
         "affected_target_count",
         "expected_unlock",
-        "planning_rationale",
     ]
+    # Trimmed from 22 to the cohort identity + outcome columns; the per-status
+    # top-event subtotals and the three other median-distance variants remain
+    # in the view for drill-through and the CSV export.
     summary_cols = [
         "target_match_tier",
         "match_scope",
         "candidate_source",
         "target_event_type",
-        "mechanism_match_class",
         "candidate_status",
-        "replacement_confidence",
         "proxy_claim_status",
-        "proxy_claim_basis",
         "top_target_events",
         "candidate_device_type_count",
-        "validation_candidate_top_events",
-        "curation_candidate_top_events",
-        "screening_only_top_events",
-        "blocked_top_events",
-        "collapse_only_signature_top_events",
-        "collapse_bias_signature_top_events",
-        "full_signature_top_events",
-        "median_combined_screening_distance",
-        "median_waveform_distance",
-        "median_damage_distance",
         "median_damage_signature_distance",
     ]
     censored_cols = [
@@ -1286,22 +1202,21 @@ def build_chart_defs(dataset_ids):
         "top_target_events",
         "candidate_device_type_count",
     ]
+    # Trimmed from 15 to the identity + verdict columns; every row here is
+    # already rank 1 (see the waveform_rank filter below), so the rank column
+    # itself is redundant on screen. candidate_device_label,
+    # candidate_stress_condition_label, best_damage_distance, and
+    # proxy_claim_blockers remain in the view for drill-through.
     candidate_cols = [
         "target_stress_record_key",
         "candidate_stress_record_key",
-        "candidate_rank",
         "device_type",
         "target_event_type",
         "candidate_source",
-        "candidate_device_label",
-        "candidate_stress_condition_label",
         "match_scope",
-        "candidate_status",
         "proxy_claim_status",
         "damage_signature_evidence_class",
-        "damage_signature_distance",
-        "best_damage_distance",
-        "proxy_claim_blockers",
+        "signature_axis_distance",
     ]
     decision_safe_cols = [
         "target_stress_record_key",
@@ -1590,7 +1505,9 @@ def build_chart_defs(dataset_ids):
     # blockers beside the numeric ratios/classes (Phase-5 acceptance: no scalar
     # without its evidence class + blockers).  Target vs candidate severity stay
     # in separate columns (separation invariant #1).
-    v2_cols = [
+    # Full 40-column detail, kept only for the forensic "Candidate Pool"
+    # dump (row_limit 2000, Physics & Raw tab).
+    v2_cols_full = [
         "target_stress_record_key",
         "candidate_stress_record_key",
         "device_type",
@@ -1632,10 +1549,30 @@ def build_chart_defs(dataset_ids):
         "proxy_claim_summary",
         "energy_v2_notes",
     ]
+    # Trimmed to 11 for the two decision/curation surfaces (v2 Rank-1
+    # Mechanistic Candidate, v2 Claim Review Queue): identity, verdict,
+    # the two overlap-class axes, truth status, and blockers. Every other
+    # v2_cols_full field stays queryable via the Candidate Pool table and the
+    # v2 CSV export (export_proxy_candidate_energy_v2_csv.py).
+    v2_cols = [
+        "target_stress_record_key",
+        "candidate_stress_record_key",
+        "device_type",
+        "target_event_type",
+        "match_scope",
+        "mechanistic_energy_candidate_status",
+        "proxy_claim_status",
+        "candidate_failure_fraction_overlap_class",
+        "terminal_energy_overlap_class",
+        "truth_validation_status",
+        "energy_v2_blockers",
+    ]
     v2_rank1_filter = sql_filter("mechanistic_energy_candidate_rank = 1")
     v3_rank1_filter = sql_filter("combined_rank = 1")
 
-    v3_cols = [
+    # Full 26-column detail, kept only for the forensic "Candidate Pool"
+    # dump (Physics & Raw tab).
+    v3_cols_full = [
         "target_stress_record_key",
         "candidate_stress_record_key",
         "device_type",
@@ -1663,34 +1600,42 @@ def build_chart_defs(dataset_ids):
         "energy_v2_blockers",
         "energy_v2_notes",
     ]
+    # Trimmed to 10 for the v3 Rank-1 Combined Candidate decision table;
+    # the component-share/delta breakdown lives in the interactive viewer's
+    # v3 vector explorer (see the Physics & Raw tab markdown link) and the
+    # full column set stays available via the Candidate Pool table.
+    v3_cols = [
+        "target_stress_record_key",
+        "candidate_stress_record_key",
+        "device_type",
+        "target_event_type",
+        "candidate_source",
+        "match_scope",
+        "waveform_rank",
+        "energy_rank",
+        "combined_rank",
+        "combined_vector_distance",
+    ]
     combined_setting_cols = [
         "setting_name", "description", "signature_axis_weight",
         "duration_weight", "log_energy_weight", "failure_fraction_weight",
         "post_iv_damage_weight", "regime_path_weight", "coverage_gap_weight",
     ]
+    # Trimmed from 23 to the fields needed to triage a conflict row: which
+    # target, which conflict, each method's pick, and enrichment/truth
+    # status. same_device_source_conflict, c2m0080120d_avalanche_vs_sc_conflict,
+    # the raw pick keys, and the two overlap-class columns stay in the view
+    # for drill-through and the concordance CSV export.
     concordance_cols = [
         "conflict_priority",
-        "same_device_source_conflict",
-        "c2m0080120d_avalanche_vs_sc_conflict",
-        "source_conflict",
         "target_stress_record_key",
         "device_type",
         "target_event_type",
         "v2_match_scope",
         "v2_pick_source",
-        "v2_pick_key",
-        "v2_candidate_status",
-        "v2_proxy_claim_status",
         "v1_signature_pick_source",
-        "v1_signature_pick_key",
-        "v1_signature_proxy_claim_status",
-        "v1_signature_claim_quality",
-        "v2_pick_dssig_rank",
-        "dssig_pool_size",
         "v2_pick_dssig_percentile",
         "enrichment_band",
-        "candidate_failure_fraction_overlap_class",
-        "terminal_energy_overlap_class",
         "truth_validation_status",
     ]
     candidate_boundary_cols = [
@@ -1703,6 +1648,9 @@ def build_chart_defs(dataset_ids):
     ]
 
     defs = [
+        # 2026-07-22 redesign: one equal-width, equal-height KPI row (6 tiles
+        # x width 2 = 12) instead of a 4-KPI row followed by a 5th tile
+        # orphaned alone in a mostly-empty row.
         (
             "Proxy Readiness - Gate Zero Candidate Families KPI",
             dataset_ids["gate_zero"],
@@ -1713,35 +1661,80 @@ def build_chart_defs(dataset_ids):
                 "of 3 required to pass gate-zero",
                 number_format=",d",
             ),
-            4,
+            2,
             16,
             TAB_READINESS,
             None,
+        ),
+        (
+            "Proxy Readiness - v1 Targets Ranked",
+            dataset_ids["candidates"],
+            "big_number_total",
+            big_number_params(
+                "v1 ranked targets",
+                "COUNT(DISTINCT CASE WHEN candidate_rank = 1 THEN target_stress_record_key END)",
+                "waveform_rank population; includes energy-censored targets",
+                number_format=",d",
+            ),
+            2, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - v2 Targets Ranked",
+            dataset_ids["candidates_v2"],
+            "big_number_total",
+            big_number_params(
+                "v2 ranked targets",
+                "COUNT(DISTINCT CASE WHEN mechanistic_energy_candidate_rank = 1 THEN target_stress_record_key END)",
+                "energy-rankable targets; censored targets are v1-only",
+                number_format=",d",
+            ),
+            2, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - v3 Targets Ranked",
+            dataset_ids["candidates_v3"],
+            "big_number_total",
+            big_number_params(
+                "v3 ranked targets",
+                "COUNT(DISTINCT CASE WHEN combined_rank = 1 THEN target_stress_record_key END)",
+                "combined vector over v2 top-10 pool",
+                number_format=",d",
+            ),
+            2, 16, TAB_READINESS, None,
+        ),
+        (
+            "Proxy Readiness - Concordance Median Enrichment Percentile",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "median enrichment percentile",
+                "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY v2_pick_dssig_percentile)",
+                "v2 pick location in v1 signature ordering; lower is better",
+                number_format=".1f",
+            ),
+            2, 16, TAB_READINESS, "concordance",
+        ),
+        (
+            "Proxy Readiness - Curation Queue Depth",
+            dataset_ids["concordance_enrichment"],
+            "big_number_total",
+            big_number_params(
+                "curation queue depth",
+                "COUNT(*) FILTER (WHERE source_conflict OR v2_proxy_claim_status IN ('validation_candidate', 'curation_candidate'))",
+                "targets needing truth-label adjudication or conflict review",
+                number_format=",d",
+            ),
+            2, 16, TAB_READINESS, "concordance",
         ),
         (
             "Proxy Readiness - Gate Zero Status",
             dataset_ids["gate_zero"],
             "table",
             table_params(gate_cols, row_limit=1),
-            8,
+            12,
             16,
             TAB_READINESS,
             None,
-        ),
-        (
-            "Proxy Readiness - Next Measurements (Top 3)",
-            dataset_ids["experiment_plan"],
-            "table",
-            table_params(
-                next_measurement_cols,
-                row_limit=3,
-                order_by=[["planning_rank", True]],
-                filters=[sql_filter("planning_rank <= 3")],
-            ),
-            12,
-            22,
-            TAB_READINESS,
-            "planning",
         ),
         (
             "Proxy Readiness - Experiment Planning Queue",
@@ -1776,7 +1769,7 @@ def build_chart_defs(dataset_ids):
             "readiness",
         ),
         (
-            "Proxy Readiness - Candidate Summary",
+            "Proxy Readiness - v1 Waveform Candidate Summary",
             dataset_ids["candidate_summary"],
             "table",
             table_params(
@@ -1825,20 +1818,17 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
-            "Proxy Readiness - Best Proxy Candidates",
+            "Proxy Readiness - Best v1 Waveform Candidates",
             dataset_ids["candidates"],
             "table",
             table_params(
                 candidate_cols,
                 row_limit=1000,
-                order_by=[
-                    ["candidate_status_priority", True],
-                    ["combined_screening_distance", True],
-                ],
-                filters=[top_rank_filter],
+                order_by=[["signature_axis_distance", True]],
+                filters=[sql_filter("waveform_rank = 1")],
             ),
             12,
-            52,
+            40,
             TAB_CANDIDATE,
             "candidate",
         ),
@@ -1858,51 +1848,38 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             48,
-            TAB_CANDIDATE,
+            # 2026-07-23: demoted off Concordance to keep that tab visual-first;
+            # the wide curation queues live here as forensic drill-through.
+            TAB_PHYSICS,
             "candidate",
         ),
         (
-            "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Damage Signature Mismatch",
+            "Proxy Readiness - Signature Axis Distance by Evidence Class",
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
-            scatter_params(
-                "log_energy_delta_dex",
-                "damage_signature_distance",
-                "|log10(proxy terminal / target terminal energy)|",
-                "Damage signature mismatch distance",
-                groupby=[
-                    "candidate_source",
-                    "candidate_status",
-                    "damage_evidence_tier",
-                ],
-                filters=[top_rank_filter, decision_status_filter],
-                show_legend=True,
-                description=ENERGY_DAMAGE_SIGNATURE_DECISION_DESCRIPTION,
-            ),
-            12,
-            54,
-            TAB_CANDIDATE,
-            "candidate",
-        ),
-        (
-            "Proxy Readiness - Damage Signature Distance by Evidence Class",
-            dataset_ids["candidates"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "damage_signature_evidence_tier",
-                "damage_signature_distance",
-                "Evidence tier (1=full ... 4=collapse-only; lower is richer)",
-                "Damage signature mismatch distance",
-                groupby=[
-                    "candidate_source",
-                    "damage_signature_evidence_class",
-                    "target_stress_record_key",
-                    "candidate_stress_record_key",
-                ],
-                filters=[top_rank_filter],
-                show_legend=True,
-                description=EVIDENCE_CLASS_DISTANCE_DESCRIPTION,
-            ),
+            {
+                **scatter_params(
+                    "damage_signature_evidence_tier",
+                    "signature_axis_distance",
+                    "Evidence tier (1=full ... 4=collapse-only; lower is richer)",
+                    "signature_axis_distance",
+                    groupby=[
+                        "candidate_source",
+                        "damage_signature_evidence_class",
+                        "target_stress_record_key",
+                        "candidate_stress_record_key",
+                    ],
+                    filters=[top_rank_filter],
+                    show_legend=True,
+                ),
+                "y_axis_title": "signature_axis_distance (energy-free)",
+                "_description": (
+                    "Distribution by evidence tier using signature_axis_distance, "
+                    "the prior-free and energy-free v1 comparator. Superset renders "
+                    "this as a jittered scatter surrogate for the planned strip/box "
+                    "form."
+                ),
+            },
             12,
             54,
             TAB_CANDIDATE,
@@ -1913,9 +1890,9 @@ def build_chart_defs(dataset_ids):
             dataset_ids["candidates"],
             "echarts_timeseries_scatter",
             scatter_params(
-                "waveform_distance",
+                "waveform_only_distance",
                 "best_damage_distance",
-                "Best proxy waveform distance",
+                "waveform_only_distance",
                 "Best damage distance",
                 groupby=[
                     "candidate_source",
@@ -1932,79 +1909,7 @@ def build_chart_defs(dataset_ids):
             "candidate",
         ),
         (
-            "Proxy Readiness - Candidate Pairs: Energy vs Damage Signature (All Statuses, Diagnostic)",
-            dataset_ids["candidates"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "log_energy_delta_dex",
-                "damage_signature_distance",
-                "|log10(proxy terminal / target terminal energy)|",
-                "Damage signature mismatch distance",
-                groupby=[
-                    "candidate_source",
-                    "candidate_status",
-                    "damage_evidence_tier",
-                ],
-                filters=[top_rank_filter],
-                show_legend=True,
-                description=ENERGY_DAMAGE_SIGNATURE_ALL_DESCRIPTION,
-            ),
-            12,
-            54,
-            TAB_DIAGNOSTICS,
-            "candidate",
-        ),
-        (
-            "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch",
-            dataset_ids["candidates"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "damage_signature_distance",
-                "energy_density_ratio",
-                "Damage signature mismatch distance",
-                "Proxy terminal-density / irradiation deposited-density (log)",
-                groupby=[
-                    "candidate_source",
-                    "candidate_status",
-                    "target_match_tier",
-                    "mechanism_match_class",
-                ],
-                filters=[top_rank_filter],
-                show_legend=True,
-                log_y=True,
-            ),
-            12,
-            54,
-            TAB_DIAGNOSTICS,
-            "candidate",
-        ),
-        (
-            "Proxy Readiness - Irradiation Depletion Stored Energy vs Blocking Bias",
-            dataset_ids["context"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "normalized_vds",
-                "se_depletion_stored_energy_j_cm2 * 1000000.0",
-                "Observed |VDS| / device voltage rating",
-                "Stored depletion energy (uJ/cm2; modeled)",
-                groupby=["event_type"],
-                filters=[
-                    sql_filter("source = 'irradiation'"),
-                    sql_filter("se_depletion_stored_energy_j_cm2 IS NOT NULL"),
-                ],
-                show_legend=True,
-                annotation_layers=DEPLETION_STORED_ENERGY_REFERENCE_LINES,
-                x_axis_bounds=DEPLETION_X_BOUNDS,
-                y_axis_bounds=[0.0, None],
-                description=DEPLETION_STORED_ENERGY_DESCRIPTION,
-            ),
-            12,
-            130,
-            TAB_DIAGNOSTICS,
-            "context",
-        ),
-        (
-            "Proxy Readiness - Irradiation Depletion Ratio to SEB vs Blocking Bias",
+            "Proxy Readiness - Irradiation Depletion Threshold Ratio vs Blocking Bias",
             dataset_ids["context"],
             "echarts_timeseries_scatter",
             scatter_params(
@@ -2021,30 +1926,8 @@ def build_chart_defs(dataset_ids):
                 description=DEPLETION_RATIO_DESCRIPTION,
             ),
             6,
-            75,
-            TAB_DIAGNOSTICS,
-            "context",
-        ),
-        (
-            "Proxy Readiness - Irradiation Depletion Ratio to SELC vs Blocking Bias",
-            dataset_ids["context"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "normalized_vds",
-                "se_depletion_ratio_to_selc",
-                "Observed |VDS| / device voltage rating",
-                "Stored depletion energy / SELC threshold (1.0 = threshold)",
-                groupby=["event_type"],
-                filters=[sql_filter("source = 'irradiation'")],
-                show_legend=True,
-                annotation_layers=DEPLETION_RATIO_REFERENCE_LINE,
-                x_axis_bounds=DEPLETION_X_BOUNDS,
-                y_axis_bounds=[0.0, None],
-                description=DEPLETION_RATIO_DESCRIPTION,
-            ),
-            6,
-            75,
-            TAB_DIAGNOSTICS,
+            50,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2069,7 +1952,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             46,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2088,7 +1971,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             46,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2111,7 +1994,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             46,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2134,32 +2017,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             46,
-            TAB_DIAGNOSTICS,
-            "context",
-        ),
-        (
-            "Proxy Readiness - Irradiation LET-Based Ionizing Deposited Energy vs Blocking Bias",
-            dataset_ids["context"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "normalized_vds",
-                "radiation_deposited_energy_j",
-                "Observed |VDS| / device voltage rating",
-                "LET-based ionizing deposited energy (J)",
-                groupby=["let_bin"],
-                filters=[
-                    sql_filter("source = 'irradiation'"),
-                    sql_filter("event_record_type = 'detected_single_event'"),
-                    sql_filter("radiation_deposited_energy_j > 0.0"),
-                ],
-                show_legend=True,
-                log_y=True,
-                x_axis_bounds=[0.0, 1.0],
-                description=IONIZING_DEPOSITED_ENERGY_DESCRIPTION,
-            ),
-            12,
-            44,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2187,7 +2045,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             44,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2214,34 +2072,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             60,
-            TAB_DIAGNOSTICS,
-            "context",
-        ),
-        (
-            "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
-            dataset_ids["context"],
-            "echarts_timeseries_scatter",
-            scatter_params(
-                "normalized_vds",
-                "effective_stress_time_s",
-                "Observed |VDS| / device voltage rating (1.0 = rating)",
-                "Effective cumulative stress time (s, log; repetitive sequences scaled by pulse count)",
-                groupby=["figure1_regime_family"],
-                filters=[
-                    sql_filter(AVALANCHE_NVDS_ARTIFACT_EXCLUSION),
-                ],
-                show_legend=True,
-                log_y=True,
-                annotation_layers=FIGURE1B_REFERENCE_LINES,
-                x_axis_bounds=FIGURE1B_X_BOUNDS,
-                y_axis_bounds=FIGURE1B_Y_BOUNDS,
-                y_axis_format=SCI_AXIS_FORMAT,
-                zoomable=False,
-                description=FIGURE1B_LANDSCAPE_DESCRIPTION,
-            ),
-            12,
-            60,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2270,7 +2101,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             44,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "context",
         ),
         (
@@ -2285,7 +2116,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             38,
-            TAB_DIAGNOSTICS,
+            TAB_PHYSICS,
             "device_only",
         ),
         (
@@ -2303,7 +2134,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             60,
-            TAB_RAW,
+            TAB_PHYSICS,
             None,
         ),
         (
@@ -2317,7 +2148,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             58,
-            TAB_RAW,
+            TAB_PHYSICS,
             None,
         ),
         (
@@ -2331,7 +2162,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             48,
-            TAB_RAW,
+            TAB_PHYSICS,
             None,
         ),
         (
@@ -2350,7 +2181,7 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             48,
-            TAB_RAW,
+            TAB_PHYSICS,
             None,
         ),
         (
@@ -2466,7 +2297,8 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             52,
-            TAB_MECHANISTIC,
+            # 2026-07-23: demoted off Concordance (visual-first) to Raw.
+            TAB_PHYSICS,
             "candidate_v2",
         ),
         (
@@ -2474,7 +2306,7 @@ def build_chart_defs(dataset_ids):
             dataset_ids["candidates_v2"],
             "table",
             table_params(
-                v2_cols,
+                v2_cols_full,
                 row_limit=2000,
                 order_by=[
                     ["target_stress_record_key", True],
@@ -2483,140 +2315,17 @@ def build_chart_defs(dataset_ids):
             ),
             12,
             56,
-            TAB_MECHANISTIC,
+            TAB_PHYSICS,
             "candidate_v2",
         ),
     ]
 
-    killed = {
-        "Proxy Readiness - Next Measurements (Top 3)",
-        "Proxy Readiness - Candidate Pairs: Energy Mismatch vs Damage Signature Mismatch",
-        "Proxy Readiness - Candidate Pairs: Energy vs Damage Signature (All Statuses, Diagnostic)",
-        "Proxy Readiness - Candidate Pairs: Energy Density Ratio vs Damage Signature Mismatch",
-        "Proxy Readiness - Irradiation Depletion Stored Energy vs Blocking Bias",
-        "Proxy Readiness - Irradiation Depletion Ratio to SELC vs Blocking Bias",
-        "Proxy Readiness - Irradiation LET-Based Ionizing Deposited Energy vs Blocking Bias",
-        "Proxy Readiness - Figure 1(b): Effective Stress-Time Landscape",
-    }
-    moved_tabs = {
-        "Proxy Readiness - Decision-Safe Curation Queue": TAB_CONCORDANCE,
-        "Proxy Readiness - v2 Claim Review Queue": TAB_CONCORDANCE,
-    }
-    renamed = {
-        "Proxy Readiness - Candidate Summary": "Proxy Readiness - v1 Waveform Candidate Summary",
-        "Proxy Readiness - Best Proxy Candidates": "Proxy Readiness - Best v1 Waveform Candidates",
-        "Proxy Readiness - Irradiation Depletion Ratio to SEB vs Blocking Bias":
-            "Proxy Readiness - Irradiation Depletion Threshold Ratio vs Blocking Bias",
-    }
-    out = []
-    for item in defs:
-        name, ds_id, viz_type, params, width, height, tab, group = item
-        if name in killed:
-            continue
-        original_name = name
-        if original_name == "Proxy Readiness - Best Proxy Candidates":
-            cols = list(params.get("all_columns", []))
-            replacements = {
-                "candidate_rank": "waveform_rank",
-                "waveform_distance": "waveform_only_distance",
-                "damage_signature_distance": "signature_axis_distance",
-            }
-            params["all_columns"] = [replacements.get(c, c) for c in cols]
-            params["order_by_cols"] = [
-                json.dumps(["waveform_rank", True]),
-                json.dumps(["signature_axis_distance", True]),
-            ]
-            params["adhoc_filters"] = [sql_filter("waveform_rank = 1")]
-        elif original_name == "Proxy Readiness - Damage Signature Distance by Evidence Class":
-            params["metrics"] = [metric(
-                "signature_axis_distance",
-                "AVG(signature_axis_distance)",
-            )]
-            params["adhoc_filters"] = [
-                sql_filter("damage_signature_evidence_tier IS NOT NULL AND signature_axis_distance IS NOT NULL"),
-                top_rank_filter,
-            ]
-            params["y_axis_title"] = "signature_axis_distance (energy-free)"
-            params["_description"] = (
-                "Distribution by evidence tier using signature_axis_distance, "
-                "the prior-free and energy-free v1 comparator. Superset renders "
-                "this as a jittered scatter surrogate for the planned strip/box form."
-            )
-        elif original_name == "Proxy Readiness - Candidate Pairs: Waveform vs Damage Distance":
-            params["x_axis"] = "waveform_only_distance"
-            params["adhoc_filters"] = [
-                sql_filter("waveform_only_distance IS NOT NULL AND best_damage_distance IS NOT NULL"),
-                top_rank_filter,
-            ]
-            params["x_axis_title"] = "waveform_only_distance"
-            params["y_axis_title"] = "best_damage_distance"
-        name = renamed.get(name, name)
-        if original_name == "Proxy Readiness - Damage Signature Distance by Evidence Class":
-            name = "Proxy Readiness - Signature Axis Distance by Evidence Class"
-        tab = moved_tabs.get(item[0], tab)
-        out.append((name, ds_id, viz_type, params, width, height, tab, group))
+    # 2026-07-22 redesign: every chart above already carries its deployed
+    # name/tab/columns directly (no post-hoc kill/move/rename pass) so this
+    # list is the actual deployed set, not an intermediate draft of it.
+    out = list(defs)
 
     out.extend([
-        (
-            "Proxy Readiness - v1 Targets Ranked",
-            dataset_ids["candidates"],
-            "big_number_total",
-            big_number_params(
-                "v1 ranked targets",
-                "COUNT(DISTINCT CASE WHEN candidate_rank = 1 THEN target_stress_record_key END)",
-                "waveform_rank population; includes energy-censored targets",
-                number_format=",d",
-            ),
-            3, 16, TAB_READINESS, None,
-        ),
-        (
-            "Proxy Readiness - v2 Targets Ranked",
-            dataset_ids["candidates_v2"],
-            "big_number_total",
-            big_number_params(
-                "v2 ranked targets",
-                "COUNT(DISTINCT CASE WHEN mechanistic_energy_candidate_rank = 1 THEN target_stress_record_key END)",
-                "energy-rankable targets; censored targets are v1-only",
-                number_format=",d",
-            ),
-            3, 16, TAB_READINESS, None,
-        ),
-        (
-            "Proxy Readiness - v3 Targets Ranked",
-            dataset_ids["candidates_v3"],
-            "big_number_total",
-            big_number_params(
-                "v3 ranked targets",
-                "COUNT(DISTINCT CASE WHEN combined_rank = 1 THEN target_stress_record_key END)",
-                "combined vector over v2 top-10 pool",
-                number_format=",d",
-            ),
-            3, 16, TAB_READINESS, None,
-        ),
-        (
-            "Proxy Readiness - Concordance Median Enrichment Percentile",
-            dataset_ids["concordance_enrichment"],
-            "big_number_total",
-            big_number_params(
-                "median enrichment percentile",
-                "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY v2_pick_dssig_percentile)",
-                "v2 pick location in v1 signature ordering; lower is better",
-                number_format=".1f",
-            ),
-            3, 16, TAB_READINESS, "concordance",
-        ),
-        (
-            "Proxy Readiness - Curation Queue Depth",
-            dataset_ids["concordance_enrichment"],
-            "big_number_total",
-            big_number_params(
-                "curation queue depth",
-                "COUNT(*) FILTER (WHERE source_conflict OR v2_proxy_claim_status IN ('validation_candidate', 'curation_candidate'))",
-                "targets needing truth-label adjudication or conflict review",
-                number_format=",d",
-            ),
-            3, 16, TAB_READINESS, "concordance",
-        ),
         (
             "Proxy Readiness - v2 Boundary Coverage",
             dataset_ids["candidates_v2"],
@@ -2668,10 +2377,10 @@ def build_chart_defs(dataset_ids):
             dataset_ids["candidates_v3"],
             "table",
             table_params(
-                v3_cols, row_limit=2500,
+                v3_cols_full, row_limit=2500,
                 order_by=[["target_stress_record_key", True], ["combined_rank", True]],
             ),
-            12, 56, TAB_RAW, None,
+            12, 56, TAB_PHYSICS, None,
         ),
         (
             "Proxy Readiness - Concordance Best-Decile Share",
@@ -2720,6 +2429,55 @@ def build_chart_defs(dataset_ids):
                 number_format=",d",
             ),
             3, 16, TAB_CONCORDANCE, "concordance",
+        ),
+        (
+            # 2026-07-23: visual-first centerpiece. One point per target's v2
+            # energy-pick, both axes 819/819 populated (SQL-verified; the
+            # union-view v1%xv2% map was rejected because v2_rank_percentile is
+            # only ~53% populated and silently drops the conflicts). Single
+            # groupby => clean palette colours by source (sc/avalanche); the
+            # trade-off is per-point record identity, which the Method Conflict
+            # Browser below and the interactive viewer carry instead.
+            "Proxy Readiness - Method-Agreement Map",
+            dataset_ids["concordance_enrichment"],
+            "echarts_timeseries_scatter",
+            scatter_params(
+                "v2_pick_dssig_percentile",
+                "v2_pick_signature_axis_distance",
+                "v2 pick's percentile in v1 waveform ordering (left = methods agree)",
+                "v2 pick signature distance (low = close waveform match)",
+                groupby=["v2_pick_source"],
+                show_legend=True,
+                x_axis_bounds=[0.0, 100.0],
+                y_axis_bounds=[0.0, None],
+                description=(
+                    "Each point is one target's v2 energy-ranked pick (819 "
+                    "targets, both axes fully populated). X: where that pick "
+                    "sits in v1's full energy-free waveform ordering -- far "
+                    "left means the two independent methods agree it is a top "
+                    "match. Y: the pick's own signature distance -- low means a "
+                    "close waveform match. BOTTOM-LEFT = strong candidates "
+                    "(both methods rank it high). FAR RIGHT = the methods "
+                    "disagree; those are the curation targets, listed by record "
+                    "in the Method Conflict Browser below. "
+                    "READING THE Y-AXIS: distance is evidence-quantized, not "
+                    "continuous. Colour is the proxy source, and it doubles as "
+                    "an evidence-richness read: sc picks carry collapse+bias "
+                    "signatures (richer) and form the genuine low-distance "
+                    "cluster bottom-left; avalanche picks carry collapse-only "
+                    "signatures (fewer axes), so their distance snaps to a few "
+                    "discrete levels -- the horizontal stripe near ~3.9 is those "
+                    "evidence-poor picks saturating, NOT 'moderately far "
+                    "matches'. Only 19 of 819 v2 picks are sc; the rest are "
+                    "avalanche. Hover shows source and the two values. For "
+                    "per-record identity of any point, use the interactive "
+                    "damage-signature viewer linked above."
+                ),
+            ),
+            12,
+            56,
+            TAB_CONCORDANCE,
+            "concordance",
         ),
         (
             "Proxy Readiness - Enrichment Distribution by Decile",

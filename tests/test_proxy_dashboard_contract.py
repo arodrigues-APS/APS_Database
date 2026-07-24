@@ -42,3 +42,51 @@ def test_proxy_filter_targets_and_scopes_match_the_deployed_catalog():
             dataset_key = dataset_key_by_id[target["datasetId"]]
             column = target["column"]["name"]
             assert column in FILTER_TARGET_COLUMNS[dataset_key]
+
+
+def test_native_filter_count_stays_small():
+    """2026-07-22 redesign: 19 filters (a private Event/Source/Scope/Claim
+    quadruplet per v1/v2/v3/Review tab) collapsed to 8 shared ones. Cap at 10
+    so a future per-tab filter can't silently re-accumulate back toward 19."""
+    _dataset_ids, _definitions, _chart_ids, _catalog, filters = (
+        _dashboard_contract()
+    )
+    assert len(filters) <= 10
+
+
+# Forensic/export tables and top-N candidate pools are exempt from the
+# decision-table column budget below: they exist for drill-through and CSV
+# export, not on-screen decision reading. destruction_boundary_cols and
+# candidate_boundary_cols(Candidate Destruction Boundary Data Gaps) predate
+# the 2026-07-22 column-shortlist pass and are grandfathered rather than
+# newly trimmed; revisit if they grow further.
+WIDE_TABLE_ALLOWLIST = {
+    "Proxy Readiness - Candidate Evidence Detail",
+    "Proxy Readiness - Stress Test Context",
+    "Proxy Readiness - Event Feature Coverage",
+    "Proxy Readiness - Irradiation Energy Chain Detail",
+    "Proxy Readiness - v2 Candidate Pool (Top 10)",
+    "Proxy Readiness - v3 Candidate Pool (Top 10)",
+    "Proxy Readiness - Decision-Safe Curation Queue",
+    "Proxy Readiness - Candidate Destruction Boundary Data Gaps",
+}
+DECISION_TABLE_COLUMN_BUDGET = 12
+
+
+def test_decision_tables_stay_within_a_column_budget():
+    """2026-07-22 redesign: the pre-redesign dashboard put a 110-column and a
+    91-column raw dump directly on the decision surface. Named shortlists
+    replaced them; this caps every non-exempt table so that regression can't
+    silently return."""
+    _dataset_ids, definitions, _chart_ids, _catalog, _filters = (
+        _dashboard_contract()
+    )
+    for name, _ds_id, viz_type, params, _w, _h, _tab, _group in definitions:
+        if viz_type != "table" or name in WIDE_TABLE_ALLOWLIST:
+            continue
+        columns = params.get("all_columns") or []
+        assert len(columns) <= DECISION_TABLE_COLUMN_BUDGET, (
+            f"{name!r} has {len(columns)} columns "
+            f"(budget {DECISION_TABLE_COLUMN_BUDGET}); trim or add to "
+            "WIDE_TABLE_ALLOWLIST with a reason"
+        )
